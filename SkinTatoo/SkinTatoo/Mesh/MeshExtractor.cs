@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Numerics;
 using Dalamud.Plugin.Services;
 using Meddle.Utils.Export;
@@ -16,14 +15,19 @@ public class MeshExtractor
     private readonly IDataManager dataManager;
     private readonly IPluginLog log;
     private SqPack? sqPack;
-
     public MeshExtractor(IDataManager dataManager, IPluginLog log)
     {
         this.dataManager = dataManager;
         this.log = log;
     }
 
-    private SqPack GetSqPack()
+    public SqPack? GetSqPackInstance()
+    {
+        sqPack ??= CreateSqPack();
+        return sqPack;
+    }
+
+    private SqPack CreateSqPack()
     {
         if (sqPack == null)
         {
@@ -44,22 +48,7 @@ public class MeshExtractor
         // Use Meddle's SqPack reader
         try
         {
-            var pack = GetSqPack();
-
-            // Diagnostic: check file existence with both hash types
-            var exists = pack.FileExists(gamePath, out var hash);
-            DebugServer.AppendLog($"[MeshExtractor] Meddle FileExists={exists}, IndexHash={hash.IndexHash:X16}, Index2Hash={hash.Index2Hash:X16}");
-            DebugServer.AppendLog($"[MeshExtractor] Repositories: {pack.Repositories.Count}");
-            foreach (var repo in pack.Repositories)
-            {
-                var cats = repo.Categories.Where(c => c.Key.category == 4).ToList();
-                DebugServer.AppendLog($"[MeshExtractor] Repo categories with id=4: {cats.Count}");
-                foreach (var (key, cat) in cats)
-                {
-                    DebugServer.AppendLog($"[MeshExtractor]   cat=({key.category},{key.expansion},{key.chunk}), entries={cat.UnifiedIndexEntries.Count}");
-                }
-            }
-
+            var pack = GetSqPackInstance();
             var result = pack.GetFile(gamePath);
             if (result != null)
             {
@@ -68,7 +57,7 @@ public class MeshExtractor
             }
             else
             {
-                DebugServer.AppendLog($"[MeshExtractor] Meddle SqPack: file not found in any repo/category");
+                DebugServer.AppendLog($"[MeshExtractor] Meddle SqPack: file not found");
             }
         }
         catch (Exception ex)
@@ -117,13 +106,11 @@ public class MeshExtractor
         try
         {
             var mdlFile = new MdlFile(mdlBytes);
-            DebugServer.AppendLog($"[MeshExtractor] MdlFile parsed: {mdlFile.Meshes.Length} meshes, {mdlFile.Lods.Length} LODs");
-
             // Use Meddle's Model class to extract vertices properly
             var model = new MeddleModel(gamePath, mdlFile, null);
-            DebugServer.AppendLog($"[MeshExtractor] Model created: {model.Meshes.Count} export meshes");
-
-            return ConvertMeddleModel(model);
+            var meshData = ConvertMeddleModel(model);
+            DebugServer.AppendLog($"[MeshExtractor] Done: {meshData.Vertices.Length} verts, {meshData.TriangleCount} tris");
+            return meshData;
         }
         catch (Exception ex)
         {
@@ -146,7 +133,9 @@ public class MeshExtractor
             {
                 var pos = v.Position ?? Vector3.Zero;
                 var normal = (v.Normals != null && v.Normals.Length > 0) ? v.Normals[0] : Vector3.UnitY;
-                var uv = (v.TexCoords != null && v.TexCoords.Length > 0) ? v.TexCoords[0] : Vector2.Zero;
+                var rawUv = (v.TexCoords != null && v.TexCoords.Length > 0) ? v.TexCoords[0] : Vector2.Zero;
+                // FFXIV UV V is flipped (negative range), normalize to [0,1]
+                var uv = new Vector2(rawUv.X, -rawUv.Y);
 
                 allVertices.Add(new MeshVertex
                 {
@@ -162,13 +151,10 @@ public class MeshExtractor
             }
         }
 
-        var result = new MeshData
+        return new MeshData
         {
             Vertices = allVertices.ToArray(),
             Indices = allIndices.ToArray(),
         };
-
-        DebugServer.AppendLog($"[MeshExtractor] Total: {result.Vertices.Length} verts, {result.TriangleCount} tris");
-        return result;
     }
 }

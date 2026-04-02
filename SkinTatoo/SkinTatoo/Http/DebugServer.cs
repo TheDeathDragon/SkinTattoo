@@ -198,6 +198,7 @@ internal sealed class ApiController : WebApiController
     {
         var body = await HttpContext.GetRequestBodyAsStringAsync();
         string? texPath = null;
+        string? baseDiskPath = null;
 
         if (!string.IsNullOrWhiteSpace(body))
         {
@@ -206,11 +207,15 @@ internal sealed class ApiController : WebApiController
                 var doc = JsonDocument.Parse(body);
                 if (doc.RootElement.TryGetProperty("texturePath", out var tp))
                     texPath = tp.GetString();
+                if (doc.RootElement.TryGetProperty("baseDiskPath", out var bp))
+                    baseDiskPath = bp.GetString();
             }
             catch { }
         }
 
-        var result = _preview.UpdatePreview(_project, texPath);
+        var targets = new PreviewService.TextureTargets(
+            texPath, baseDiskPath, null, null, null, null);
+        var result = _preview.UpdatePreview(_project, targets);
         return new { ok = result != null, outputPath = result };
     }
 
@@ -354,17 +359,14 @@ internal sealed class ApiController : WebApiController
     {
         name                    = l.Name,
         imagePath               = l.ImagePath,
-        position                = new { x = l.Position.X, y = l.Position.Y, z = l.Position.Z },
-        rotation                = new { x = l.Rotation.X, y = l.Rotation.Y, z = l.Rotation.Z },
-        scale                   = new { x = l.Scale.X,    y = l.Scale.Y },
-        depth                   = l.Depth,
+        uvCenter                = new { x = l.UvCenter.X, y = l.UvCenter.Y },
+        uvScale                 = new { x = l.UvScale.X, y = l.UvScale.Y },
+        rotationDeg             = l.RotationDeg,
         opacity                 = l.Opacity,
         blendMode               = l.BlendMode.ToString(),
         isVisible               = l.IsVisible,
         affectsDiffuse          = l.AffectsDiffuse,
-        affectsNormal           = l.AffectsNormal,
-        backfaceCullingThreshold = l.BackfaceCullingThreshold,
-        grazingAngleFade        = l.GrazingAngleFade,
+        affectsMask             = l.AffectsMask,
     };
 
     // Partial-update a layer from a JSON body — only set properties that are present.
@@ -382,17 +384,14 @@ internal sealed class ApiController : WebApiController
         if (root.TryGetProperty("imagePath", out v) && v.ValueKind == JsonValueKind.String)
             layer.ImagePath = v.GetString();
 
-        if (root.TryGetProperty("position", out v))
-            layer.Position = ReadVector3(v, layer.Position);
+        if (root.TryGetProperty("uvCenter", out v))
+            layer.UvCenter = ReadVector2(v, layer.UvCenter);
 
-        if (root.TryGetProperty("rotation", out v))
-            layer.Rotation = ReadVector3(v, layer.Rotation);
+        if (root.TryGetProperty("uvScale", out v))
+            layer.UvScale = ReadVector2(v, layer.UvScale);
 
-        if (root.TryGetProperty("scale", out v))
-            layer.Scale = ReadVector2(v, layer.Scale);
-
-        if (root.TryGetProperty("depth", out v) && v.ValueKind == JsonValueKind.Number)
-            layer.Depth = v.GetSingle();
+        if (root.TryGetProperty("rotationDeg", out v) && v.ValueKind == JsonValueKind.Number)
+            layer.RotationDeg = v.GetSingle();
 
         if (root.TryGetProperty("opacity", out v) && v.ValueKind == JsonValueKind.Number)
             layer.Opacity = v.GetSingle();
@@ -409,23 +408,9 @@ internal sealed class ApiController : WebApiController
         if (root.TryGetProperty("affectsDiffuse", out v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False)
             layer.AffectsDiffuse = v.GetBoolean();
 
-        if (root.TryGetProperty("affectsNormal", out v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False)
-            layer.AffectsNormal = v.GetBoolean();
+        if (root.TryGetProperty("affectsMask", out v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            layer.AffectsMask = v.GetBoolean();
 
-        if (root.TryGetProperty("backfaceCullingThreshold", out v) && v.ValueKind == JsonValueKind.Number)
-            layer.BackfaceCullingThreshold = v.GetSingle();
-
-        if (root.TryGetProperty("grazingAngleFade", out v) && v.ValueKind == JsonValueKind.Number)
-            layer.GrazingAngleFade = v.GetSingle();
-    }
-
-    private static Vector3 ReadVector3(JsonElement el, Vector3 fallback)
-    {
-        if (el.ValueKind != JsonValueKind.Object) return fallback;
-        float x = el.TryGetProperty("x", out var ex) ? ex.GetSingle() : fallback.X;
-        float y = el.TryGetProperty("y", out var ey) ? ey.GetSingle() : fallback.Y;
-        float z = el.TryGetProperty("z", out var ez) ? ez.GetSingle() : fallback.Z;
-        return new Vector3(x, y, z);
     }
 
     private static Vector2 ReadVector2(JsonElement el, Vector2 fallback)

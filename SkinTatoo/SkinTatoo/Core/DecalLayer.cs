@@ -1,4 +1,3 @@
-using System;
 using System.Numerics;
 
 namespace SkinTatoo.Core;
@@ -15,35 +14,22 @@ public class DecalLayer
 {
     public string Name { get; set; } = "New Decal";
     public string? ImagePath { get; set; }
-    public Vector3 Position { get; set; } = Vector3.Zero;
-    public Vector3 Rotation { get; set; } = Vector3.Zero;
-    public Vector2 Scale { get; set; } = Vector2.One;
-    public float Depth { get; set; } = 0.5f;
+
+    // UV-space placement (0-1 range)
+    public Vector2 UvCenter { get; set; } = new(0.5f, 0.5f);
+    public Vector2 UvScale { get; set; } = new(0.2f, 0.2f);
+    public float RotationDeg { get; set; } = 0f;
+
     public float Opacity { get; set; } = 1.0f;
     public BlendMode BlendMode { get; set; } = BlendMode.Normal;
-    public float BackfaceCullingThreshold { get; set; } = 0.1f;
-    public float GrazingAngleFade { get; set; } = 0.3f;
     public bool IsVisible { get; set; } = true;
+
+    // Which texture channels to affect
     public bool AffectsDiffuse { get; set; } = true;
-    public bool AffectsNormal { get; set; } = false;
+    public bool AffectsMask { get; set; } = false;
 
-    public Matrix4x4 GetProjectionMatrix()
-    {
-        var view = Matrix4x4.CreateLookAt(
-            Position,
-            Position + GetForwardDirection(),
-            Vector3.UnitY);
-        var proj = Matrix4x4.CreateOrthographic(Scale.X, Scale.Y, 0, Depth);
-        return view * proj;
-    }
-
-    public Vector3 GetForwardDirection()
-    {
-        var pitch = Rotation.X * (MathF.PI / 180f);
-        var yaw = Rotation.Y * (MathF.PI / 180f);
-        return new Vector3(
-            MathF.Cos(pitch) * MathF.Sin(yaw),
-            MathF.Sin(pitch),
-            MathF.Cos(pitch) * MathF.Cos(yaw));
-    }
+    // Glow/specular override for mask texture (when AffectsMask=true)
+    // These values are written to the mask R/G channels in the decal area
+    public float GlowSpecular { get; set; } = 0.8f;   // Mask R channel (0=matte, 1=mirror)
+    public float GlowSmoothness { get; set; } = 0.8f;  // Mask G channel inverted (0=rough, 1=smooth → stored as 1-roughness)
 }

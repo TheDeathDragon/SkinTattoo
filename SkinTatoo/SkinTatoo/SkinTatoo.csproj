@@ -9,7 +9,6 @@
 
   <ItemGroup>
     <PackageReference Include="StbImageSharp" Version="2.*" />
-    <PackageReference Include="TerraFX.Interop.Windows" Version="10.*" />
     <PackageReference Include="EmbedIO" Version="3.5.2" />
   </ItemGroup>
 
@@ -17,14 +16,5 @@
     <ProjectReference Include="..\..\Penumbra.Api\Penumbra.Api.csproj" />
     <ProjectReference Include="..\..\Lumina\src\Lumina\Lumina.csproj" />
     <ProjectReference Include="..\..\Meddle\Meddle\Meddle.Utils\Meddle.Utils.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <EmbeddedResource Include="Gpu\Shaders\*.hlsl" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Compile Include="..\Mesh\*.cs" />
-    <Compile Include="..\Services\*.cs" />
   </ItemGroup>
 </Project>

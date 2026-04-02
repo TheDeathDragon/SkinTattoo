@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-Dalamud 插件，将 PNG 贴花投影到 FFXIV 角色皮肤上，通过 Penumbra 临时 Mod 实时预览。
+Dalamud 插件，将 PNG 贴花合成到 FFXIV 角色皮肤 UV 贴图上，通过 Penumbra 临时 Mod 实时预览。
 
 ## 构建
 
@@ -24,25 +24,19 @@ SkinTatoo/SkinTatoo/                  # 主项目
   Plugin.cs                           # 入口
   Configuration.cs                    # 持久化配置
   Core/                               # 数据模型 (DecalLayer, DecalProject)
-  Gpu/                                # DX11 计算着色器管线
-    Shaders/*.hlsl                    # 3 个 HLSL 着色器 (投影/合成/膨胀)
-  Mesh/                               # 网格提取与 UV 位置图生成
+  Mesh/                               # 网格提取 (MeshExtractor, MeshData)
   Interop/                            # Penumbra IPC (PenumbraBridge, BodyModDetector)
   Services/                           # PreviewService, TexFileWriter, DecalImageLoader
   Http/                               # EmbedIO HTTP 调试服务器 (localhost:14780)
   Gui/                                # ImGui 窗口 (MainWindow, ConfigWindow)
 ```
 
-也有部分文件在 `SkinTatoo/Mesh/` 和 `SkinTatoo/Services/`（项目上级），通过 csproj 的 `<Compile Include>` 引入。
-
 ## 关键约定
 
-- 命名空间：`SkinTatoo.*`（如 `SkinTatoo.Gpu`, `SkinTatoo.Core`）
+- 命名空间：`SkinTatoo.*`（如 `SkinTatoo.Mesh`, `SkinTatoo.Core`）
 - UI 语言：中文
 - 代码注释：仅在关键处写英文注释
 - 提交信息：不写 Co-Authored-By
-- HLSL 着色器以嵌入资源方式编译，资源名格式 `SkinTatoo.Gpu.Shaders.{name}`
-- GPU 操作使用 TerraFX.Interop.Windows（unsafe 指针），不用 SharpDX
 
 ## 依赖
 
@@ -51,7 +45,6 @@ SkinTatoo/SkinTatoo/                  # 主项目
 | Penumbra.Api (submodule) | Penumbra IPC 类型安全封装 |
 | Lumina | .mdl/.tex 文件解析 |
 | StbImageSharp | 图片加载 |
-| TerraFX.Interop.Windows | DX11 互操作 |
 | EmbedIO | HTTP 调试服务器 |
 
 ## HTTP 调试 API
@@ -71,9 +64,10 @@ SkinTatoo/SkinTatoo/                  # 主项目
 ## 核心管线流程
 
 ```
-PNG 图片 → GPU 投影(ProjectionPass) → 合成(CompositePass) → 膨胀(DilationPass)
-    → GPU 回读 → 写临时 .tex → Penumbra 临时 Mod → 角色重绘
+PNG 图片 → CPU UV 合成 → 写临时 .tex → Penumbra 临时 Mod → 角色重绘
 ```
+
+贴花直接在 UV 空间合成：以 `UvCenter`/`UvScale`/`RotationDeg` 定位，对每个输出纹理像素采样贴花，alpha blend 叠加到基础贴图上。
 
 ## 游戏内测试
 

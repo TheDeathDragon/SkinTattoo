@@ -7,27 +7,35 @@ namespace SkinTatoo.Services;
 public static class TexFileWriter
 {
     private const uint HeaderSize = 80;
-    private const uint TextureFormatR8G8B8A8 = 0x1450;
+    private const uint TextureFormatB8G8R8A8 = 0x1450;
+    private const uint AttributeTextureType2D = 0x00800000;
 
     public static void WriteUncompressed(string path, byte[] rgbaFloatData, int width, int height)
     {
         var pixelCount = width * height;
+        // Output as B8G8R8A8 (FFXIV convention: the 0x1450 format is BGRA order)
         var byteData = new byte[pixelCount * 4];
         var floatSpan = MemoryMarshal.Cast<byte, float>(rgbaFloatData);
 
         for (var i = 0; i < pixelCount; i++)
         {
-            byteData[i * 4 + 0] = FloatToByte(floatSpan[i * 4 + 0]);
-            byteData[i * 4 + 1] = FloatToByte(floatSpan[i * 4 + 1]);
-            byteData[i * 4 + 2] = FloatToByte(floatSpan[i * 4 + 2]);
-            byteData[i * 4 + 3] = FloatToByte(floatSpan[i * 4 + 3]);
+            var r = FloatToByte(floatSpan[i * 4 + 0]);
+            var g = FloatToByte(floatSpan[i * 4 + 1]);
+            var b = FloatToByte(floatSpan[i * 4 + 2]);
+            var a = FloatToByte(floatSpan[i * 4 + 3]);
+            // BGRA order for FFXIV
+            byteData[i * 4 + 0] = b;
+            byteData[i * 4 + 1] = g;
+            byteData[i * 4 + 2] = r;
+            byteData[i * 4 + 3] = a;
         }
 
-        using var fs = File.Create(path);
+        // Use FileShare.Read so game/Penumbra can read while we write
+        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
         using var bw = new BinaryWriter(fs);
 
-        bw.Write(0u);                        // attributes
-        bw.Write(TextureFormatR8G8B8A8);     // format
+        bw.Write(AttributeTextureType2D);    // attributes (TextureType2D)
+        bw.Write(TextureFormatB8G8R8A8);     // format (B8G8R8A8)
         bw.Write((ushort)width);             // width
         bw.Write((ushort)height);            // height
         bw.Write((ushort)1);                 // depth

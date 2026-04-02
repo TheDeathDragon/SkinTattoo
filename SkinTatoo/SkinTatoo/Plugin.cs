@@ -5,7 +5,6 @@ using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using SkinTatoo.Core;
-using SkinTatoo.Gpu;
 using SkinTatoo.Gui;
 using SkinTatoo.Http;
 using SkinTatoo.Interop;
@@ -23,33 +22,31 @@ public sealed class Plugin : IDalamudPlugin
 
     private const string CommandName = "/skintatoo";
 
-    // 配置
     private readonly Configuration config;
 
-    // GPU 层
-    private readonly DxManager dxManager;
-    private readonly ComputeShaderPipeline pipeline;
-    private readonly StagingReadback readback;
-
-    // Interop 层
+    // Interop
     private readonly PenumbraBridge penumbra;
-    private readonly BodyModDetector bodyModDetector;
 
-    // 服务层
+    // Services
     private readonly MeshExtractor meshExtractor;
     private readonly DecalImageLoader imageLoader;
     private readonly PreviewService previewService;
 
-    // HTTP 调试服务
+    // HTTP
     private readonly DebugServer debugServer;
 
-    // 项目数据
+    // Project
     private readonly DecalProject project;
 
     // GUI
     private readonly WindowSystem windowSystem;
     private readonly MainWindow mainWindow;
     private readonly ConfigWindow configWindow;
+    private readonly DebugWindow debugWindow;
+
+    // Auto-save throttle
+    private DateTime lastAutoSave = DateTime.MinValue;
+    private const double AutoSaveIntervalSec = 30.0;
 
     public Plugin(
         IDalamudPluginInterface pluginInterface,
@@ -58,64 +55,86 @@ public sealed class Plugin : IDalamudPlugin
         ITextureProvider textureProvider,
         IPluginLog log)
     {
-        // ── 1. 配置 ────────────────────────────────────────────────────────────
+        // 1. Config
         config = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         config.Initialize(pluginInterface);
 
-        // ── 2. GPU ─────────────────────────────────────────────────────────────
-        dxManager = new DxManager(log);
-        dxManager.InitializeStandaloneDevice();
-
-        pipeline = new ComputeShaderPipeline(dxManager, log);
-        pipeline.Initialize();
-
-        readback = new StagingReadback(dxManager, log);
-
-        // ── 3. Interop ─────────────────────────────────────────────────────────
+        // 2. Interop
         penumbra = new PenumbraBridge(pluginInterface, log);
-        bodyModDetector = new BodyModDetector(penumbra, log);
 
-        // ── 4. Services ────────────────────────────────────────────────────────
+        // 3. Services
         meshExtractor = new MeshExtractor(dataManager, log);
-        imageLoader = new DecalImageLoader(log);
+        imageLoader = new DecalImageLoader(log, dataManager);
 
         var outputDir = Path.Combine(pluginInterface.GetPluginConfigDirectory(), "preview");
         previewService = new PreviewService(
-            dxManager, pipeline, readback,
             meshExtractor, imageLoader,
             penumbra, log, config, outputDir);
 
-        // ── 5. 项目数据 ────────────────────────────────────────────────────────
-        project = new DecalProject { Target = config.LastTarget };
+        // 5. Project - restore from config
+        project = new DecalProject();
+        project.LoadFromConfig(config);
 
-        // ── 6. HTTP 调试服务 ───────────────────────────────────────────────────
+        // 6. HTTP
         debugServer = new DebugServer(config, project, penumbra, previewService, dataManager);
         debugServer.Start();
 
-        // ── 7. GUI ─────────────────────────────────────────────────────────────
-        mainWindow = new MainWindow(project, previewService, penumbra, bodyModDetector, config, textureProvider);
+        // 7. GUI
+        mainWindow = new MainWindow(project, previewService, penumbra, config, textureProvider);
         configWindow = new ConfigWindow(config);
+        debugWindow = new DebugWindow(penumbra, previewService, textureProvider, config);
+
+        mainWindow.DebugWindowRef = debugWindow;
+        mainWindow.OnSaveRequested += SaveProject;
 
         windowSystem = new WindowSystem("SkinTatoo");
         windowSystem.AddWindow(mainWindow);
         windowSystem.AddWindow(configWindow);
+        windowSystem.AddWindow(debugWindow);
 
-        // ── 8. 注册 UiBuilder 钩子 ─────────────────────────────────────────────
+        // Restore window open states
+        mainWindow.IsOpen = config.MainWindowOpen;
+        debugWindow.IsOpen = config.DebugWindowOpen;
+
+        // 8. UiBuilder hooks
         pluginInterface.UiBuilder.Draw += DrawUi;
         pluginInterface.UiBuilder.OpenConfigUi += OpenConfigUi;
         pluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
 
-        // ── 9. 注册聊天命令 ────────────────────────────────────────────────────
+        // 9. Chat command
         commandManager.AddHandler(CommandName, new Dalamud.Game.Command.CommandInfo(OnCommand)
         {
             HelpMessage = "打开 SkinTatoo 纹身编辑器窗口",
         });
 
-        log.Information("SkinTatoo 已加载。GPU={0} Penumbra={1}",
-            dxManager.IsInitialized, penumbra.IsAvailable);
+        log.Information("SkinTatoo 已加载。Penumbra={0}", penumbra.IsAvailable);
     }
 
-    private void DrawUi() => windowSystem.Draw();
+    private void DrawUi()
+    {
+        windowSystem.Draw();
+
+        // Periodic auto-save
+        var now = DateTime.UtcNow;
+        if ((now - lastAutoSave).TotalSeconds >= AutoSaveIntervalSec)
+        {
+            lastAutoSave = now;
+            SaveWindowStates();
+        }
+    }
+
+    private void SaveProject()
+    {
+        project.SaveToConfig(config);
+        SaveWindowStates();
+    }
+
+    private void SaveWindowStates()
+    {
+        config.MainWindowOpen = mainWindow.IsOpen;
+        config.DebugWindowOpen = debugWindow.IsOpen;
+        config.Save();
+    }
 
     private void OpenConfigUi() => configWindow.IsOpen = true;
 
@@ -128,7 +147,9 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
-        // 逆序释放
+        // Save state before teardown
+        project.SaveToConfig(config);
+        SaveWindowStates();
 
         CommandManager.RemoveHandler(CommandName);
 
@@ -137,15 +158,12 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
 
         windowSystem.RemoveAllWindows();
+        mainWindow.OnSaveRequested -= SaveProject;
         mainWindow.Dispose();
 
         debugServer.Dispose();
 
         previewService.Dispose();
-
-        readback.Dispose();
-        pipeline.Dispose();
-        dxManager.Dispose();
 
         penumbra.Dispose();
     }
