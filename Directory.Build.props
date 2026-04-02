@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- Point to XIVLauncherCN's Dalamud dev directory -->
+    <DALAMUD_HOME Condition="'$(DALAMUD_HOME)' == ''">$(AppData)\XIVLauncherCN\addon\Hooks\dev</DALAMUD_HOME>
+    <DalamudLibPath>$(DALAMUD_HOME)\</DalamudLibPath>
+  </PropertyGroup>
+</Project>

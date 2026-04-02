@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/SkinTatoo/">
+    <Project Path="SkinTatoo/SkinTatoo/SkinTatoo.csproj" />
+  </Folder>
+  <Project Path="Penumbra.Api/Penumbra.Api.csproj" />
+</Solution>

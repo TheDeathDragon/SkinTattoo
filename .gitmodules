@@ -1,0 +1,4 @@
+[submodule "Penumbra.Api"]
+	path = Penumbra.Api
+	url = https://github.com/MeowZWR/Penumbra.Api.git
+	branch = cn-temp
