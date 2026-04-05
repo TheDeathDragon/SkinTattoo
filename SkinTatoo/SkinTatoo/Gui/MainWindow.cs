@@ -47,14 +47,21 @@ public class MainWindow : Window, IDisposable
     private bool canvasScalingLayer;
     private bool showHelpWindow;
 
-    // Auto-preview debounce
+    // Highlight glow state
+    private bool highlightActive;
+    private int highlightFrameCounter;
+    private const int HighlightCycleSteps = 400;
+
+    // Auto-preview
     private bool previewDirty;
     private DateTime lastDirtyTime = DateTime.MinValue;
-    private const double PreviewDebounceSec = 0.8;
+    private DateTime firstDirtyTime = DateTime.MinValue;
+    private const double PreviewDebounceFullSec = 0.5;
+    private const double PreviewMaxWaitFullSec = 1.5;
 
     private static readonly string[] BlendModeNames = ["正常", "正片叠底", "叠加", "柔光"];
     private static readonly BlendMode[] BlendModeValues = [BlendMode.Normal, BlendMode.Multiply, BlendMode.Overlay, BlendMode.SoftLight];
-    private static readonly string[] EmissiveMaskNames = ["均匀", "中心扩散", "边缘光环", "边缘描边"];
+    private static readonly string[] EmissiveMaskNames = ["均匀", "中心扩散", "边缘光环", "边缘描边", "方向渐变", "高斯羽化", "形状描边"];
 
     public DebugWindow? DebugWindowRef { get; set; }
     public event Action? OnSaveRequested;
@@ -83,6 +90,9 @@ public class MainWindow : Window, IDisposable
 
     public override void Draw()
     {
+        // Apply any completed async GPU swaps (non-blocking)
+        previewService.ApplyPendingSwaps();
+
         DrawToolbar();
         ImGui.Separator();
 
@@ -166,10 +176,33 @@ public class MainWindow : Window, IDisposable
                 penumbra.ClearRedirect();
                 penumbra.RedrawPlayer();
                 previewService.ClearTextureCache();
+                previewService.ResetSwapState();
                 DebugServer.AppendLog("[MainWindow] Restored original textures");
             }
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("还原贴图 — 清除 Penumbra 重定向");
+
+        ImGui.SameLine();
+        ImGui.Spacing();
+        ImGui.SameLine();
+
+        var group = project.SelectedGroup;
+        if (group != null && !string.IsNullOrEmpty(group.MeshDiskPath))
+        {
+            var meshIcon = previewService.CurrentMesh == null ? FontAwesomeIcon.Cube : FontAwesomeIcon.SyncAlt;
+            if (ImGuiComponents.IconButton(4, meshIcon))
+                previewService.LoadMesh(group.MeshDiskPath);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(previewService.CurrentMesh == null ? "加载模型" : "重新加载模型");
+            ImGui.SameLine();
+        }
+
+        var autoPreview = config.AutoPreview;
+        if (ImGui.Checkbox("自动预览", ref autoPreview))
+        {
+            config.AutoPreview = autoPreview;
+            config.Save();
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("参数变化时自动更新游戏内预览");
 
         ImGui.SameLine();
         ImGui.Spacing();
@@ -337,8 +370,36 @@ public class MainWindow : Window, IDisposable
             var visColor = layer.IsVisible ? new Vector4(1, 1, 1, 1) : new Vector4(0.5f, 0.5f, 0.5f, 1);
             ImGui.PushStyleColor(ImGuiCol.Text, visColor);
             if (ImGuiComponents.IconButton(100 + li, visIcon))
+            {
                 layer.IsVisible = !layer.IsVisible;
+                if (!layer.IsVisible && layer.AffectsEmissive) previewService.ClearEmissiveHookTargets();
+                MarkPreviewDirty();
+            }
             ImGui.PopStyleColor();
+
+            var layerGroup = gi < project.Groups.Count ? project.Groups[gi] : null;
+            if (layer.AffectsEmissive && layerGroup != null
+                && !string.IsNullOrEmpty(layerGroup.MtrlGamePath))
+            {
+                ImGui.SameLine();
+                ImGuiComponents.IconButton(200 + li, FontAwesomeIcon.Lightbulb);
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip("高亮显示此贴花的发光区域");
+                    highlightActive = true;
+                    highlightFrameCounter++;
+                    var hue = (highlightFrameCounter % HighlightCycleSteps) / (float)HighlightCycleSteps;
+                    var rainbowColor = TextureSwapService.HsvToRgb(hue, 1f, 1f);
+                    HighlightEmissive(rainbowColor);
+                }
+                else if (highlightActive)
+                {
+                    highlightActive = false;
+                    highlightFrameCounter = 0;
+                    MarkPreviewDirty();
+                }
+            }
+
             ImGui.SameLine();
 
             var isLayerSelected = isGroupSelected && group.SelectedLayerIndex == li;
@@ -702,17 +763,26 @@ public class MainWindow : Window, IDisposable
             ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
 
         var mouseUv = (mousePos - uvOrigin) / fitSize;
+        var drawList = ImGui.GetWindowDrawList();
+
+        // UV coordinates — bottom left
         if (mouseUv.X >= 0 && mouseUv.X <= 1 && mouseUv.Y >= 0 && mouseUv.Y <= 1)
         {
-            var statusText = $"UV: {mouseUv.X:F3}, {mouseUv.Y:F3}";
-            if (io.KeyShift) statusText += "  [Shift: 锁X]";
-            if (io.KeyCtrl) statusText += "  [Ctrl: 锁Y]";
-            if (io.KeyAlt) statusText += "  [Alt: 旋转]";
-            var drawList = ImGui.GetWindowDrawList();
+            var uvText = $"UV: {mouseUv.X:F3}, {mouseUv.Y:F3}";
             var textPos = canvasPos + new Vector2(4, canvasSize.Y - 18);
-            drawList.AddRectFilled(textPos - new Vector2(2, 1), textPos + new Vector2(ImGui.CalcTextSize(statusText).X + 4, 16),
+            drawList.AddRectFilled(textPos - new Vector2(2, 1), textPos + new Vector2(ImGui.CalcTextSize(uvText).X + 4, 16),
                 ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.7f)));
-            drawList.AddText(textPos, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.95f)), statusText);
+            drawList.AddText(textPos, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.95f)), uvText);
+        }
+
+        // Modifier hints — always visible, bottom right
+        {
+            var hints = "Shift:锁X  Ctrl:锁Y  Alt:旋转";
+            var hintsSize = ImGui.CalcTextSize(hints);
+            var hintPos = canvasPos + new Vector2(canvasSize.X - hintsSize.X - 6, canvasSize.Y - 18);
+            drawList.AddRectFilled(hintPos - new Vector2(2, 1), hintPos + new Vector2(hintsSize.X + 4, 16),
+                ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.5f)));
+            drawList.AddText(hintPos, ImGui.GetColorU32(new Vector4(0.7f, 0.7f, 0.7f, 0.8f)), hints);
         }
     }
 
@@ -751,6 +821,7 @@ public class MainWindow : Window, IDisposable
             {
                 layer.ImagePath = imagePathBuf;
                 lastEditedLayerIndex = idx;
+                MarkPreviewDirty();
             }
             ImGui.SameLine();
             if (ImGuiComponents.IconButton(20, FontAwesomeIcon.FolderOpen))
@@ -773,6 +844,7 @@ public class MainWindow : Window, IDisposable
                                 lastEditedLayerIndex = capturedLi;
                                 config.LastImageDir = Path.GetDirectoryName(path);
                                 config.Save();
+                                MarkPreviewDirty();
                             }
                         }
                     },
@@ -787,16 +859,20 @@ public class MainWindow : Window, IDisposable
         {
             if (ImGui.CollapsingHeader("UV 位置", ImGuiTreeNodeFlags.DefaultOpen))
             {
+                var cx = layer.UvCenter.X;
+                var cy = layer.UvCenter.Y;
                 ImGui.SetNextItemWidth(-1);
-                var center = layer.UvCenter;
-                if (ImGui.DragFloat2("##中心", ref center, 0.005f, 0f, 1f, "%.3f"))
-                { layer.UvCenter = center; MarkPreviewDirty(); }
-                if (ImGui.IsItemHovered()) ImGui.SetTooltip("中心点 ");
-                {
-                    var cx = layer.UvCenter.X; var cy = layer.UvCenter.Y;
-                    if (ScrollAdjust(ref cx, 0.001f, 0f, 1f))
-                    { layer.UvCenter = new Vector2(cx, cy); MarkPreviewDirty(); }
-                }
+                if (ImGui.DragFloat("##centerX", ref cx, 0.005f, 0f, 1f, "X %.3f"))
+                { layer.UvCenter = new Vector2(cx, cy); MarkPreviewDirty(); }
+                if (ScrollAdjust(ref cx, 0.001f, 0f, 1f))
+                { layer.UvCenter = new Vector2(cx, cy); MarkPreviewDirty(); }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("中心点 X");
+                ImGui.SetNextItemWidth(-1);
+                if (ImGui.DragFloat("##centerY", ref cy, 0.005f, 0f, 1f, "Y %.3f"))
+                { layer.UvCenter = new Vector2(cx, cy); MarkPreviewDirty(); }
+                if (ScrollAdjust(ref cy, 0.001f, 0f, 1f))
+                { layer.UvCenter = new Vector2(cx, cy); MarkPreviewDirty(); }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("中心点 Y");
 
                 var lockIcon = scaleLocked ? FontAwesomeIcon.Link : FontAwesomeIcon.Unlink;
                 if (ImGuiComponents.IconButton(30, lockIcon))
@@ -848,26 +924,31 @@ public class MainWindow : Window, IDisposable
                 var affDiff = layer.AffectsDiffuse;
                 if (ImGui.Checkbox("贴图", ref affDiff))
                 { layer.AffectsDiffuse = affDiff; MarkPreviewDirty(); }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("将贴花颜色合成到漫反射贴图。\n关闭后贴花不上色，但仍可作为发光区域。");
                 ImGui.SameLine();
                 var affEmissive = layer.AffectsEmissive;
                 if (ImGui.Checkbox("发光", ref affEmissive))
-                { layer.AffectsEmissive = affEmissive; MarkPreviewDirty(); }
+                {
+                    layer.AffectsEmissive = affEmissive;
+                    if (!affEmissive) previewService.ClearEmissiveHookTargets();
+                    MarkPreviewDirty();
+                }
                 if (ImGui.IsItemHovered()) ImGui.SetTooltip("修改材质启用发光效果");
 
                 if (layer.AffectsEmissive)
                 {
                     var emColor = layer.EmissiveColor;
                     if (ImGui.ColorEdit3("##emColor", ref emColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel))
-                    { layer.EmissiveColor = emColor; MarkPreviewDirty(); }
+                    { layer.EmissiveColor = emColor; MarkPreviewDirty(); TryDirectEmissiveUpdate(group, layer); }
                     ImGui.SameLine();
                     ImGui.Text("发光颜色");
 
                     ImGui.SetNextItemWidth(-1);
                     var emIntensity = layer.EmissiveIntensity;
                     if (ImGui.DragFloat("##emIntensity", ref emIntensity, 0.05f, 0.1f, 10f, "%.2f"))
-                    { layer.EmissiveIntensity = emIntensity; MarkPreviewDirty(); }
+                    { layer.EmissiveIntensity = emIntensity; MarkPreviewDirty(); TryDirectEmissiveUpdate(group, layer); }
                     if (ScrollAdjust(ref emIntensity, 0.1f, 0.1f, 10f))
-                    { layer.EmissiveIntensity = emIntensity; MarkPreviewDirty(); }
+                    { layer.EmissiveIntensity = emIntensity; MarkPreviewDirty(); TryDirectEmissiveUpdate(group, layer); }
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("发光强度");
 
                     ImGui.SetNextItemWidth(-1);
@@ -884,11 +965,38 @@ public class MainWindow : Window, IDisposable
                         { layer.EmissiveMaskFalloff = falloff; MarkPreviewDirty(); }
                         if (ScrollAdjust(ref falloff, 0.05f, 0.01f, 1f))
                         { layer.EmissiveMaskFalloff = falloff; MarkPreviewDirty(); }
-                        if (ImGui.IsItemHovered()) ImGui.SetTooltip("渐变范围");
+                        if (ImGui.IsItemHovered()) ImGui.SetTooltip("羽化程度 (0=锐利, 1=柔和)");
+                    }
+
+                    if (layer.EmissiveMask == EmissiveMask.DirectionalGradient)
+                    {
+                        ImGui.SetNextItemWidth(-1);
+                        var gAngle = layer.GradientAngleDeg;
+                        if (ImGui.DragFloat("##gradAngle", ref gAngle, 1f, -180f, 180f, "角度 %.1f°"))
+                        { layer.GradientAngleDeg = gAngle; MarkPreviewDirty(); }
+                        if (ScrollAdjust(ref gAngle, 1f, -180f, 180f))
+                        { layer.GradientAngleDeg = gAngle; MarkPreviewDirty(); }
+                        if (ImGui.IsItemHovered()) ImGui.SetTooltip("渐变方向角度");
+
+                        ImGui.SetNextItemWidth(-1);
+                        var gScale = layer.GradientScale;
+                        if (ImGui.DragFloat("##gradScale", ref gScale, 0.01f, 0.1f, 2f, "范围 %.2f"))
+                        { layer.GradientScale = gScale; MarkPreviewDirty(); }
+                        if (ScrollAdjust(ref gScale, 0.05f, 0.1f, 2f))
+                        { layer.GradientScale = gScale; MarkPreviewDirty(); }
+                        if (ImGui.IsItemHovered()) ImGui.SetTooltip("渐变扩散范围");
+
+                        ImGui.SetNextItemWidth(-1);
+                        var gOff = layer.GradientOffset;
+                        if (ImGui.DragFloat("##gradOffset", ref gOff, 0.01f, -1f, 1f, "偏移 %.2f"))
+                        { layer.GradientOffset = gOff; MarkPreviewDirty(); }
+                        if (ScrollAdjust(ref gOff, 0.02f, -1f, 1f))
+                        { layer.GradientOffset = gOff; MarkPreviewDirty(); }
+                        if (ImGui.IsItemHovered()) ImGui.SetTooltip("渐变起始偏移");
                     }
 
                     // Emissive mask preview
-                    DrawEmissiveMaskPreview(layer.EmissiveMask, layer.EmissiveMaskFalloff);
+                    DrawEmissiveMaskPreview(layer.EmissiveMask, layer.EmissiveMaskFalloff, layer);
 
                     if (string.IsNullOrEmpty(group.MtrlGamePath))
                         ImGui.TextColored(new Vector4(1, 0.5f, 0.3f, 1), "需要选择材质(.mtrl)");
@@ -900,7 +1008,7 @@ public class MainWindow : Window, IDisposable
         DrawActionsSection();
     }
 
-    private void DrawEmissiveMaskPreview(EmissiveMask mask, float falloff)
+    private void DrawEmissiveMaskPreview(EmissiveMask mask, float falloff, DecalLayer layer)
     {
         ImGui.TextDisabled("遮罩预览:");
         var previewSize = 100f;
@@ -916,7 +1024,20 @@ public class MainWindow : Window, IDisposable
             {
                 float ru = (x + 0.5f) / cellCount - 0.5f;
                 float rv = (y + 0.5f) / cellCount - 0.5f;
-                float val = PreviewService.ComputeEmissiveMask(mask, falloff, ru, rv, 1f);
+                float val;
+                if (mask == EmissiveMask.DirectionalGradient)
+                    val = PreviewService.ComputeDirectionalGradient(ru, rv, 1f,
+                        layer.GradientAngleDeg, layer.GradientScale, falloff, layer.GradientOffset);
+                else if (mask == EmissiveMask.ShapeOutline)
+                {
+                    // Approximate shape outline in preview: use distance to center circle as alpha proxy
+                    float fakeDa = (MathF.Abs(ru) < 0.3f && MathF.Abs(rv) < 0.3f) ? 1f : 0f;
+                    float fakeNeighbor = ((MathF.Abs(ru) < 0.29f && MathF.Abs(rv) < 0.29f) ||
+                                          (MathF.Abs(ru) > 0.31f || MathF.Abs(rv) > 0.31f)) ? fakeDa : 0.5f;
+                    val = PreviewService.ComputeShapeOutline(fakeDa, falloff, fakeNeighbor);
+                }
+                else
+                    val = PreviewService.ComputeEmissiveMask(mask, falloff, ru, rv, 1f);
 
                 var color = ImGui.GetColorU32(new Vector4(val, val, val, 1f));
                 var p0 = pos + new Vector2(x * cellSize, y * cellSize);
@@ -927,27 +1048,57 @@ public class MainWindow : Window, IDisposable
 
         drawList.AddRect(pos, pos + new Vector2(previewSize),
             ImGui.GetColorU32(new Vector4(0.4f, 0.4f, 0.4f, 1f)));
-        ImGui.Dummy(new Vector2(previewSize, previewSize + 4));
+
+        // Color preview showing actual emissive color through mask
+        var colorPos = pos + new Vector2(previewSize + 8, 0);
+        var emColor = layer.EmissiveColor * layer.EmissiveIntensity;
+        for (int y = 0; y < cellCount; y++)
+        {
+            for (int x = 0; x < cellCount; x++)
+            {
+                float ru = (x + 0.5f) / cellCount - 0.5f;
+                float rv = (y + 0.5f) / cellCount - 0.5f;
+                float val;
+                if (mask == EmissiveMask.DirectionalGradient)
+                    val = PreviewService.ComputeDirectionalGradient(ru, rv, 1f,
+                        layer.GradientAngleDeg, layer.GradientScale, falloff, layer.GradientOffset);
+                else if (mask == EmissiveMask.ShapeOutline)
+                {
+                    // Approximate shape outline in preview: use distance to center circle as alpha proxy
+                    float fakeDa = (MathF.Abs(ru) < 0.3f && MathF.Abs(rv) < 0.3f) ? 1f : 0f;
+                    float fakeNeighbor = ((MathF.Abs(ru) < 0.29f && MathF.Abs(rv) < 0.29f) ||
+                                          (MathF.Abs(ru) > 0.31f || MathF.Abs(rv) > 0.31f)) ? fakeDa : 0.5f;
+                    val = PreviewService.ComputeShapeOutline(fakeDa, falloff, fakeNeighbor);
+                }
+                else
+                    val = PreviewService.ComputeEmissiveMask(mask, falloff, ru, rv, 1f);
+
+                var cr = Math.Min(emColor.X * val, 1f);
+                var cg = Math.Min(emColor.Y * val, 1f);
+                var cb = Math.Min(emColor.Z * val, 1f);
+                var color = ImGui.GetColorU32(new Vector4(cr, cg, cb, 1f));
+                var p0 = colorPos + new Vector2(x * cellSize, y * cellSize);
+                var p1 = p0 + new Vector2(cellSize + 0.5f, cellSize + 0.5f);
+                drawList.AddRectFilled(p0, p1, color);
+            }
+        }
+
+        drawList.AddRect(colorPos, colorPos + new Vector2(previewSize),
+            ImGui.GetColorU32(new Vector4(0.4f, 0.4f, 0.4f, 1f)));
+        ImGui.Dummy(new Vector2(previewSize * 2 + 8, previewSize + 4));
+
+        var textY = pos.Y + previewSize + 2;
+        drawList.AddText(new Vector2(pos.X, textY),
+            ImGui.GetColorU32(new Vector4(0.5f, 0.5f, 0.5f, 1f)), "遮罩");
+        drawList.AddText(new Vector2(colorPos.X, textY),
+            ImGui.GetColorU32(new Vector4(0.5f, 0.5f, 0.5f, 1f)), "效果");
+        ImGui.Dummy(new Vector2(0, 14));
     }
 
     private void DrawActionsSection()
     {
         var group = project.SelectedGroup;
         var hasTarget = group != null && !string.IsNullOrEmpty(group.DiffuseGamePath);
-
-        if (group != null && !string.IsNullOrEmpty(group.MeshDiskPath) && previewService.CurrentMesh == null)
-        {
-            if (ImGui.Button("加载模型", new Vector2(-1, 24)))
-                previewService.LoadMesh(group.MeshDiskPath);
-        }
-
-        var autoPreview = config.AutoPreview;
-        if (ImGui.Checkbox("自动预览", ref autoPreview))
-        {
-            config.AutoPreview = autoPreview;
-            config.Save();
-        }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("参数变化时自动更新游戏内预览");
 
         if (!config.AutoPreview)
         {
@@ -960,11 +1111,24 @@ public class MainWindow : Window, IDisposable
 
         if (config.AutoPreview && previewDirty && hasTarget)
         {
-            var elapsed = (DateTime.UtcNow - lastDirtyTime).TotalSeconds;
-            if (elapsed >= PreviewDebounceSec)
+            if (previewService.CanSwapInPlace && config.UseGpuSwap)
             {
+                // GPU swap mode: trigger immediately every frame (async, non-blocking)
                 previewDirty = false;
                 TriggerPreview();
+            }
+            else
+            {
+                // Full redraw mode: debounce to avoid flicker spam,
+                // but force update after max wait to handle continuous scrolling
+                var now = DateTime.UtcNow;
+                var sinceLastChange = (now - lastDirtyTime).TotalSeconds;
+                var sinceFirstChange = (now - firstDirtyTime).TotalSeconds;
+                if (sinceLastChange >= PreviewDebounceFullSec || sinceFirstChange >= PreviewMaxWaitFullSec)
+                {
+                    previewDirty = false;
+                    TriggerPreview();
+                }
             }
         }
     }
@@ -986,16 +1150,25 @@ public class MainWindow : Window, IDisposable
         // Try finding mtrl from the resource tree by locating the equipment node
         // that contains our diffuse texture, then grabbing its mtrl descendant
         var trees = penumbra.GetPlayerTrees();
-        if (trees == null || string.IsNullOrEmpty(group.DiffuseGamePath)) return;
+        if (trees == null || string.IsNullOrEmpty(group.DiffuseGamePath))
+        {
+            DebugServer.AppendLog($"[AutoDetect] Skip: trees={trees != null} diffuse={group.DiffuseGamePath}");
+            return;
+        }
+
+        var diffuseNorm = group.DiffuseGamePath.Replace('\\', '/').ToLowerInvariant();
 
         foreach (var (_, tree) in trees)
         {
             foreach (var topNode in tree.Nodes)
             {
+                // Case-insensitive match for diffuse texture
                 var diffuse = FindDescendant(topNode, n =>
-                    n.Type == ResourceType.Tex && n.GamePath == group.DiffuseGamePath);
+                    n.Type == ResourceType.Tex &&
+                    (n.GamePath ?? "").Replace('\\', '/').ToLowerInvariant() == diffuseNorm);
                 if (diffuse == null) continue;
 
+                // Found the tree node with our diffuse — find mtrl sibling/parent
                 var mtrl = FindDescendant(topNode, n =>
                     n.Type == ResourceType.Mtrl && !n.ActualPath.Contains("pluginConfigs"));
                 if (mtrl != null)
@@ -1003,11 +1176,30 @@ public class MainWindow : Window, IDisposable
                     group.MtrlGamePath = mtrl.GamePath ?? "";
                     group.MtrlDiskPath = mtrl.ActualPath;
                     group.OrigMtrlDiskPath ??= mtrl.ActualPath;
-                    DebugServer.AppendLog($"[MainWindow] Auto-detected mtrl for {group.Name}: {mtrl.GamePath}");
-                    return;
+                    DebugServer.AppendLog($"[AutoDetect] mtrl for {group.Name}: {mtrl.GamePath}");
                 }
+
+                // Also find norm if missing
+                if (string.IsNullOrEmpty(group.NormGamePath))
+                {
+                    var norm = FindDescendant(topNode, n =>
+                        n.Type == ResourceType.Tex &&
+                        (n.GamePath ?? "").Contains("_norm") &&
+                        !n.ActualPath.Contains("pluginConfigs"));
+                    if (norm != null)
+                    {
+                        group.NormGamePath = norm.GamePath ?? "";
+                        group.NormDiskPath = norm.ActualPath;
+                        group.OrigNormDiskPath ??= norm.ActualPath;
+                        DebugServer.AppendLog($"[AutoDetect] norm for {group.Name}: {norm.GamePath}");
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(group.MtrlGamePath)) return;
             }
         }
+
+        DebugServer.AppendLog($"[AutoDetect] Tree search failed for {group.Name}, trying disk proximity...");
 
         // Fallback: match by disk path proximity
         var diffuseDisk = group.OrigDiffuseDiskPath ?? group.DiffuseDiskPath;
@@ -1032,17 +1224,55 @@ public class MainWindow : Window, IDisposable
                     group.MtrlGamePath = gp;
                     group.MtrlDiskPath = diskPath;
                     group.OrigMtrlDiskPath ??= diskPath;
-                    DebugServer.AppendLog($"[MainWindow] Auto-detected mtrl (disk proximity) for {group.Name}: {gp}");
+                    DebugServer.AppendLog($"[AutoDetect] mtrl (disk) for {group.Name}: {gp}");
                     return;
                 }
             }
         }
+
+        DebugServer.AppendLog($"[AutoDetect] FAILED for {group.Name} diffuse={group.DiffuseGamePath}");
     }
 
     private void MarkPreviewDirty()
     {
+        var now = DateTime.UtcNow;
+        if (!previewDirty)
+            firstDirtyTime = now;
         previewDirty = true;
-        lastDirtyTime = DateTime.UtcNow;
+        lastDirtyTime = now;
+    }
+
+    private unsafe void HighlightEmissive(Vector3 color)
+    {
+        var group = project.SelectedGroup;
+        if (group == null || string.IsNullOrEmpty(group.MtrlGamePath))
+        {
+            DebugServer.AppendLog($"[Highlight] Skip: group={group?.Name} mtrl={group?.MtrlGamePath}");
+            return;
+        }
+
+        var charBase = previewService.GetCharacterBase();
+        if (charBase == null)
+        {
+            DebugServer.AppendLog("[Highlight] Skip: charBase=null");
+            return;
+        }
+
+        previewService.HighlightEmissiveColor(charBase, group, color);
+    }
+
+    private unsafe void TryDirectEmissiveUpdate(TargetGroup group, DecalLayer layer)
+    {
+        if (string.IsNullOrEmpty(group.DiffuseGamePath))
+        {
+            DebugServer.AppendLog($"[DirectEmissive] Skip: no DiffuseGamePath for group={group.Name}");
+            return;
+        }
+        var charBase = previewService.GetCharacterBase();
+        if (charBase == null) return;
+        var color = layer.EmissiveColor * layer.EmissiveIntensity;
+        DebugServer.AppendLog($"[DirectEmissive] ColorTable swap ({color.X:F2},{color.Y:F2},{color.Z:F2}) to {group.MtrlGamePath}");
+        previewService.HighlightEmissiveColor(charBase, group, color);
     }
 
     private static bool ScrollAdjust(ref float value, float step, float min, float max)
@@ -1306,6 +1536,7 @@ public class MainWindow : Window, IDisposable
     private void AddTargetGroupFromMtrl(ResourceNodeDto mtrlNode, ResourceNodeDto? parentMdl)
     {
         previewService.ClearTextureCache();
+        previewService.ResetSwapState();
         penumbra.ClearRedirect();
         penumbra.RedrawPlayer();
 

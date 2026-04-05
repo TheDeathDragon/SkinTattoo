@@ -18,10 +18,24 @@ public static class MtrlFileWriter
     private const uint ValueEmissive = 0x72E697CD;
     private const uint ConstantEmissiveColor = 0x38A64362;
 
-    public static bool WriteEmissiveMtrl(MtrlFile mtrl, byte[] originalBytes, string outputPath, Vector3 emissiveColor)
+    /// <summary>Returns the byte offset of g_EmissiveColor in the shader values via emissiveByteOffset.</summary>
+    public static bool WriteEmissiveMtrl(MtrlFile mtrl, byte[] originalBytes, string outputPath,
+        Vector3 emissiveColor, out int emissiveByteOffset)
     {
+        emissiveByteOffset = -1;
         try
         {
+            // Extract AdditionalData from original bytes (Lumina skips it)
+            int addlDataOffset = 16
+                + mtrl.FileHeader.TextureCount * 4
+                + mtrl.FileHeader.UvSetCount * 4
+                + mtrl.FileHeader.ColorSetCount * 4
+                + mtrl.FileHeader.StringTableSize;
+            int addlDataSize = mtrl.FileHeader.AdditionalDataSize;
+            byte[] additionalData = new byte[addlDataSize];
+            if (addlDataSize > 0 && addlDataOffset + addlDataSize <= originalBytes.Length)
+                Array.Copy(originalBytes, addlDataOffset, additionalData, 0, addlDataSize);
+
             // Clone arrays so we don't modify the cached MtrlFile
             var shaderKeys = (ShaderKey[])mtrl.ShaderKeys.Clone();
             var constants = new List<Constant>(mtrl.Constants);
@@ -58,12 +72,13 @@ public static class MtrlFileWriter
                 if (constants[i].ConstantId == ConstantEmissiveColor)
                 {
                     // Update existing values
-                    int floatOffset = constants[i].ValueOffset / 4;
+                    emissiveByteOffset = constants[i].ValueOffset;
+                    int floatOffset = emissiveByteOffset / 4;
                     shaderValues[floatOffset] = emissiveColor.X;
                     shaderValues[floatOffset + 1] = emissiveColor.Y;
                     shaderValues[floatOffset + 2] = emissiveColor.Z;
                     foundEmissive = true;
-                    DebugServer.AppendLog($"[MtrlWriter] Updated g_EmissiveColor: ({emissiveColor.X:F2}, {emissiveColor.Y:F2}, {emissiveColor.Z:F2})");
+                    DebugServer.AppendLog($"[MtrlWriter] Updated g_EmissiveColor offset={emissiveByteOffset}: ({emissiveColor.X:F2}, {emissiveColor.Y:F2}, {emissiveColor.Z:F2})");
                     break;
                 }
             }
@@ -71,21 +86,21 @@ public static class MtrlFileWriter
             if (!foundEmissive)
             {
                 // Add new constant entry + 3 float values at the end
-                var byteOffset = (ushort)(shaderValues.Count * 4);
+                emissiveByteOffset = shaderValues.Count * 4;
                 constants.Add(new Constant
                 {
                     ConstantId = ConstantEmissiveColor,
-                    ValueOffset = byteOffset,
+                    ValueOffset = (ushort)emissiveByteOffset,
                     ValueSize = 12, // 3 floats = 12 bytes
                 });
                 shaderValues.Add(emissiveColor.X);
                 shaderValues.Add(emissiveColor.Y);
                 shaderValues.Add(emissiveColor.Z);
-                DebugServer.AppendLog($"[MtrlWriter] Added g_EmissiveColor: ({emissiveColor.X:F2}, {emissiveColor.Y:F2}, {emissiveColor.Z:F2})");
+                DebugServer.AppendLog($"[MtrlWriter] Added g_EmissiveColor offset={emissiveByteOffset}: ({emissiveColor.X:F2}, {emissiveColor.Y:F2}, {emissiveColor.Z:F2})");
             }
 
             // Step 3: Rebuild the entire binary
-            RebuildMtrl(mtrl, shaderKeys, constants.ToArray(), mtrl.Samplers, shaderValues.ToArray(), outputPath);
+            RebuildMtrl(mtrl, shaderKeys, constants.ToArray(), mtrl.Samplers, shaderValues.ToArray(), additionalData, outputPath);
             return true;
         }
         catch (Exception ex)
@@ -95,7 +110,7 @@ public static class MtrlFileWriter
         }
     }
 
-    private static void RebuildMtrl(MtrlFile mtrl, ShaderKey[] shaderKeys, Constant[] constants, Sampler[] samplers, float[] shaderValues, string outputPath)
+    private static void RebuildMtrl(MtrlFile mtrl, ShaderKey[] shaderKeys, Constant[] constants, Sampler[] samplers, float[] shaderValues, byte[] additionalData, string outputPath)
     {
         using var ms = new MemoryStream();
         using var bw = new BinaryWriter(ms);
@@ -154,9 +169,8 @@ public static class MtrlFileWriter
         // String table
         bw.Write(mtrl.Strings);
 
-        // Additional data (just pad with zeros for the declared size)
-        for (int i = 0; i < mtrl.FileHeader.AdditionalDataSize; i++)
-            bw.Write((byte)0);
+        // Additional data — preserve original bytes (contains DataFlags for HasColorTable, etc.)
+        bw.Write(additionalData);
 
         // ── Section 2: Color set data ──
 

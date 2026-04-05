@@ -27,6 +27,8 @@ public sealed class Plugin : IDalamudPlugin
 
     // Interop
     private readonly PenumbraBridge penumbra;
+    private readonly TextureSwapService textureSwap;
+    private readonly EmissiveCBufferHook emissiveHook;
 
     // Services
     private readonly MeshExtractor meshExtractor;
@@ -49,13 +51,19 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime lastAutoSave = DateTime.MinValue;
     private const double AutoSaveIntervalSec = 30.0;
 
+    // Auto-load mesh on init
+    private readonly IFramework framework;
+    private bool autoLoadAttempted;
+
     public Plugin(
         IDalamudPluginInterface pluginInterface,
         ICommandManager commandManager,
         IDataManager dataManager,
         ITextureProvider textureProvider,
         IPluginLog log,
-        IObjectTable objectTable)
+        IObjectTable objectTable,
+        IFramework framework,
+        IGameInteropProvider gameInterop)
     {
         // 1. Config
         config = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
@@ -63,6 +71,8 @@ public sealed class Plugin : IDalamudPlugin
 
         // 2. Interop
         penumbra = new PenumbraBridge(pluginInterface, log);
+        textureSwap = new TextureSwapService(objectTable, log);
+        emissiveHook = new EmissiveCBufferHook(gameInterop, log);
 
         // 3. Services
         meshExtractor = new MeshExtractor(dataManager, log);
@@ -71,14 +81,14 @@ public sealed class Plugin : IDalamudPlugin
         var outputDir = Path.Combine(pluginInterface.GetPluginConfigDirectory(), "preview");
         previewService = new PreviewService(
             meshExtractor, imageLoader,
-            penumbra, log, config, outputDir);
+            penumbra, textureSwap, emissiveHook, log, config, outputDir);
 
         // 5. Project - restore from config
         project = new DecalProject();
         project.LoadFromConfig(config);
 
         // 6. HTTP
-        debugServer = new DebugServer(config, project, penumbra, previewService, dataManager);
+        debugServer = new DebugServer(config, project, penumbra, previewService, dataManager, textureSwap);
         debugServer.Start();
 
         // 7. GUI
@@ -108,6 +118,9 @@ public sealed class Plugin : IDalamudPlugin
         {
             HelpMessage = "打开 SkinTatoo 纹身编辑器窗口",
         });
+
+        this.framework = framework;
+        framework.Update += OnFrameworkUpdate;
 
         log.Information("SkinTatoo 已加载。Penumbra={0}", penumbra.IsAvailable);
     }
@@ -150,12 +163,40 @@ public sealed class Plugin : IDalamudPlugin
         mainWindow.IsOpen = !mainWindow.IsOpen;
     }
 
+    private void OnFrameworkUpdate(IFramework _)
+    {
+        if (autoLoadAttempted) return;
+        if (ObjectTable.LocalPlayer == null) return;
+
+        autoLoadAttempted = true;
+
+        foreach (var group in project.Groups)
+        {
+            if (!string.IsNullOrEmpty(group.MeshDiskPath) && previewService.CurrentMesh == null)
+            {
+                previewService.LoadMesh(group.MeshDiskPath);
+                break;
+            }
+        }
+
+        // Auto-apply decals if there are configured groups with layers
+        var hasLayers = false;
+        foreach (var group in project.Groups)
+        {
+            if (!string.IsNullOrEmpty(group.DiffuseGamePath) && group.Layers.Count > 0)
+            { hasLayers = true; break; }
+        }
+        if (hasLayers && config.AutoPreview)
+            previewService.UpdatePreview(project);
+    }
+
     public void Dispose()
     {
         // Save state before teardown
         project.SaveToConfig(config);
         SaveWindowStates();
 
+        framework.Update -= OnFrameworkUpdate;
         CommandManager.RemoveHandler(CommandName);
 
         PluginInterface.UiBuilder.Draw -= DrawUi;
@@ -169,6 +210,7 @@ public sealed class Plugin : IDalamudPlugin
         debugServer.Dispose();
 
         previewService.Dispose();
+        emissiveHook.Dispose();
 
         penumbra.Dispose();
     }

@@ -12,10 +12,13 @@ public enum BlendMode
 
 public enum EmissiveMask
 {
-    Uniform,       // flat glow across entire decal
-    RadialFadeOut, // center bright → edge dim
-    RadialFadeIn,  // edge bright → center dim (ring glow)
-    EdgeGlow,      // only edges glow, interior dark
+    Uniform,             // flat glow across entire decal
+    RadialFadeOut,       // center bright → edge dim
+    RadialFadeIn,        // edge bright → center dim (ring glow)
+    EdgeGlow,            // only edges glow, interior dark
+    DirectionalGradient, // linear gradient at configurable angle
+    GaussianFeather,     // gaussian blur-style soft falloff from edges
+    ShapeOutline,        // glow along decal alpha edges (like PS outer glow/drop shadow)
 }
 
 public class DecalLayer
@@ -40,4 +43,7 @@ public class DecalLayer
     public float EmissiveIntensity { get; set; } = 1.0f;
     public EmissiveMask EmissiveMask { get; set; } = EmissiveMask.Uniform;
     public float EmissiveMaskFalloff { get; set; } = 0.5f; // controls gradient steepness (0=sharp, 1=wide)
+    public float GradientAngleDeg { get; set; } = 0f;      // angle for DirectionalGradient (degrees)
+    public float GradientScale { get; set; } = 1f;          // size/spread for DirectionalGradient
+    public float GradientOffset { get; set; } = 0f;         // offset/shift for DirectionalGradient (-1 to 1)
 }

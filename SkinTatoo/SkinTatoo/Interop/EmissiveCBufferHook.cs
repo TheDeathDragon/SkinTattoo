@@ -1,0 +1,222 @@
+using System;
+using System.Collections.Concurrent;
+using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Threading;
+using Dalamud.Hooking;
+using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.Graphics.Kernel;
+using FFXIVClientStructs.FFXIV.Client.Graphics.Render;
+using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
+using SkinTatoo.Http;
+
+namespace SkinTatoo.Interop;
+
+/// <summary>
+/// Hooks ModelRenderer.OnRenderMaterial to intercept skin material rendering
+/// and modify g_EmissiveColor in the material's ConstantBuffer in real-time.
+/// This works because modifying CPU-side CBuffer data BEFORE the render command
+/// is built causes the render pipeline to upload the updated data to GPU.
+/// </summary>
+public unsafe class EmissiveCBufferHook : IDisposable
+{
+    private const uint CrcEmissiveColor = 0x38A64362;
+
+    private readonly IPluginLog log;
+    private readonly Hook<OnRenderMaterialDelegate> hook;
+
+    // Thread-safe: written from UI thread, read from render thread
+    private readonly ConcurrentDictionary<nint, Vector3> targets = new();
+    // Cache: MaterialResourceHandle* → cbuffer byte offset of g_EmissiveColor (-1 = not found)
+    private readonly ConcurrentDictionary<nint, int> offsetCache = new();
+
+    private bool enabled;
+    private int errorCount;
+
+    private delegate nint OnRenderMaterialDelegate(
+        nint modelRenderer, nint outFlags, nint param, nint material, uint materialIndex);
+
+    public EmissiveCBufferHook(IGameInteropProvider interop, IPluginLog log)
+    {
+        this.log = log;
+        hook = interop.HookFromSignature<OnRenderMaterialDelegate>(
+            "E8 ?? ?? ?? ?? 44 0F B7 28", Detour);
+    }
+
+    public void Enable()
+    {
+        if (!enabled)
+        {
+            hook.Enable();
+            enabled = true;
+            DebugServer.AppendLog("[EmissiveHook] Enabled");
+        }
+    }
+
+    public void Disable()
+    {
+        if (enabled)
+        {
+            hook.Disable();
+            enabled = false;
+            DebugServer.AppendLog("[EmissiveHook] Disabled");
+        }
+    }
+
+    /// <summary>
+    /// Register a target by matching MaterialResourceHandle path.
+    /// Searches the character's material tree to find the matching MaterialResourceHandle.
+    /// </summary>
+    public void SetTargetByPath(
+        FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase,
+        string mtrlGamePath, string? mtrlDiskPath, Vector3 emissiveColor)
+    {
+        if (charBase == null) return;
+
+        var normGame = mtrlGamePath.Replace('\\', '/').ToLowerInvariant();
+        var normDisk = mtrlDiskPath?.Replace('\\', '/').ToLowerInvariant();
+
+        var slotCount = charBase->SlotCount;
+        if (slotCount <= 0 || slotCount > 30) return;
+
+        var models = charBase->Models;
+        if (models == null) return;
+
+        for (int s = 0; s < slotCount; s++)
+        {
+            var model = models[s];
+            if (model == null) continue;
+
+            var matCount = model->MaterialCount;
+            if (matCount <= 0 || matCount > 20) continue;
+
+            var mats = model->Materials;
+            if (mats == null) continue;
+
+            for (int m = 0; m < matCount; m++)
+            {
+                var mat = mats[m];
+                if (mat == null) continue;
+
+                var mrh = mat->MaterialResourceHandle;
+                if (mrh == null) continue;
+
+                string fileName;
+                try { fileName = ((ResourceHandle*)mrh)->FileName.ToString(); }
+                catch { continue; }
+
+                if (string.IsNullOrEmpty(fileName)) continue;
+                var normFile = fileName.Replace('\\', '/').ToLowerInvariant();
+
+                bool matched = normFile.EndsWith(normGame) || normGame.EndsWith(normFile);
+                if (!matched && normDisk != null)
+                    matched = normFile.Contains(System.IO.Path.GetFileName(normDisk));
+
+                if (matched)
+                {
+                    var key = (nint)mrh;
+                    targets[key] = emissiveColor;
+                    if (!enabled) Enable();
+                    DebugServer.AppendLog($"[EmissiveHook] Target set: {fileName} color=({emissiveColor.X:F2},{emissiveColor.Y:F2},{emissiveColor.Z:F2})");
+                    return;
+                }
+            }
+        }
+
+        DebugServer.AppendLog($"[EmissiveHook] Material not found: {mtrlGamePath}");
+    }
+
+    /// <summary>Remove all targets and disable the hook.</summary>
+    public void ClearTargets()
+    {
+        targets.Clear();
+        offsetCache.Clear();
+        if (enabled) Disable();
+    }
+
+    public bool HasTargets => !targets.IsEmpty;
+
+    private nint Detour(nint modelRenderer, nint outFlags, nint param, nint materialPtr, uint materialIndex)
+    {
+        if (!targets.IsEmpty && materialPtr != 0)
+        {
+            try
+            {
+                var material = (Material*)materialPtr;
+                var mrh = material->MaterialResourceHandle;
+                if (mrh != null && targets.TryGetValue((nint)mrh, out var color))
+                {
+                    PatchEmissive(material, mrh, color);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (Interlocked.Increment(ref errorCount) <= 5)
+                    DebugServer.AppendLog($"[EmissiveHook] Error #{errorCount}: {ex.Message}");
+            }
+        }
+
+        return hook.Original(modelRenderer, outFlags, param, materialPtr, materialIndex);
+    }
+
+    private void PatchEmissive(Material* material, MaterialResourceHandle* mrh, Vector3 color)
+    {
+        var cbuf = material->MaterialParameterCBuffer;
+        if (cbuf == null || cbuf->ByteSize <= 0) return;
+
+        int offset = GetEmissiveOffset(mrh);
+        if (offset < 0 || offset + 12 > cbuf->ByteSize) return;
+
+        // LoadSourcePointer sets DirtySize, which the render submission reads to upload to GPU
+        var ptr = cbuf->LoadSourcePointer(offset, 12, ConstantBuffer.DefaultLoadSourcePointerFlags);
+        if (ptr == null) return;
+
+        var dst = (float*)ptr;
+        dst[0] = color.X;
+        dst[1] = color.Y;
+        dst[2] = color.Z;
+    }
+
+    /// <summary>
+    /// Find the byte offset of g_EmissiveColor in the material's CBuffer.
+    /// Searches ShaderPackage.MaterialElements for the matching CRC.
+    /// </summary>
+    private int GetEmissiveOffset(MaterialResourceHandle* mrh)
+    {
+        var key = (nint)mrh;
+        if (offsetCache.TryGetValue(key, out var cached))
+            return cached;
+
+        int result = -1;
+
+        var shpkHandle = mrh->ShaderPackageResourceHandle;
+        if (shpkHandle != null)
+        {
+            var shpk = shpkHandle->ShaderPackage;
+            if (shpk != null)
+            {
+                var elements = shpk->MaterialElementsSpan;
+                for (int i = 0; i < elements.Length; i++)
+                {
+                    if (elements[i].CRC == CrcEmissiveColor)
+                    {
+                        result = elements[i].Offset;
+                        DebugServer.AppendLog(
+                            $"[EmissiveHook] Found g_EmissiveColor via ShaderPackage: offset={result} size={elements[i].Size}");
+                        break;
+                    }
+                }
+            }
+        }
+
+        offsetCache[key] = result;
+        return result;
+    }
+
+    public void Dispose()
+    {
+        targets.Clear();
+        offsetCache.Clear();
+        hook?.Dispose();
+    }
+}

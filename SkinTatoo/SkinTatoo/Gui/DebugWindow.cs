@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using System.Text;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
@@ -32,6 +33,15 @@ public class DebugWindow : Window
         }
 
         ImGui.SameLine();
+        if (ImGui.Button("复制全部"))
+        {
+            var sb = new StringBuilder();
+            foreach (var line in DebugServer.LogBuffer)
+                sb.AppendLine(line);
+            ImGui.SetClipboardText(sb.ToString());
+        }
+
+        ImGui.SameLine();
         ImGui.Checkbox("自动滚动", ref logAutoScroll);
 
         ImGui.SameLine();
@@ -51,7 +61,12 @@ public class DebugWindow : Window
         {
             if (hasFilter && !line.Contains(logFilter, StringComparison.OrdinalIgnoreCase))
                 continue;
-            ImGui.TextWrapped(line);
+
+            ImGui.Selectable(line);
+            if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                ImGui.SetClipboardText(line);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("右键复制此行");
         }
 
         if (logAutoScroll && ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - 20)

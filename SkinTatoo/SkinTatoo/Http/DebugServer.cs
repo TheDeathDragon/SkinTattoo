@@ -38,18 +38,22 @@ public class DebugServer : IDisposable
             LogBuffer.TryDequeue(out _);
     }
 
+    private readonly TextureSwapService? _textureSwap;
+
     public DebugServer(
         Configuration config,
         DecalProject project,
         PenumbraBridge penumbra,
         PreviewService preview,
-        IDataManager dataManager)
+        IDataManager dataManager,
+        TextureSwapService? textureSwap = null)
     {
         _config   = config;
         _project  = project;
         _penumbra = penumbra;
         _preview  = preview;
         _dataManager = dataManager;
+        _textureSwap = textureSwap;
     }
 
     public void Start()
@@ -61,7 +65,7 @@ public class DebugServer : IDisposable
             .WithUrlPrefix(url)
             .WithMode(HttpListenerMode.EmbedIO))
             .WithWebApi("/api", m => m.WithController(() =>
-                new ApiController(_project, _penumbra, _preview, _config, _dataManager)));
+                new ApiController(_project, _penumbra, _preview, _config, _dataManager, _textureSwap)));
 
         _ = _server.RunAsync(_cts.Token).ContinueWith(t =>
         {
@@ -91,6 +95,7 @@ internal sealed class ApiController : WebApiController
     private readonly PreviewService _preview;
     private readonly Configuration _config;
     private readonly IDataManager _dataManager;
+    private readonly TextureSwapService? _textureSwap;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -102,13 +107,15 @@ internal sealed class ApiController : WebApiController
         PenumbraBridge penumbra,
         PreviewService preview,
         Configuration config,
-        IDataManager dataManager)
+        IDataManager dataManager,
+        TextureSwapService? textureSwap = null)
     {
         _project  = project;
         _penumbra = penumbra;
         _preview  = preview;
         _config   = config;
         _dataManager = dataManager;
+        _textureSwap = textureSwap;
     }
 
     [Route(HttpVerbs.Get, "/status")]
@@ -119,6 +126,10 @@ internal sealed class ApiController : WebApiController
         meshLoaded       = _preview.CurrentMesh is not null,
         groupCount       = _project.Groups.Count,
         resolution       = _config.TextureResolution,
+        gpuSwapEnabled   = _config.UseGpuSwap,
+        canSwapInPlace   = _preview.CanSwapInPlace,
+        initializedPaths = _preview.InitializedPathCount,
+        lastUpdateMode   = _preview.LastUpdateMode,
     };
 
     [Route(HttpVerbs.Get, "/project")]
@@ -129,6 +140,11 @@ internal sealed class ApiController : WebApiController
         {
             name = g.Name,
             diffuseGamePath = g.DiffuseGamePath,
+            normGamePath = g.NormGamePath,
+            mtrlGamePath = g.MtrlGamePath,
+            mtrlDiskPath = g.MtrlDiskPath,
+            normDiskPath = g.NormDiskPath,
+            meshDiskPath = g.MeshDiskPath,
             selectedLayerIndex = g.SelectedLayerIndex,
             layers = g.Layers.Select(SerializeLayer).ToList(),
         }).ToList(),
@@ -204,7 +220,54 @@ internal sealed class ApiController : WebApiController
     public object PostPreview()
     {
         _preview.UpdatePreview(_project);
+        return new { ok = true, mode = _preview.LastUpdateMode };
+    }
+
+    [Route(HttpVerbs.Post, "/preview/full")]
+    public object PostPreviewFull()
+    {
+        _preview.UpdatePreviewFull(_project);
+        return new { ok = true, mode = "full" };
+    }
+
+    [Route(HttpVerbs.Post, "/preview/inplace")]
+    public object PostPreviewInPlace()
+    {
+        // Triggers async in-place, results applied on next Draw frame
+        _preview.UpdatePreview(_project);
+        return new { ok = true, mode = "async-inplace" };
+    }
+
+    [Route(HttpVerbs.Post, "/swap/reset")]
+    public object PostSwapReset()
+    {
+        _preview.ResetSwapState();
         return new { ok = true };
+    }
+
+    [Route(HttpVerbs.Get, "/swap/status")]
+    public object GetSwapStatus() => new
+    {
+        gpuSwapEnabled   = _config.UseGpuSwap,
+        canSwapInPlace   = _preview.CanSwapInPlace,
+        initializedPaths = _preview.InitializedPathCount,
+        lastUpdateMode   = _preview.LastUpdateMode,
+    };
+
+    [Route(HttpVerbs.Get, "/textures")]
+    public object GetTextures()
+    {
+        if (_textureSwap == null)
+            return new { error = "TextureSwapService not available" };
+        return new { dump = _textureSwap.DumpCharacterTextures() };
+    }
+
+    [Route(HttpVerbs.Post, "/swap/toggle")]
+    public object PostSwapToggle()
+    {
+        _config.UseGpuSwap = !_config.UseGpuSwap;
+        _config.Save();
+        return new { useGpuSwap = _config.UseGpuSwap };
     }
 
     [Route(HttpVerbs.Post, "/mesh/load")]

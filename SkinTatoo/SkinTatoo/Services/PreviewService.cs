@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
+using System.Threading;
+using System.Threading.Tasks;
 using Dalamud.Plugin.Services;
 using Lumina.Data.Files;
 using SkinTatoo.Core;
@@ -16,6 +18,8 @@ public class PreviewService : IDisposable
     private readonly MeshExtractor meshExtractor;
     private readonly DecalImageLoader imageLoader;
     private readonly PenumbraBridge penumbra;
+    private readonly TextureSwapService? textureSwap;
+    private readonly EmissiveCBufferHook? emissiveHook;
     private readonly IPluginLog log;
     private readonly Configuration config;
 
@@ -23,12 +27,51 @@ public class PreviewService : IDisposable
     private readonly string outputDir;
     private bool disposed;
 
+    // GPU swap state tracking
+    private readonly HashSet<string> initializedRedirects = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> previewDiskPaths = new(StringComparer.OrdinalIgnoreCase);
+
+    // Cache base textures to avoid re-reading from disk on every update
+    private readonly Dictionary<string, (byte[] Data, int Width, int Height)> baseTextureCache = new();
+
+    // Emissive ConstantBuffer offsets (mtrlGamePath → byte offset, used for full redraw .mtrl building)
+    private readonly Dictionary<string, int> emissiveOffsets = new();
+
+    // Track mtrl preview disk paths (mtrlGamePath → disk path for ColorTable matching)
+    private readonly Dictionary<string, string> previewMtrlDiskPaths = new(StringComparer.OrdinalIgnoreCase);
+
+    // Track emissive color to detect changes that need full redraw
+    private readonly Dictionary<string, Vector3> lastEmissiveColors = new();
+
+    // Async compositing
+    private CancellationTokenSource? asyncCancel;
+    private volatile SwapBatch? pendingBatch;
+
+    private record SwapBatchEntry(string GamePath, string? DiskPath, byte[] BgraData, int Width, int Height);
+    private record EmissiveEntry(string MtrlGamePath, string? MtrlDiskPath, Vector3 Color, int CBufferOffset);
+    private record SwapBatch(List<SwapBatchEntry> Textures, List<EmissiveEntry> Emissives);
+
     public MeshData? CurrentMesh => currentMesh;
+
+    /// <summary>Whether in-place GPU swap is available for all active groups.</summary>
+    public bool CanSwapInPlace { get; private set; }
+
+    /// <summary>Number of paths currently initialized for GPU swap.</summary>
+    public int InitializedPathCount => initializedRedirects.Count;
+
+    /// <summary>Last update mode used.</summary>
+    public string LastUpdateMode { get; private set; } = "none";
+
+    /// <summary>Whether emissive CBuffer offset is known for a group's mtrl.</summary>
+    public bool HasEmissiveOffset(string? mtrlGamePath)
+        => !string.IsNullOrEmpty(mtrlGamePath) && emissiveOffsets.TryGetValue(mtrlGamePath, out var off) && off > 0;
 
     public PreviewService(
         MeshExtractor meshExtractor,
         DecalImageLoader imageLoader,
         PenumbraBridge penumbra,
+        TextureSwapService? textureSwap,
+        EmissiveCBufferHook? emissiveHook,
         IPluginLog log,
         Configuration config,
         string outputDir)
@@ -36,6 +79,8 @@ public class PreviewService : IDisposable
         this.meshExtractor = meshExtractor;
         this.imageLoader = imageLoader;
         this.penumbra = penumbra;
+        this.textureSwap = textureSwap;
+        this.emissiveHook = emissiveHook;
         this.log = log;
         this.config = config;
         this.outputDir = outputDir;
@@ -71,10 +116,72 @@ public class PreviewService : IDisposable
         return true;
     }
 
-    /// <summary>Update preview for all target groups in the project.</summary>
+    /// <summary>Update preview — auto-selects full redraw or async in-place GPU swap.</summary>
     public void UpdatePreview(DecalProject project)
     {
-        DebugServer.AppendLog($"[PreviewService] UpdatePreview: {project.Groups.Count} groups");
+        if (config.UseGpuSwap && textureSwap != null && CheckCanSwapInPlace(project))
+        {
+            StartAsyncInPlace(project);
+        }
+        else
+        {
+            UpdatePreviewFull(project);
+        }
+    }
+
+    /// <summary>Call from Draw() every frame to apply completed async swaps.</summary>
+    public unsafe void ApplyPendingSwaps()
+    {
+        var batch = Interlocked.Exchange(ref pendingBatch, null);
+        if (batch == null) return;
+
+        var charBase = textureSwap?.GetLocalPlayerCharacterBase();
+        if (charBase == null) return;
+
+        foreach (var entry in batch.Textures)
+        {
+            var slot = textureSwap!.FindTextureSlot(charBase, entry.GamePath, entry.DiskPath);
+            if (slot != null)
+                textureSwap.SwapTexture(slot, entry.BgraData, entry.Width, entry.Height);
+        }
+
+        foreach (var em in batch.Emissives)
+        {
+            // Try ColorTable swap first (works for character.shpk etc.)
+            // ColorTable swap for character.shpk etc.; skin.shpk handled by EmissiveCBufferHook
+            textureSwap!.UpdateEmissiveViaColorTable(charBase, em.MtrlGamePath, em.MtrlDiskPath, em.Color);
+            if (emissiveHook != null && em.CBufferOffset > 0)
+                emissiveHook.SetTargetByPath(charBase, em.MtrlGamePath, em.MtrlDiskPath, em.Color);
+        }
+
+        LastUpdateMode = "inplace";
+    }
+
+    /// <summary>Get local player CharacterBase pointer for direct manipulation.</summary>
+    public unsafe FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* GetCharacterBase()
+        => textureSwap?.GetLocalPlayerCharacterBase();
+
+    /// <summary>Write highlight emissive color via ColorTable texture swap or CBuffer hook.</summary>
+    public unsafe void HighlightEmissiveColor(
+        FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase,
+        TargetGroup group, Vector3 color)
+    {
+        if (textureSwap == null) return;
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return;
+
+        var mtrlDiskPath = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
+        emissiveOffsets.TryGetValue(group.MtrlGamePath!, out var cbufOffset);
+        textureSwap.UpdateEmissiveViaColorTable(charBase, group.MtrlGamePath!, mtrlDiskPath, color);
+        // Always set hook target for materials with known CBuffer offset (skin.shpk etc.)
+        if (emissiveHook != null && cbufOffset > 0)
+            emissiveHook.SetTargetByPath(charBase, group.MtrlGamePath!, mtrlDiskPath, color);
+    }
+
+    /// <summary>Force a full Penumbra redraw update (always flickers).</summary>
+    public void UpdatePreviewFull(DecalProject project)
+    {
+        LastUpdateMode = "full";
+        DebugServer.AppendLog("[PreviewService] Mode: FULL (Penumbra redraw)");
 
         try
         {
@@ -92,34 +199,289 @@ public class PreviewService : IDisposable
                 penumbra.SetTextureRedirects(redirects);
 
             penumbra.RedrawPlayer();
-            DebugServer.AppendLog($"[PreviewService] Preview updated ({redirects.Count} redirects)");
+
+            // Track initialized paths for future GPU swap
+            foreach (var (gamePath, diskPath) in redirects)
+            {
+                initializedRedirects.Add(gamePath);
+                previewDiskPaths[gamePath] = diskPath;
+            }
+
+            // Snapshot emissive colors so we detect changes that need full redraw
+            foreach (var group in project.Groups)
+            {
+                if (string.IsNullOrEmpty(group.DiffuseGamePath)) continue;
+                if (group.HasEmissiveLayers())
+                    lastEmissiveColors[group.DiffuseGamePath] = GetCombinedEmissiveColor(group.Layers);
+            }
+
+            DebugServer.AppendLog(
+                $"[PreviewService] Full update done ({redirects.Count} redirects, {initializedRedirects.Count} initialized)");
         }
         catch (Exception ex)
         {
-            DebugServer.AppendLog($"[PreviewService] UpdatePreview exception: {ex.Message}");
-            log.Error(ex, "UpdatePreview failed");
+            DebugServer.AppendLog($"[PreviewService] Full update exception: {ex.Message}");
+            log.Error(ex, "UpdatePreviewFull failed");
         }
     }
 
-    private void ProcessGroup(TargetGroup group, Dictionary<string, string> redirects)
+    /// <summary>Kick off background compositing, results applied via ApplyPendingSwaps.</summary>
+    private void StartAsyncInPlace(DecalProject project)
+    {
+        // Cancel any previous background work
+        asyncCancel?.Cancel();
+        asyncCancel = new CancellationTokenSource();
+        var token = asyncCancel.Token;
+
+        // Capture all data needed by background thread (avoid touching mutable state later)
+        var jobs = new List<(TargetGroup Group, string DiffuseGamePath, string? DiskPath,
+            string? NormGamePath, string? NormDiskPath, string? MtrlGamePath, int EmissiveOffset,
+            List<LayerSnapshot> Layers, Vector3 EmissiveColor)>();
+
+        foreach (var group in project.Groups)
+        {
+            if (string.IsNullOrEmpty(group.DiffuseGamePath) || group.Layers.Count == 0)
+                continue;
+            if (!previewDiskPaths.ContainsKey(group.DiffuseGamePath))
+                continue;
+
+            previewDiskPaths.TryGetValue(group.DiffuseGamePath, out var diffDisk);
+            previewDiskPaths.TryGetValue(group.NormGamePath ?? "", out var normDisk);
+
+            emissiveOffsets.TryGetValue(group.MtrlGamePath ?? "", out var emOff);
+
+            // Snapshot layer parameters so background thread reads stable data
+            var snapshots = new List<LayerSnapshot>();
+            foreach (var l in group.Layers)
+                snapshots.Add(new LayerSnapshot(l));
+
+            jobs.Add((group, group.DiffuseGamePath, diffDisk,
+                group.NormGamePath, normDisk ?? (group.OrigNormDiskPath ?? group.NormDiskPath),
+                group.MtrlGamePath, emOff, snapshots,
+                GetCombinedEmissiveColor(group.Layers)));
+        }
+
+        Task.Run(() =>
+        {
+            try
+            {
+                var texEntries = new List<SwapBatchEntry>();
+                var emEntries = new List<EmissiveEntry>();
+
+                foreach (var job in jobs)
+                {
+                    if (token.IsCancellationRequested) return;
+
+                    // Convert snapshots to DecalLayers for compositing
+                    var layers = job.Layers.ConvertAll(s => s.ToDecalLayer());
+
+                    // Diffuse composite
+                    var baseTex = LoadBaseTexture(job.Group);
+                    var rgba = CpuUvComposite(layers, baseTex.Data, baseTex.Width, baseTex.Height);
+                    if (rgba != null)
+                    {
+                        if (job.DiskPath != null)
+                            WriteBgraTexFile(job.DiskPath, rgba, baseTex.Width, baseTex.Height);
+                        var bgra = TextureSwapService.RgbaToBgra(rgba);
+                        texEntries.Add(new SwapBatchEntry(
+                            job.DiffuseGamePath, job.DiskPath, bgra, baseTex.Width, baseTex.Height));
+                    }
+
+                    // Normal map (emissive mask)
+                    if (HasEmissiveLayers(job.Layers) && !string.IsNullOrEmpty(job.NormDiskPath))
+                    {
+                        var normRgba = CompositeEmissiveNorm(
+                            layers, job.NormDiskPath!, baseTex.Width, baseTex.Height);
+                        if (normRgba != null)
+                        {
+                            previewDiskPaths.TryGetValue(job.NormGamePath ?? "", out var normDiskOut);
+                            if (normDiskOut != null)
+                                WriteBgraTexFile(normDiskOut, normRgba, baseTex.Width, baseTex.Height);
+                            var normBgra = TextureSwapService.RgbaToBgra(normRgba);
+                            texEntries.Add(new SwapBatchEntry(
+                                job.NormGamePath!, normDiskOut, normBgra, baseTex.Width, baseTex.Height));
+                        }
+
+                        // Emissive color → ColorTable texture swap or CBuffer write
+                        if (!string.IsNullOrEmpty(job.MtrlGamePath))
+                        {
+                            var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(job.MtrlGamePath!);
+                            emissiveOffsets.TryGetValue(job.MtrlGamePath!, out var emOff);
+                            emEntries.Add(new EmissiveEntry(job.MtrlGamePath!, mtrlDisk, job.EmissiveColor, emOff));
+                        }
+                    }
+                }
+
+                if (!token.IsCancellationRequested)
+                    pendingBatch = new SwapBatch(texEntries, emEntries);
+            }
+            catch (Exception ex)
+            {
+                DebugServer.AppendLog($"[PreviewService] Async composite exception: {ex.Message}");
+            }
+        }, token);
+    }
+
+    // Snapshot of layer parameters for thread-safe background compositing
+    private class LayerSnapshot
+    {
+        public bool IsVisible, AffectsDiffuse, AffectsEmissive;
+        public string? ImagePath;
+        public Vector2 UvCenter, UvScale;
+        public float RotationDeg, Opacity;
+        public BlendMode BlendMode;
+        public EmissiveMask EmissiveMask;
+        public float EmissiveMaskFalloff;
+        public Vector3 EmissiveColor;
+        public float EmissiveIntensity;
+        public float GradientAngleDeg;
+        public float GradientScale;
+        public float GradientOffset;
+
+        public LayerSnapshot(DecalLayer l)
+        {
+            IsVisible = l.IsVisible; AffectsDiffuse = l.AffectsDiffuse; AffectsEmissive = l.AffectsEmissive;
+            ImagePath = l.ImagePath; UvCenter = l.UvCenter; UvScale = l.UvScale;
+            RotationDeg = l.RotationDeg; Opacity = l.Opacity; BlendMode = l.BlendMode;
+            EmissiveMask = l.EmissiveMask; EmissiveMaskFalloff = l.EmissiveMaskFalloff;
+            EmissiveColor = l.EmissiveColor; EmissiveIntensity = l.EmissiveIntensity;
+            GradientAngleDeg = l.GradientAngleDeg; GradientScale = l.GradientScale;
+            GradientOffset = l.GradientOffset;
+        }
+
+        public DecalLayer ToDecalLayer() => new()
+        {
+            IsVisible = IsVisible, AffectsDiffuse = AffectsDiffuse, AffectsEmissive = AffectsEmissive,
+            ImagePath = ImagePath, UvCenter = UvCenter, UvScale = UvScale,
+            RotationDeg = RotationDeg, Opacity = Opacity, BlendMode = BlendMode,
+            EmissiveMask = EmissiveMask, EmissiveMaskFalloff = EmissiveMaskFalloff,
+            EmissiveColor = EmissiveColor, EmissiveIntensity = EmissiveIntensity,
+            GradientAngleDeg = GradientAngleDeg, GradientScale = GradientScale,
+            GradientOffset = GradientOffset,
+        };
+    }
+
+    private static bool HasEmissiveLayers(List<LayerSnapshot> layers)
+    {
+        foreach (var l in layers)
+            if (l.IsVisible && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
+                return true;
+        return false;
+    }
+
+    /// <summary>Clear emissive hook targets (e.g. when emissive is disabled).</summary>
+    public void ClearEmissiveHookTargets() => emissiveHook?.ClearTargets();
+
+    /// <summary>Clear GPU swap state, forcing next update to do full redraw.</summary>
+    public void ResetSwapState()
+    {
+        asyncCancel?.Cancel();
+        pendingBatch = null;
+        initializedRedirects.Clear();
+        previewDiskPaths.Clear();
+        emissiveOffsets.Clear();
+        previewMtrlDiskPaths.Clear();
+        lastEmissiveColors.Clear();
+        emissiveHook?.ClearTargets();
+        CanSwapInPlace = false;
+        LastUpdateMode = "none";
+        DebugServer.AppendLog("[PreviewService] GPU swap state reset");
+    }
+
+    // ── Private: check if all groups can swap in-place ───────────────────────
+
+    private bool CheckCanSwapInPlace(DecalProject project)
+    {
+        if (initializedRedirects.Count == 0)
+        {
+            CanSwapInPlace = false;
+            return false;
+        }
+
+        foreach (var group in project.Groups)
+        {
+            if (string.IsNullOrEmpty(group.DiffuseGamePath) || group.Layers.Count == 0)
+                continue;
+
+            // If this group never produced a redirect (no visible output),
+            // it doesn't need to be initialized — skip it.
+            if (!previewDiskPaths.ContainsKey(group.DiffuseGamePath))
+                continue;
+
+            if (!initializedRedirects.Contains(group.DiffuseGamePath))
+            {
+                DebugServer.AppendLog(
+                    $"[PreviewService] CanSwap=NO diffuse not initialized: {group.DiffuseGamePath}");
+                CanSwapInPlace = false;
+                return false;
+            }
+
+            if (group.HasEmissiveLayers())
+            {
+                if (!string.IsNullOrEmpty(group.NormGamePath)
+                    && previewDiskPaths.ContainsKey(group.NormGamePath)
+                    && !initializedRedirects.Contains(group.NormGamePath))
+                {
+                    DebugServer.AppendLog(
+                        $"[PreviewService] CanSwap=NO norm not initialized: {group.NormGamePath}");
+                    CanSwapInPlace = false;
+                    return false;
+                }
+
+                if (!string.IsNullOrEmpty(group.MtrlGamePath)
+                    && previewDiskPaths.ContainsKey(group.MtrlGamePath)
+                    && !initializedRedirects.Contains(group.MtrlGamePath))
+                {
+                    DebugServer.AppendLog(
+                        $"[PreviewService] CanSwap=NO mtrl not initialized: {group.MtrlGamePath}");
+                    CanSwapInPlace = false;
+                    return false;
+                }
+
+            }
+        }
+
+        CanSwapInPlace = true;
+        return true;
+    }
+
+    // ── Private: shared helpers ──────────────────────────────────────────────
+
+    private (byte[] Data, int Width, int Height) LoadBaseTexture(TargetGroup group)
     {
         var diffuseDisk = group.OrigDiffuseDiskPath ?? group.DiffuseDiskPath;
-        var baseTex = LoadTexture(diffuseDisk);
-        int w, h;
-        byte[] baseData;
+        if (string.IsNullOrEmpty(diffuseDisk))
+        {
+            int res = config.TextureResolution;
+            return (new byte[res * res * 4], res, res);
+        }
 
+        // Return cached version if available
+        if (baseTextureCache.TryGetValue(diffuseDisk, out var cached))
+            return cached;
+
+        var baseTex = LoadTexture(diffuseDisk);
         if (baseTex != null)
         {
-            (baseData, w, h) = baseTex.Value;
-        }
-        else
-        {
-            w = h = config.TextureResolution;
-            baseData = new byte[w * h * 4];
+            baseTextureCache[diffuseDisk] = baseTex.Value;
+            return baseTex.Value;
         }
 
+        int r = config.TextureResolution;
+        var fallback = (new byte[r * r * 4], r, r);
+        baseTextureCache[diffuseDisk] = fallback;
+        return fallback;
+    }
+
+    // ── Existing methods (unchanged) ─────────────────────────────────────────
+
+    private void ProcessGroup(TargetGroup group, Dictionary<string, string> redirects)
+    {
+        var baseTex = LoadBaseTexture(group);
+        int w = baseTex.Width, h = baseTex.Height;
+
         // Diffuse composite
-        var diffResult = CpuUvComposite(group.Layers, baseData, w, h);
+        var diffResult = CpuUvComposite(group.Layers, baseTex.Data, w, h);
         if (diffResult != null)
         {
             var safeName = MakeSafeFileName(group.Name);
@@ -138,10 +500,13 @@ public class PreviewService : IDisposable
             var mtrlOutPath = Path.Combine(outputDir, $"preview_{safeName}.mtrl");
             var mtrlDisk = group.OrigMtrlDiskPath ?? group.MtrlDiskPath;
 
-            if (TryBuildEmissiveMtrl(mtrlDisk ?? group.MtrlGamePath!, mtrlOutPath, emissiveColor))
+            if (TryBuildEmissiveMtrl(mtrlDisk ?? group.MtrlGamePath!, mtrlOutPath, emissiveColor, out var emOffset))
             {
                 redirects[group.MtrlGamePath!] = mtrlOutPath;
-                DebugServer.AppendLog($"[PreviewService] Mtrl (emissive) → {group.MtrlGamePath}");
+                previewMtrlDiskPaths[group.MtrlGamePath!] = mtrlOutPath;
+                if (emOffset >= 0)
+                    emissiveOffsets[group.MtrlGamePath!] = emOffset;
+                DebugServer.AppendLog($"[PreviewService] Mtrl (emissive) → {group.MtrlGamePath} cbufOffset={emOffset}");
             }
 
             // Write emissive area into normal map alpha channel
@@ -162,9 +527,10 @@ public class PreviewService : IDisposable
 
     private static string MakeSafeFileName(string name)
     {
-        var safe = name.Replace(' ', '_').Replace('/', '_').Replace('\\', '_');
-        if (safe.Length > 40) safe = safe[..40];
-        return string.IsNullOrEmpty(safe) ? "group" : safe;
+        // Use ASCII-only hash to avoid encoding mismatch between disk path
+        // and game ResourceHandle.FileName (which garbles non-ASCII characters)
+        var hash = (uint)name.GetHashCode(StringComparison.Ordinal);
+        return $"g{hash:X8}";
     }
 
     private (byte[] Data, int Width, int Height)? LoadTexture(string? diskPath)
@@ -180,15 +546,26 @@ public class PreviewService : IDisposable
     private byte[]? CompositeEmissiveNorm(List<DecalLayer> layers, string normDiskPath, int w, int h)
     {
         byte[] baseNorm;
-        var normImg = File.Exists(normDiskPath) ? imageLoader.LoadImage(normDiskPath) : LoadGameTexture(normDiskPath);
-        if (normImg != null)
+
+        // Cache the base normal texture
+        if (baseTextureCache.TryGetValue(normDiskPath, out var cachedNorm))
         {
-            var (data, iw, ih) = normImg.Value;
+            var (data, iw, ih) = cachedNorm;
             baseNorm = (iw != w || ih != h) ? ResizeBilinear(data, iw, ih, w, h) : (byte[])data.Clone();
         }
         else
         {
-            baseNorm = new byte[w * h * 4];
+            var normImg = File.Exists(normDiskPath) ? imageLoader.LoadImage(normDiskPath) : LoadGameTexture(normDiskPath);
+            if (normImg != null)
+            {
+                baseTextureCache[normDiskPath] = normImg.Value;
+                var (data, iw, ih) = normImg.Value;
+                baseNorm = (iw != w || ih != h) ? ResizeBilinear(data, iw, ih, w, h) : (byte[])data.Clone();
+            }
+            else
+            {
+                baseNorm = new byte[w * h * 4];
+            }
         }
 
         var output = (byte[])baseNorm.Clone();
@@ -236,7 +613,27 @@ public class PreviewService : IDisposable
                     da *= opacity;
                     if (da < 0.001f) continue;
 
-                    float maskValue = ComputeEmissiveMask(layer.EmissiveMask, layer.EmissiveMaskFalloff, ru, rv, da);
+                    float maskValue;
+                    if (layer.EmissiveMask == EmissiveMask.DirectionalGradient)
+                        maskValue = ComputeDirectionalGradient(ru, rv, da,
+                            layer.GradientAngleDeg, layer.GradientScale, layer.EmissiveMaskFalloff, layer.GradientOffset);
+                    else if (layer.EmissiveMask == EmissiveMask.ShapeOutline)
+                    {
+                        // Sample neighbors to detect alpha edges
+                        float step = 1f / MathF.Max(decalW, decalH);
+                        float sum = 0; int cnt = 0;
+                        for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            if (dx == 0 && dy == 0) continue;
+                            float ndu = du + dx; float ndv = dv + dy;
+                            SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
+                            sum += na * opacity; cnt++;
+                        }
+                        maskValue = ComputeShapeOutline(da, layer.EmissiveMaskFalloff, sum / cnt);
+                    }
+                    else
+                        maskValue = ComputeEmissiveMask(layer.EmissiveMask, layer.EmissiveMaskFalloff, ru, rv, da);
 
                     int oIdx = (py * w + px) * 4;
                     byte emByte = (byte)Math.Clamp((int)(maskValue * 255), 0, 255);
@@ -261,8 +658,9 @@ public class PreviewService : IDisposable
         return color;
     }
 
-    private bool TryBuildEmissiveMtrl(string mtrlPath, string outputPath, Vector3 emissiveColor)
+    private bool TryBuildEmissiveMtrl(string mtrlPath, string outputPath, Vector3 emissiveColor, out int emissiveByteOffset)
     {
+        emissiveByteOffset = -1;
         try
         {
             byte[] mtrlBytes;
@@ -288,7 +686,7 @@ public class PreviewService : IDisposable
             try { File.Delete(tempPath); } catch { }
 
             DebugServer.AppendLog($"[PreviewService] Loaded mtrl: {mtrlPath} ({mtrlBytes.Length} bytes)");
-            return MtrlFileWriter.WriteEmissiveMtrl(mtrl, mtrlBytes, outputPath, emissiveColor);
+            return MtrlFileWriter.WriteEmissiveMtrl(mtrl, mtrlBytes, outputPath, emissiveColor, out emissiveByteOffset);
         }
         catch (Exception ex)
         {
@@ -398,7 +796,22 @@ public class PreviewService : IDisposable
 
     private static void WriteBgraTexFile(string path, byte[] rgbaData, int width, int height)
     {
-        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
+        // Retry with backoff — game may hold a read lock on the file
+        FileStream? fs = null;
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
+                break;
+            }
+            catch (IOException) when (attempt < 4)
+            {
+                Thread.Sleep(10 * (attempt + 1));
+            }
+        }
+        if (fs == null) return;
+        using var _ = fs;
         using var bw = new BinaryWriter(fs);
 
         bw.Write(0x00800000u);
@@ -473,11 +886,48 @@ public class PreviewService : IDisposable
             case Core.EmissiveMask.EdgeGlow:
                 m = 1f - Smoothstep(0f, f, edgeDist);
                 break;
+            case Core.EmissiveMask.GaussianFeather:
+                float sigma = MathF.Max(f, 0.01f) * 0.5f;
+                float gEdge = MathF.Min(0.5f - MathF.Abs(ru), 0.5f - MathF.Abs(rv));
+                gEdge = MathF.Max(gEdge, 0f);
+                m = 1f - MathF.Exp(-(gEdge * gEdge) / (2f * sigma * sigma));
+                break;
             default:
                 m = 1f;
                 break;
         }
 
+        return da * m;
+    }
+
+    /// <summary>Compute directional gradient mask with angle, scale and offset parameters.</summary>
+    public static float ComputeDirectionalGradient(float ru, float rv, float da,
+        float angleDeg, float scale, float falloff, float offset)
+    {
+        float rad = angleDeg * (MathF.PI / 180f);
+        float cosA = MathF.Cos(rad);
+        float sinA = MathF.Sin(rad);
+
+        float projected = ru * cosA + rv * sinA;
+        float s = MathF.Max(scale, 0.01f);
+        float t = (projected / s + 0.5f + offset);
+        t = MathF.Max(0f, MathF.Min(1f, t));
+
+        float f = MathF.Max(falloff, 0.01f);
+        float m = Smoothstep(0.5f - f * 0.5f, 0.5f + f * 0.5f, t);
+
+        return da * m;
+    }
+
+    /// <summary>Compute shape outline mask — glow along decal alpha edges (like PS outer glow).</summary>
+    public static float ComputeShapeOutline(float da, float falloff, float neighborAvgAlpha)
+    {
+        // Edge = where alpha differs from neighbors.
+        // da > 0 and neighborAvgAlpha < da means we're near an edge inside the decal.
+        // We want: glow strongest at decal alpha boundary, fading inward.
+        float edgeStrength = MathF.Abs(da - neighborAvgAlpha);
+        float f = MathF.Max(falloff, 0.01f);
+        float m = Smoothstep(0f, f, edgeStrength);
         return da * m;
     }
 
@@ -509,6 +959,7 @@ public class PreviewService : IDisposable
 
     public void ClearTextureCache()
     {
+        baseTextureCache.Clear();
         DebugServer.AppendLog("[PreviewService] Texture cache cleared");
     }
 

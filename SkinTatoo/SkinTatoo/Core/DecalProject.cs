@@ -78,6 +78,9 @@ public class DecalProject
                     EmissiveIntensity = l.EmissiveIntensity,
                     EmissiveMask = (int)l.EmissiveMask,
                     EmissiveMaskFalloff = l.EmissiveMaskFalloff,
+                    GradientAngleDeg = l.GradientAngleDeg,
+                    GradientScale = l.GradientScale,
+                    GradientOffset = l.GradientOffset,
                 });
             }
             config.TargetGroups.Add(sg);
@@ -118,10 +121,14 @@ public class DecalProject
                     IsVisible = s.IsVisible,
                     AffectsDiffuse = s.AffectsDiffuse,
                     AffectsEmissive = s.AffectsEmissive,
-                    EmissiveColor = new Vector3(s.EmissiveColorR, s.EmissiveColorG, s.EmissiveColorB),
-                    EmissiveIntensity = s.EmissiveIntensity,
+                    EmissiveColor = (s.EmissiveColorR == 0 && s.EmissiveColorG == 0 && s.EmissiveColorB == 0 && s.AffectsEmissive)
+                        ? new Vector3(1f, 1f, 1f) : new Vector3(s.EmissiveColorR, s.EmissiveColorG, s.EmissiveColorB),
+                    EmissiveIntensity = s.EmissiveIntensity > 0 ? s.EmissiveIntensity : 1f,
                     EmissiveMask = (EmissiveMask)s.EmissiveMask,
                     EmissiveMaskFalloff = s.EmissiveMaskFalloff,
+                    GradientAngleDeg = s.GradientAngleDeg,
+                    GradientScale = s.GradientScale,
+                    GradientOffset = s.GradientOffset,
                 });
             }
             Groups.Add(g);

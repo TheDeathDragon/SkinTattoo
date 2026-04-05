@@ -28,6 +28,9 @@ public class SavedLayer
     public float EmissiveIntensity { get; set; } = 1f;
     public int EmissiveMask { get; set; }
     public float EmissiveMaskFalloff { get; set; } = 0.5f;
+    public float GradientAngleDeg { get; set; }
+    public float GradientScale { get; set; } = 1f;
+    public float GradientOffset { get; set; }
 }
 
 [Serializable]
@@ -60,6 +63,7 @@ public class Configuration : IPluginConfiguration
     public bool DebugWindowOpen { get; set; }
     public string? LastImageDir { get; set; }
     public bool AutoPreview { get; set; }
+    public bool UseGpuSwap { get; set; } = true;
 
     [NonSerialized]
     private IDalamudPluginInterface? pluginInterface;
