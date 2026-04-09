@@ -90,9 +90,17 @@ public class Configuration : IPluginConfiguration
     public bool MainWindowOpen { get; set; }
     public bool DebugWindowOpen { get; set; }
     public bool ModelEditorWindowOpen { get; set; }
+    public bool PbrInspectorWindowOpen { get; set; }
     public string? LastImageDir { get; set; }
     public bool AutoPreview { get; set; }
     public bool UseGpuSwap { get; set; } = true;
+
+    // Game-side GPU swap throttle. Each SwapTexture call at 4096² is ~5-15ms main-thread
+    // work (GpuTexture.CreateTexture2D + 64MB InitializeContents + Interlocked.Exchange),
+    // so running it at the full 30Hz drag rate eats the frame budget. The 3D editor preview
+    // already shows the latest state; the game-side swap only needs to catch up periodically
+    // plus a final flush when the user stops interacting.
+    public int GameSwapIntervalMs { get; set; } = 150;
 
     // Mod export defaults
     public string DefaultAuthor { get; set; } = "";
@@ -118,6 +126,12 @@ public class Configuration : IPluginConfiguration
             ShowLayerFadeMaskMigrationNotice = true;
         }
         Version = 4;
+
+        // Clamp swap interval to a sane floor on load. Earlier slider allowed 0 which
+        // would make ApplyPendingSwaps fire every frame (~60Hz × 64MB × N textures =
+        // unplayable). 33ms ≈ 30Hz matches the compose throttle.
+        if (GameSwapIntervalMs < 33) GameSwapIntervalMs = 33;
+        if (GameSwapIntervalMs > 500) GameSwapIntervalMs = 500;
     }
     public void Save() => pluginInterface?.SavePluginConfig(this);
 }

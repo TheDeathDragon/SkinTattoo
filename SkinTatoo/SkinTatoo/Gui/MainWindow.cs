@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
@@ -47,11 +48,14 @@ public class MainWindow : Window, IDisposable
     private bool canvasScalingLayer;
     private bool showHelpWindow;
 
-    // Panel widths (resizable)
+    // Cached base texture size for the current frame — populated in DrawBaseTexture,
+    // consumed by the canvas overlay to show "WxH" in the top-right corner.
+    private int lastBaseTexWidth;
+    private int lastBaseTexHeight;
+
+    // Panel widths (resizable). -1 on left means "not initialized yet — use default on first draw".
     private float leftPanelWidth = -1;
     private float rightPanelWidth = 260f;
-    private bool draggingLeftSplitter;
-    private bool draggingRightSplitter;
 
     // Highlight glow state (toggle mode)
     private bool highlightActive;
@@ -60,12 +64,30 @@ public class MainWindow : Window, IDisposable
     private int highlightFrameCounter;
     private const int HighlightCycleSteps = 400;
 
+    // Initialization phase — drives the "loading..." overlay the first time the user
+    // opens the window in a session.
+    //
+    //   Pending → frames 0-1: window chrome is shown but the background Task hasn't
+    //                         started yet (gives the user 1 frame of "something is
+    //                         happening" before the spinner).
+    //   Loading → Task.Run is in flight; overlay + BeginDisabled freeze the UI.
+    //   Done    → normal interactive draw.
+    private enum InitPhase { Pending, Loading, Done }
+    private InitPhase initPhase = InitPhase.Pending;
+    private int initWarmupFrames;
+    private Task? initTask;
+
     // Auto-preview
     private bool previewDirty;
     private DateTime lastDirtyTime = DateTime.MinValue;
     private DateTime firstDirtyTime = DateTime.MinValue;
+    private DateTime lastGpuPreviewFireUtc = DateTime.MinValue;
     private const double PreviewDebounceFullSec = 0.5;
     private const double PreviewMaxWaitFullSec = 1.5;
+    // Cap GPU swap composite rate. Each compose allocates ~16-24MB of byte[] (LOH),
+    // so firing every frame during a 3D-editor drag thrashes the GC. ~33ms ≈ 30Hz
+    // is plenty for visual responsiveness while halving the allocation rate.
+    private const double GpuPreviewMinIntervalMs = 33;
 
     // v1 PBR: row pair exhaustion toast
     private string? rowPairToast;
@@ -80,7 +102,15 @@ public class MainWindow : Window, IDisposable
     public ConfigWindow? ConfigWindowRef { get; set; }
     public ModelEditorWindow? ModelEditorWindowRef { get; set; }
     public ModExportWindow? ModExportWindowRef { get; set; }
-    public event Action? OnSaveRequested;
+    public PbrInspectorWindow? PbrInspectorWindowRef { get; set; }
+
+    /// <summary>
+    /// Callback from Plugin to perform the one-shot mesh load + preview apply.
+    /// Must return a Task that completes when every step (both the background mesh
+    /// extraction and the main-thread Penumbra IPC hop) has finished — the MainWindow
+    /// keeps the loading overlay up until the returned Task transitions to Completed.
+    /// </summary>
+    public Func<Task>? InitializeRequested { get; set; }
 
     public MainWindow(
         DecalProject project,
@@ -106,6 +136,34 @@ public class MainWindow : Window, IDisposable
 
     public override void Draw()
     {
+        // Keep the window title in sync with Penumbra's connection state so the user
+        // can see at a glance whether redirects will go through.
+        WindowName = penumbra.IsAvailable
+            ? "SkinTatoo 纹身编辑器 [Penumbra 已连接]###SkinTatooMain"
+            : "SkinTatoo 纹身编辑器 [Penumbra 未运行]###SkinTatooMain";
+
+        // Init phase state machine (see field comment). The first two draws just render
+        // the window chrome; on draw #2 we kick off the background task so the user sees
+        // the spinner appear over the already-visible window.
+        if (initPhase == InitPhase.Pending)
+        {
+            initWarmupFrames++;
+            if (initWarmupFrames >= 2)
+            {
+                initTask = InitializeRequested?.Invoke();
+                initPhase = initTask != null ? InitPhase.Loading : InitPhase.Done;
+            }
+        }
+        else if (initPhase == InitPhase.Loading && initTask != null && initTask.IsCompleted)
+        {
+            if (initTask.IsFaulted)
+                DebugServer.AppendLog($"[MainWindow] Init task faulted: {initTask.Exception?.GetBaseException().Message}");
+            initTask = null;
+            initPhase = InitPhase.Done;
+        }
+
+        var loading = initPhase != InitPhase.Done;
+
         // Apply any completed async GPU swaps (non-blocking)
         previewService.ApplyPendingSwaps();
 
@@ -144,6 +202,11 @@ public class MainWindow : Window, IDisposable
         // Highlight: push cycling color every frame while active
         UpdateHighlight();
 
+        // While loading, gray out and block input for every widget inside the window.
+        // BeginDisabled propagates into child windows, so the three panels are frozen
+        // along with the toolbar.
+        if (loading) ImGui.BeginDisabled();
+
         DrawToolbar();
         ImGui.Separator();
 
@@ -158,6 +221,14 @@ public class MainWindow : Window, IDisposable
 
         if (showHelpWindow)
             DrawHelpWindow();
+
+        if (loading) ImGui.EndDisabled();
+
+        // Loading overlay is drawn on the foreground list so it lands on top of the
+        // three child panels (which have their own draw lists and would otherwise
+        // paint over anything we put on the main window's list).
+        if (loading)
+            DrawLoadingOverlay();
 
         // v1 PBR: row pair exhaustion toast
         if (rowPairToast != null)
@@ -228,64 +299,145 @@ public class MainWindow : Window, IDisposable
         TryDirectEmissiveUpdate(group, group.Layers.Find(l => l.IsVisible && l.AffectsEmissive)!);
     }
 
+    /// <summary>
+    /// Paint the "loading..." overlay on the foreground draw list: a semi-transparent
+    /// dim over the window content plus an 8-dot rotating spinner and a Chinese label.
+    /// Uses <see cref="ImGui.GetForegroundDrawList()"/> so it lands on top of the three
+    /// child panels, which have their own draw lists.
+    /// </summary>
+    private void DrawLoadingOverlay()
+    {
+        var wndPos = ImGui.GetWindowPos();
+        var cMin = wndPos + ImGui.GetWindowContentRegionMin();
+        var cMax = wndPos + ImGui.GetWindowContentRegionMax();
+        if (cMax.X <= cMin.X || cMax.Y <= cMin.Y) return;
+
+        var fg = ImGui.GetForegroundDrawList();
+        fg.AddRectFilled(cMin, cMax, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.55f)));
+
+        var center = (cMin + cMax) * 0.5f;
+
+        // Rotating dot spinner: 10 dots around a circle with a trailing fade.
+        // Rotation rate and dot count tuned to look fluid without being dizzying.
+        const int dotCount = 10;
+        const float radius = 26f;
+        const float dotRadius = 4f;
+        var t = ImGui.GetTime();
+        var rotation = (float)(t * 4.0);  // radians / sec
+        for (var i = 0; i < dotCount; i++)
+        {
+            var phase = i / (float)dotCount;
+            var angle = rotation + phase * MathF.PI * 2f;
+            var p = center + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * radius;
+            // Brightness trails from dim to bright so the spin direction is obvious.
+            var brightness = 0.15f + 0.85f * phase;
+            var color = ImGui.GetColorU32(new Vector4(1f, 1f, 1f, brightness));
+            fg.AddCircleFilled(p, dotRadius, color);
+        }
+
+        // Label below the spinner
+        const string label = "加载中…";
+        var labelSize = ImGui.CalcTextSize(label);
+        var labelPos = center + new Vector2(-labelSize.X * 0.5f, radius + 14f);
+        fg.AddText(labelPos, ImGui.GetColorU32(new Vector4(0.95f, 0.95f, 0.95f, 1f)), label);
+
+        const string sub = "正在加载模型与贴花，请稍候";
+        var subSize = ImGui.CalcTextSize(sub);
+        var subPos = new Vector2(center.X - subSize.X * 0.5f, labelPos.Y + labelSize.Y + 4f);
+        fg.AddText(subPos, ImGui.GetColorU32(new Vector4(0.75f, 0.75f, 0.8f, 1f)), sub);
+    }
+
     private void DrawHelpWindow()
     {
-        ImGui.SetNextWindowSize(new Vector2(340, 320), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(560, 560), ImGuiCond.FirstUseEver);
         if (!ImGui.Begin("操作说明###SkinTatooHelp", ref showHelpWindow))
         {
             ImGui.End();
             return;
         }
 
-        ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "画布操作");
-        ImGui.Separator();
-        ImGui.BulletText("滚轮: 缩放画布");
-        ImGui.BulletText("中键拖动: 平移画布");
-        ImGui.BulletText("左键拖动: 移动贴花位置");
-        ImGui.BulletText("左键点空白: 选择贴花图层");
-        ImGui.BulletText("右键拖动: 缩放贴花");
+        var header = new Vector4(1f, 0.8f, 0.3f, 1f);
 
-        ImGui.Spacing();
-        ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "修饰键");
-        ImGui.Separator();
-        ImGui.BulletText("Shift + 左键拖动: 锁定 X 轴");
-        ImGui.BulletText("Ctrl + 左键拖动: 锁定 Y 轴");
-        ImGui.BulletText("Alt + 右键拖动: 旋转贴花");
+        if (ImGui.BeginTabBar("##HelpTabs"))
+        {
+            if (ImGui.BeginTabItem("UV 编辑器"))
+            {
+                ImGui.TextColored(header, "画布操作");
+                ImGui.Separator();
+                ImGui.BulletText("滚轮: 缩放画布");
+                ImGui.BulletText("中键拖动: 平移画布");
+                ImGui.BulletText("左键拖动: 移动贴花位置");
+                ImGui.BulletText("左键点空白: 选择贴花图层");
+                ImGui.BulletText("右键拖动: 缩放贴花");
 
-        ImGui.Spacing();
-        ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "图层");
-        ImGui.Separator();
-        ImGui.BulletText("Ctrl+Shift + 删除按钮: 删除图层/目标");
+                ImGui.Spacing();
+                ImGui.TextColored(header, "修饰键");
+                ImGui.Separator();
+                ImGui.BulletText("Shift + 左键拖动: 锁定 X 轴");
+                ImGui.BulletText("Ctrl + 左键拖动: 锁定 Y 轴");
+                ImGui.BulletText("Alt + 右键拖动: 旋转贴花");
 
-        ImGui.Spacing();
-        ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "参数面板");
-        ImGui.Separator();
-        ImGui.BulletText("悬浮数值上滚轮: 微调参数");
+                ImGui.Spacing();
+                ImGui.TextColored(header, "图层与目标");
+                ImGui.Separator();
+                ImGui.BulletText("Ctrl+Shift + 删除按钮: 删除图层/目标");
+                ImGui.BulletText("右键投影目标标题: 复制贴图 / 法线 / 材质路径");
+
+                ImGui.Spacing();
+                ImGui.TextColored(header, "参数面板");
+                ImGui.Separator();
+                ImGui.BulletText("悬浮数值上滚轮: 微调参数");
+
+                ImGui.EndTabItem();
+            }
+
+            if (ImGui.BeginTabItem("3D 编辑器"))
+            {
+                ImGui.TextColored(header, "相机");
+                ImGui.Separator();
+                ImGui.BulletText("右键拖动: 旋转相机");
+                ImGui.BulletText("中键拖动: 平移相机");
+                ImGui.BulletText("Ctrl + 滚轮: 相机缩放");
+                ImGui.BulletText("重置相机按钮: 回到默认视角");
+
+                ImGui.Spacing();
+                ImGui.TextColored(header, "贴花");
+                ImGui.Separator();
+                ImGui.BulletText("左键点击模型: 将选中图层的贴花放到该位置");
+                ImGui.BulletText("滚轮: 缩放选中贴花 (非 Ctrl)");
+
+                ImGui.Spacing();
+                ImGui.TextColored(header, "模型管理");
+                ImGui.Separator();
+                ImGui.BulletText("添加模型: 从玩家资源树追加额外模型");
+                ImGui.BulletText("管理模型: 勾选显隐 / 移除已添加模型");
+                ImGui.BulletText("工具栏模型按钮: 重新加载当前投影目标的所有模型");
+
+                ImGui.EndTabItem();
+            }
+
+            ImGui.EndTabBar();
+        }
 
         ImGui.End();
     }
 
     private void DrawToolbar()
     {
-        if (ImGuiComponents.IconButton(FontAwesomeIcon.Save))
-            OnSaveRequested?.Invoke();
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("保存项目");
-
-        ImGui.SameLine();
-        if (ImGuiComponents.IconButton(1, FontAwesomeIcon.Bug))
-        {
-            if (DebugWindowRef != null)
-                DebugWindowRef.IsOpen = !DebugWindowRef.IsOpen;
-        }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("调试窗口");
-
-        ImGui.SameLine();
         if (ImGuiComponents.IconButton(10, FontAwesomeIcon.Cube))
         {
             if (ModelEditorWindowRef != null)
                 ModelEditorWindowRef.IsOpen = !ModelEditorWindowRef.IsOpen;
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("3D 贴花编辑器");
+
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButton(11, FontAwesomeIcon.LayerGroup))
+        {
+            if (PbrInspectorWindowRef != null)
+                PbrInspectorWindowRef.IsOpen = !PbrInspectorWindowRef.IsOpen;
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("PBR 通道查看器");
 
         ImGui.SameLine();
         using (ImRaii.Disabled(project.SelectedLayer == null))
@@ -296,16 +448,15 @@ public class MainWindow : Window, IDisposable
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("重置当前图层参数");
 
         ImGui.SameLine();
-        using (ImRaii.Disabled(project.Groups.Count == 0))
+        // Restore textures: always enabled — clearing Penumbra redirects is idempotent
+        // and should always be possible as an escape hatch even with no groups in the project.
+        if (ImGuiComponents.IconButton(3, FontAwesomeIcon.Eraser))
         {
-            if (ImGuiComponents.IconButton(3, FontAwesomeIcon.Eraser))
-            {
-                penumbra.ClearRedirect();
-                penumbra.RedrawPlayer();
-                previewService.ClearTextureCache();
-                previewService.ResetSwapState();
-                DebugServer.AppendLog("[MainWindow] Restored original textures");
-            }
+            penumbra.ClearRedirect();
+            penumbra.RedrawPlayer();
+            previewService.ClearTextureCache();
+            previewService.ResetSwapState();
+            DebugServer.AppendLog("[MainWindow] Restored original textures");
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("还原贴图 — 清除 Penumbra 重定向");
 
@@ -326,8 +477,6 @@ public class MainWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(penumbra.IsAvailable ? "安装 Mod 到 Penumbra" : "Penumbra 未运行");
 
-        ImGui.SameLine();
-        ImGui.Spacing();
         ImGui.SameLine();
 
         var group = project.SelectedGroup;
@@ -365,17 +514,27 @@ public class MainWindow : Window, IDisposable
             if (ImGui.IsItemHovered()) ImGui.SetTooltip("更新预览");
         }
 
-        // Right-aligned: Penumbra status + settings gear (gear at far right)
-        var penText = penumbra.IsAvailable ? "● Penumbra" : "Penumbra [x]";
-        var penTextWidth = ImGui.CalcTextSize(penText).X;
-        var gearWidth = ImGui.GetFrameHeight();
+        // Right-aligned cluster: 操作说明 / 调试窗口 / 设置 (gear hugs the right edge,
+        // with a small padding so it doesn't touch the window border — matches the
+        // layout style of the 3D editor toolbar).
+        var iconWidth = ImGui.GetFrameHeight();
         var spacing = ImGui.GetStyle().ItemSpacing.X;
-        var rightEdge = ImGui.GetContentRegionMax().X;
-        var rightStartX = rightEdge - penTextWidth - gearWidth - spacing * 2;
+        const float rightEdgePadding = 6f;
+        var rightEdge = ImGui.GetContentRegionMax().X - rightEdgePadding;
+        var rightStartX = rightEdge - iconWidth * 3 - spacing * 2;
 
         ImGui.SameLine(rightStartX);
-        var penColor = penumbra.IsAvailable ? new Vector4(0, 1, 0.3f, 1) : new Vector4(1, 0.8f, 0, 1);
-        ImGui.TextColored(penColor, penText);
+        if (ImGuiComponents.IconButton(15, FontAwesomeIcon.QuestionCircle))
+            showHelpWindow = !showHelpWindow;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("操作说明");
+
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButton(1, FontAwesomeIcon.Bug))
+        {
+            if (DebugWindowRef != null)
+                DebugWindowRef.IsOpen = !DebugWindowRef.IsOpen;
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("调试窗口");
 
         ImGui.SameLine();
         if (ImGuiComponents.IconButton(6, FontAwesomeIcon.Cog))
@@ -388,13 +547,18 @@ public class MainWindow : Window, IDisposable
 
     private void DrawThreePanelLayout(float totalWidth, float height)
     {
-        const float splitterWidth = 6f;
-        const float minPanelWidth = 120f;
+        const float splitterWidth = 8f;
+        const float minPanelWidth = 140f;
 
+        // First-time layout: left = 20% of total, right holds the last saved width.
         if (leftPanelWidth < 0) leftPanelWidth = totalWidth * 0.20f;
-        leftPanelWidth = Math.Clamp(leftPanelWidth, minPanelWidth, totalWidth - rightPanelWidth - minPanelWidth - splitterWidth * 2);
-        rightPanelWidth = Math.Clamp(rightPanelWidth, minPanelWidth, totalWidth - leftPanelWidth - minPanelWidth - splitterWidth * 2);
-        var centerWidth = totalWidth - leftPanelWidth - rightPanelWidth - splitterWidth * 2;
+
+        // Clamp both side panels so the center never collapses below minPanelWidth.
+        var maxLeft = totalWidth - rightPanelWidth - minPanelWidth - splitterWidth * 2;
+        var maxRight = totalWidth - leftPanelWidth - minPanelWidth - splitterWidth * 2;
+        leftPanelWidth = Math.Clamp(leftPanelWidth, minPanelWidth, Math.Max(minPanelWidth, maxLeft));
+        rightPanelWidth = Math.Clamp(rightPanelWidth, minPanelWidth, Math.Max(minPanelWidth, maxRight));
+        var centerWidth = Math.Max(minPanelWidth, totalWidth - leftPanelWidth - rightPanelWidth - splitterWidth * 2);
 
         // Left panel
         using (var left = ImRaii.Child("##LeftPanel", new Vector2(leftPanelWidth, height), true))
@@ -402,9 +566,11 @@ public class MainWindow : Window, IDisposable
             if (left.Success) DrawLayerPanel();
         }
 
-        // Left splitter
+        // Left splitter (between left + center). Dragging right increases leftPanelWidth.
         ImGui.SameLine(0, 0);
-        DrawVerticalSplitter("##SplitL", splitterWidth, height, ref leftPanelWidth, ref draggingLeftSplitter, minPanelWidth, totalWidth - rightPanelWidth - minPanelWidth - splitterWidth * 2);
+        DrawSplitterLine("##SplitL", splitterWidth, height,
+            delta => leftPanelWidth = Math.Clamp(leftPanelWidth + delta,
+                minPanelWidth, Math.Max(minPanelWidth, totalWidth - rightPanelWidth - minPanelWidth - splitterWidth * 2)));
 
         ImGui.SameLine(0, 0);
 
@@ -414,12 +580,12 @@ public class MainWindow : Window, IDisposable
             if (center.Success) DrawCanvas();
         }
 
-        // Right splitter
+        // Right splitter (between center + right). Dragging LEFT increases rightPanelWidth,
+        // so invert the delta.
         ImGui.SameLine(0, 0);
-        // Invert: dragging right increases rightPanelWidth
-        var invertedRight = rightPanelWidth;
-        DrawVerticalSplitter("##SplitR", splitterWidth, height, ref invertedRight, ref draggingRightSplitter, minPanelWidth, totalWidth - leftPanelWidth - minPanelWidth - splitterWidth * 2, true);
-        rightPanelWidth = invertedRight;
+        DrawSplitterLine("##SplitR", splitterWidth, height,
+            delta => rightPanelWidth = Math.Clamp(rightPanelWidth - delta,
+                minPanelWidth, Math.Max(minPanelWidth, totalWidth - leftPanelWidth - minPanelWidth - splitterWidth * 2)));
 
         ImGui.SameLine(0, 0);
 
@@ -429,35 +595,43 @@ public class MainWindow : Window, IDisposable
         }
     }
 
-    private void DrawVerticalSplitter(string id, float width, float height,
-        ref float panelWidth, ref bool dragging, float min, float max, bool invert = false)
+    /// <summary>
+    /// Draw a thin draggable splitter line. Uses <c>InvisibleButton</c> for the drag hit
+    /// zone (8 px wide so the user can grab it without pixel-hunting) and manually paints
+    /// a 1 px line that brightens + thickens on hover / active. Calls
+    /// <paramref name="applyDelta"/> with the signed mouse-X delta each frame while active.
+    /// </summary>
+    private static void DrawSplitterLine(string id, float width, float height, Action<float> applyDelta)
     {
         var cursorPos = ImGui.GetCursorScreenPos();
+
+        // No frame padding so the hit rect == the visual 8 px column.
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, Vector2.Zero);
         ImGui.InvisibleButton(id, new Vector2(width, height));
+        ImGui.PopStyleVar();
+
         var hovered = ImGui.IsItemHovered();
         var active = ImGui.IsItemActive();
 
-        if (hovered || dragging)
+        if (hovered || active)
             ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeAll);
 
-        // Draw splitter line
         var drawList = ImGui.GetWindowDrawList();
         var lineColor = (hovered || active)
-            ? ImGui.GetColorU32(new Vector4(0.5f, 0.7f, 1f, 0.8f))
-            : ImGui.GetColorU32(new Vector4(0.3f, 0.3f, 0.35f, 0.6f));
+            ? ImGui.GetColorU32(new Vector4(0.55f, 0.75f, 1f, 1f))
+            : ImGui.GetColorU32(new Vector4(0.30f, 0.30f, 0.35f, 0.70f));
+        var thickness = (hovered || active) ? 2.5f : 1f;
         var lineX = cursorPos.X + width * 0.5f;
-        drawList.AddLine(new Vector2(lineX, cursorPos.Y), new Vector2(lineX, cursorPos.Y + height), lineColor, 2f);
+        drawList.AddLine(
+            new Vector2(lineX, cursorPos.Y + 2),
+            new Vector2(lineX, cursorPos.Y + height - 2),
+            lineColor, thickness);
 
         if (active)
         {
-            dragging = true;
             var delta = ImGui.GetIO().MouseDelta.X;
-            if (invert) delta = -delta;
-            panelWidth = Math.Clamp(panelWidth + delta, min, max);
-        }
-        else
-        {
-            dragging = false;
+            if (delta != 0f)
+                applyDelta(delta);
         }
     }
 
@@ -481,9 +655,18 @@ public class MainWindow : Window, IDisposable
             if (ImGuiComponents.IconButton(11, FontAwesomeIcon.Trash))
             {
                 var gi2 = project.SelectedGroupIndex;
-                if (gi2 >= 0 && gi2 < project.Groups.Count && project.Groups[gi2].HasEmissiveLayers())
+                if (gi2 >= 0 && gi2 < project.Groups.Count)
+                {
+                    // Full cleanup: Penumbra only supports clearing all our redirects at once
+                    // (no per-path removal), so we clear everything, drop runtime swap state,
+                    // redraw, then let the next UpdatePreview rebuild for any remaining groups.
+                    penumbra.ClearRedirect();
+                    previewService.ClearTextureCache();
                     previewService.ResetSwapState();
-                project.RemoveGroup(gi2);
+                    penumbra.RedrawPlayer();
+                    project.RemoveGroup(gi2);
+                    DebugServer.AppendLog($"[MainWindow] Removed group {gi2}, cleared redirects");
+                }
                 MarkPreviewDirty();
             }
         }
@@ -563,7 +746,28 @@ public class MainWindow : Window, IDisposable
                 ImGui.Text($"法线: {group.NormGamePath}");
             if (!string.IsNullOrEmpty(group.MtrlGamePath))
                 ImGui.Text($"材质: {group.MtrlGamePath}");
+            ImGui.TextDisabled("(右键菜单可复制路径)");
             ImGui.EndTooltip();
+        }
+
+        // Right-click context menu: copy each of the three game paths
+        if (ImGui.BeginPopupContextItem($"##grpCtx{gi}"))
+        {
+            var hasDiffuse = !string.IsNullOrEmpty(group.DiffuseGamePath);
+            using (ImRaii.Disabled(!hasDiffuse))
+                if (ImGui.MenuItem("复制贴图路径"))
+                    ImGui.SetClipboardText(group.DiffuseGamePath ?? "");
+
+            var hasNorm = !string.IsNullOrEmpty(group.NormGamePath);
+            using (ImRaii.Disabled(!hasNorm))
+                if (ImGui.MenuItem("复制法线路径"))
+                    ImGui.SetClipboardText(group.NormGamePath ?? "");
+
+            var hasMtrl = !string.IsNullOrEmpty(group.MtrlGamePath);
+            using (ImRaii.Disabled(!hasMtrl))
+                if (ImGui.MenuItem("复制材质路径"))
+                    ImGui.SetClipboardText(group.MtrlGamePath ?? "");
+            ImGui.EndPopup();
         }
 
         // Ensure cursor is past header
@@ -737,7 +941,10 @@ public class MainWindow : Window, IDisposable
     private void DrawCanvas()
     {
         var btnH = ImGui.GetFrameHeight();
-        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - 80);
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text("UV 缩放");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - 52);
         ImGui.SliderFloat("##zoom", ref canvasZoom, 0.1f, 5.0f, $"{canvasZoom * 100:F0}%%");
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("画布缩放 (滚轮)");
         ImGui.SameLine();
@@ -746,10 +953,6 @@ public class MainWindow : Window, IDisposable
             canvasZoom = 1.0f;
             canvasPan = Vector2.Zero;
         }
-        ImGui.SameLine();
-        if (ImGui.Button("?", new Vector2(btnH, btnH)))
-            showHelpWindow = !showHelpWindow;
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("操作说明");
 
         var avail = ImGui.GetContentRegionAvail();
         var canvasSize = new Vector2(avail.X, avail.Y);
@@ -841,6 +1044,8 @@ public class MainWindow : Window, IDisposable
 
     private void DrawBaseTexture(ImDrawListPtr drawList, Vector2 uvOrigin, float fitSize)
     {
+        lastBaseTexWidth = 0;
+        lastBaseTexHeight = 0;
         var group = project.SelectedGroup;
         if (group == null) return;
 
@@ -856,6 +1061,8 @@ public class MainWindow : Window, IDisposable
             var wrap = shared.GetWrapOrDefault();
             if (wrap != null)
             {
+                lastBaseTexWidth = wrap.Width;
+                lastBaseTexHeight = wrap.Height;
                 drawList.AddImage(wrap.Handle,
                     uvOrigin, uvOrigin + new Vector2(fitSize),
                     Vector2.Zero, Vector2.One);
@@ -1136,6 +1343,16 @@ public class MainWindow : Window, IDisposable
             drawList.AddRectFilled(groupPos - new Vector2(2, 1), groupPos + new Vector2(groupSize.X + 4, 17), bgColor);
             drawList.AddText(groupPos, textColor, groupText);
         }
+
+        // Top-right: base texture resolution (e.g. "4096 x 4096")
+        if (lastBaseTexWidth > 0 && lastBaseTexHeight > 0)
+        {
+            var resText = $"{lastBaseTexWidth} x {lastBaseTexHeight}";
+            var resSize = ImGui.CalcTextSize(resText);
+            var resPos = canvasPos + new Vector2(canvasSize.X - resSize.X - 6, 4);
+            drawList.AddRectFilled(resPos - new Vector2(2, 1), resPos + new Vector2(resSize.X + 4, 17), bgColor);
+            drawList.AddText(resPos, textColor, resText);
+        }
     }
 
     // ── Right Panel: Parameters ──────────────────────────────────────────────
@@ -1172,6 +1389,7 @@ public class MainWindow : Window, IDisposable
             if (ImGui.InputText("##ImagePath", ref imagePathBuf, 512))
             {
                 layer.ImagePath = imagePathBuf;
+                AutoFitLayerScale(group, layer);
                 lastEditedLayerIndex = idx;
                 MarkPreviewDirty();
             }
@@ -1191,7 +1409,9 @@ public class MainWindow : Window, IDisposable
                             if (capturedLi < g.Layers.Count)
                             {
                                 var path = paths[0];
-                                g.Layers[capturedLi].ImagePath = path;
+                                var picked = g.Layers[capturedLi];
+                                picked.ImagePath = path;
+                                AutoFitLayerScale(g, picked);
                                 imagePathBuf = path;
                                 lastEditedLayerIndex = capturedLi;
                                 config.LastImageDir = Path.GetDirectoryName(path);
@@ -1294,103 +1514,199 @@ public class MainWindow : Window, IDisposable
             {
                 var alloc = previewService.GetOrCreateAllocator(group);
                 bool exhausted = alloc.AvailableSlots == 0 && layer.AllocatedRowPair < 0;
+                bool pbrSupported = previewService.MaterialSupportsPbr(group);
 
-                if (exhausted)
+                if (!pbrSupported && !string.IsNullOrEmpty(group.MtrlGamePath))
+                {
+                    ImGui.TextColored(new Vector4(1f, 0.7f, 0.3f, 1f),
+                        "当前材质（skin.shpk 类）无 ColorTable");
+                    ImGui.TextDisabled("仅「贴花」与「发光」可用，其余字段已置灰");
+                }
+                else if (exhausted)
                 {
                     ImGui.TextColored(new Vector4(1f, 0.6f, 0.2f, 1f),
-                        $"⚠ 该材质 PBR 行号已满（vanilla 占 {alloc.VanillaOccupiedCount}）");
+                        $"该材质 PBR 行号已满（vanilla 占 {alloc.VanillaOccupiedCount}）");
                     ImGui.TextDisabled("请关闭其他图层的 PBR 字段后再试");
                 }
 
-                DrawPbrCheckbox(group, layer, "漫反射",
-                    () => layer.AffectsDiffuse, v => layer.AffectsDiffuse = v, exhausted);
-                if (layer.AffectsDiffuse)
+                // Two-column table: fixed "checkbox + label" on the left, stretching value
+                // widget on the right. Every row is exactly one line, aligned consistently.
+                if (ImGui.BeginTable("##PbrFields", 2,
+                    ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.NoPadInnerX))
                 {
-                    var d = layer.DiffuseColor;
-                    if (ImGui.ColorEdit3("##diffColor", ref d, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel))
-                    { layer.DiffuseColor = d; MarkPreviewDirty(); }
+                    ImGui.TableSetupColumn("##label", ImGuiTableColumnFlags.WidthFixed, 104);
+                    ImGui.TableSetupColumn("##value", ImGuiTableColumnFlags.WidthStretch);
+
+                    // 贴花/漫反射: decal image composite always works; DiffuseColor tint only
+                    // takes effect on character.shpk where a row pair exists.
+                    BeginPbrRow();
+                    DrawPbrRowStart(group, layer, "贴花/漫反射",
+                        () => layer.AffectsDiffuse, v => layer.AffectsDiffuse = v,
+                        supported: true, requiresRowPair: pbrSupported, exhausted: exhausted);
+                    ImGui.TableNextColumn();
+                    using (ImRaii.Disabled(!pbrSupported))
+                    {
+                        ImGui.SetNextItemWidth(-1);
+                        var d = layer.DiffuseColor;
+                        if (ImGui.ColorEdit3("##diffColor", ref d, ImGuiColorEditFlags.NoLabel))
+                        { layer.DiffuseColor = d; MarkPreviewDirty(); }
+                        if (ImGui.IsItemHovered() && !pbrSupported)
+                            ImGui.SetTooltip("skin.shpk 材质不支持漫反射颜色调制 (贴花图像仍会显示)");
+                    }
+
+                    BeginPbrRow();
+                    DrawPbrRowStart(group, layer, "镜面反射",
+                        () => layer.AffectsSpecular, v => layer.AffectsSpecular = v,
+                        supported: pbrSupported, requiresRowPair: true, exhausted: exhausted);
+                    ImGui.TableNextColumn();
+                    using (ImRaii.Disabled(!pbrSupported))
+                    {
+                        ImGui.SetNextItemWidth(-1);
+                        var sc = layer.SpecularColor;
+                        if (ImGui.ColorEdit3("##specColor", ref sc, ImGuiColorEditFlags.NoLabel))
+                        { layer.SpecularColor = sc; MarkPreviewDirty(); }
+                    }
+
+                    // Emissive: on skin.shpk bypasses row-pair allocation (CBuffer hook + normal.a);
+                    // on character.shpk goes through row pair → ColorTable.
+                    // Toggling OFF must clear the hook target and drop the mtrl/norm init so the
+                    // next UpdatePreview rebinds vanilla files — otherwise the body keeps glowing.
+                    BeginPbrRow();
+                    DrawPbrRowStart(group, layer, "发光",
+                        () => layer.AffectsEmissive, v => layer.AffectsEmissive = v,
+                        supported: true, requiresRowPair: pbrSupported, exhausted: exhausted,
+                        onDisabled: () => previewService.InvalidateEmissiveForGroup(group));
+                    ImGui.TableNextColumn();
+                    {
+                        var emColor = layer.EmissiveColor;
+                        if (ImGui.ColorEdit3("##emColor", ref emColor,
+                            ImGuiColorEditFlags.NoLabel | ImGuiColorEditFlags.NoInputs))
+                        { layer.EmissiveColor = emColor; MarkPreviewDirty(); TryDirectEmissiveUpdate(group, layer); }
+                        ImGui.SameLine();
+                        ImGui.AlignTextToFramePadding();
+                        ImGui.TextDisabled("强度");
+                        ImGui.SameLine();
+                        ImGui.SetNextItemWidth(-1);
+                        var emI = layer.EmissiveIntensity;
+                        if (ImGui.DragFloat("##emI", ref emI, 0.05f, 0.1f, 10f, "%.2f"))
+                        { layer.EmissiveIntensity = emI; MarkPreviewDirty(); TryDirectEmissiveUpdate(group, layer); }
+                    }
+
+                    BeginPbrRow();
+                    DrawPbrRowStart(group, layer, "粗糙度",
+                        () => layer.AffectsRoughness, v => layer.AffectsRoughness = v,
+                        supported: pbrSupported, requiresRowPair: true, exhausted: exhausted);
+                    ImGui.TableNextColumn();
+                    using (ImRaii.Disabled(!pbrSupported))
+                    {
+                        ImGui.SetNextItemWidth(-1);
+                        var r = layer.Roughness;
+                        if (ImGui.SliderFloat("##rough", ref r, 0f, 1f, "%.2f"))
+                        { layer.Roughness = r; MarkPreviewDirty(); }
+                    }
+
+                    BeginPbrRow();
+                    DrawPbrRowStart(group, layer, "金属度",
+                        () => layer.AffectsMetalness, v => layer.AffectsMetalness = v,
+                        supported: pbrSupported, requiresRowPair: true, exhausted: exhausted);
+                    ImGui.TableNextColumn();
+                    using (ImRaii.Disabled(!pbrSupported))
+                    {
+                        ImGui.SetNextItemWidth(-1);
+                        var mt = layer.Metalness;
+                        if (ImGui.SliderFloat("##metal", ref mt, 0f, 1f, "%.2f"))
+                        { layer.Metalness = mt; MarkPreviewDirty(); }
+                    }
+
+                    // Sheen: three mini sliders sharing the value column, labels embedded in format.
+                    BeginPbrRow();
+                    DrawPbrRowStart(group, layer, "光泽",
+                        () => layer.AffectsSheen, v => layer.AffectsSheen = v,
+                        supported: pbrSupported, requiresRowPair: true, exhausted: exhausted);
+                    ImGui.TableNextColumn();
+                    using (ImRaii.Disabled(!pbrSupported))
+                    {
+                        var avail = ImGui.GetContentRegionAvail().X;
+                        var third = (avail - ImGui.GetStyle().ItemSpacing.X * 2) / 3f;
+                        ImGui.SetNextItemWidth(third);
+                        var sr = layer.SheenRate;
+                        if (ImGui.SliderFloat("##sheenRate", ref sr, 0f, 1f, "R %.2f"))
+                        { layer.SheenRate = sr; MarkPreviewDirty(); }
+                        ImGui.SameLine();
+                        ImGui.SetNextItemWidth(third);
+                        var st = layer.SheenTint;
+                        if (ImGui.SliderFloat("##sheenTint", ref st, 0f, 1f, "T %.2f"))
+                        { layer.SheenTint = st; MarkPreviewDirty(); }
+                        ImGui.SameLine();
+                        ImGui.SetNextItemWidth(-1);
+                        var sa = layer.SheenAperture;
+                        if (ImGui.SliderFloat("##sheenAp", ref sa, 0f, 20f, "A %.1f"))
+                        { layer.SheenAperture = sa; MarkPreviewDirty(); }
+                    }
+
+                    ImGui.EndTable();
                 }
 
-                DrawPbrCheckbox(group, layer, "镜面反射",
-                    () => layer.AffectsSpecular, v => layer.AffectsSpecular = v, exhausted);
-                if (layer.AffectsSpecular)
-                {
-                    var sc = layer.SpecularColor;
-                    if (ImGui.ColorEdit3("##specColor", ref sc, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel))
-                    { layer.SpecularColor = sc; MarkPreviewDirty(); }
-                }
-
-                DrawPbrCheckbox(group, layer, "发光",
-                    () => layer.AffectsEmissive, v => layer.AffectsEmissive = v, exhausted);
-                if (layer.AffectsEmissive)
-                {
-                    var emColor = layer.EmissiveColor;
-                    if (ImGui.ColorEdit3("##emColor", ref emColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel))
-                    { layer.EmissiveColor = emColor; MarkPreviewDirty(); TryDirectEmissiveUpdate(group, layer); }
-                    ImGui.SameLine(); ImGui.Text("强度");
-                    ImGui.SetNextItemWidth(80);
-                    var emI = layer.EmissiveIntensity;
-                    if (ImGui.DragFloat("##emI", ref emI, 0.05f, 0.1f, 10f, "%.2f"))
-                    { layer.EmissiveIntensity = emI; MarkPreviewDirty(); TryDirectEmissiveUpdate(group, layer); }
-                }
-
-                DrawPbrCheckbox(group, layer, "粗糙度",
-                    () => layer.AffectsRoughness, v => layer.AffectsRoughness = v, exhausted);
-                if (layer.AffectsRoughness)
-                {
-                    var r = layer.Roughness;
-                    if (ImGui.SliderFloat("##rough", ref r, 0f, 1f, "%.2f"))
-                    { layer.Roughness = r; MarkPreviewDirty(); }
-                }
-
-                DrawPbrCheckbox(group, layer, "金属度",
-                    () => layer.AffectsMetalness, v => layer.AffectsMetalness = v, exhausted);
-                if (layer.AffectsMetalness)
-                {
-                    var mt = layer.Metalness;
-                    if (ImGui.SliderFloat("##metal", ref mt, 0f, 1f, "%.2f"))
-                    { layer.Metalness = mt; MarkPreviewDirty(); }
-                }
-
-                DrawPbrCheckbox(group, layer, "光泽",
-                    () => layer.AffectsSheen, v => layer.AffectsSheen = v, exhausted);
-                if (layer.AffectsSheen)
-                {
-                    var sr = layer.SheenRate;
-                    if (ImGui.SliderFloat("Rate##sheenRate", ref sr, 0f, 1f, "%.2f"))
-                    { layer.SheenRate = sr; MarkPreviewDirty(); }
-                    var st = layer.SheenTint;
-                    if (ImGui.SliderFloat("Tint##sheenTint", ref st, 0f, 1f, "%.2f"))
-                    { layer.SheenTint = st; MarkPreviewDirty(); }
-                    var sa = layer.SheenAperture;
-                    if (ImGui.SliderFloat("Apt##sheenAp", ref sa, 0f, 20f, "%.2f"))
-                    { layer.SheenAperture = sa; MarkPreviewDirty(); }
-                }
-
-                // Layer fade mask (all PBR fields fade together now per v1 spec)
-                ImGui.Separator();
+                // Layer fade mask: separate block styled like the render section —
+                // left label + full-width widget, no checkbox column.
+                ImGui.Spacing();
                 ImGui.TextDisabled("图层羽化（影响所有 PBR 字段）");
-                var maskIdx = (int)layer.FadeMask;
-                if (ImGui.Combo("##fadeMask", ref maskIdx, LayerFadeMaskNames, LayerFadeMaskNames.Length))
-                { layer.FadeMask = (LayerFadeMask)maskIdx; MarkPreviewDirty(); }
+                if (ImGui.BeginTable("##PbrFade", 2,
+                    ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.NoPadInnerX))
+                {
+                    ImGui.TableSetupColumn("##flab", ImGuiTableColumnFlags.WidthFixed, 56);
+                    ImGui.TableSetupColumn("##fval", ImGuiTableColumnFlags.WidthStretch);
+
+                    ImGui.TableNextRow(); ImGui.TableNextColumn();
+                    ImGui.AlignTextToFramePadding(); ImGui.Text("形状");
+                    ImGui.TableNextColumn();
+                    ImGui.SetNextItemWidth(-1);
+                    var maskIdx = (int)layer.FadeMask;
+                    if (ImGui.Combo("##fadeMask", ref maskIdx, LayerFadeMaskNames, LayerFadeMaskNames.Length))
+                    { layer.FadeMask = (LayerFadeMask)maskIdx; MarkPreviewDirty(); }
+
+                    if (layer.FadeMask != LayerFadeMask.Uniform)
+                    {
+                        ImGui.TableNextRow(); ImGui.TableNextColumn();
+                        ImGui.AlignTextToFramePadding(); ImGui.Text("羽化");
+                        ImGui.TableNextColumn();
+                        ImGui.SetNextItemWidth(-1);
+                        var f = layer.FadeMaskFalloff;
+                        if (ImGui.SliderFloat("##fadeFalloff", ref f, 0.01f, 1f, "%.2f"))
+                        { layer.FadeMaskFalloff = f; MarkPreviewDirty(); }
+                    }
+
+                    if (layer.FadeMask == LayerFadeMask.DirectionalGradient)
+                    {
+                        ImGui.TableNextRow(); ImGui.TableNextColumn();
+                        ImGui.AlignTextToFramePadding(); ImGui.Text("角度");
+                        ImGui.TableNextColumn();
+                        ImGui.SetNextItemWidth(-1);
+                        var a = layer.GradientAngleDeg;
+                        if (ImGui.SliderFloat("##gAng", ref a, -180f, 180f, "%.1f°"))
+                        { layer.GradientAngleDeg = a; MarkPreviewDirty(); }
+
+                        ImGui.TableNextRow(); ImGui.TableNextColumn();
+                        ImGui.AlignTextToFramePadding(); ImGui.Text("范围");
+                        ImGui.TableNextColumn();
+                        ImGui.SetNextItemWidth(-1);
+                        var gs = layer.GradientScale;
+                        if (ImGui.SliderFloat("##gScl", ref gs, 0.1f, 2f, "%.2f"))
+                        { layer.GradientScale = gs; MarkPreviewDirty(); }
+
+                        ImGui.TableNextRow(); ImGui.TableNextColumn();
+                        ImGui.AlignTextToFramePadding(); ImGui.Text("偏移");
+                        ImGui.TableNextColumn();
+                        ImGui.SetNextItemWidth(-1);
+                        var go = layer.GradientOffset;
+                        if (ImGui.SliderFloat("##gOff", ref go, -1f, 1f, "%.2f"))
+                        { layer.GradientOffset = go; MarkPreviewDirty(); }
+                    }
+                    ImGui.EndTable();
+                }
+
                 if (layer.FadeMask != LayerFadeMask.Uniform)
-                {
-                    var f = layer.FadeMaskFalloff;
-                    if (ImGui.SliderFloat("羽化##fadeFalloff", ref f, 0.01f, 1f, "%.2f"))
-                    { layer.FadeMaskFalloff = f; MarkPreviewDirty(); }
-                }
-                if (layer.FadeMask == LayerFadeMask.DirectionalGradient)
-                {
-                    var a = layer.GradientAngleDeg;
-                    if (ImGui.SliderFloat("角度##gAng", ref a, -180f, 180f, "%.1f°"))
-                    { layer.GradientAngleDeg = a; MarkPreviewDirty(); }
-                    var gs = layer.GradientScale;
-                    if (ImGui.SliderFloat("范围##gScl", ref gs, 0.1f, 2f, "%.2f"))
-                    { layer.GradientScale = gs; MarkPreviewDirty(); }
-                    var go = layer.GradientOffset;
-                    if (ImGui.SliderFloat("偏移##gOff", ref go, -1f, 1f, "%.2f"))
-                    { layer.GradientOffset = go; MarkPreviewDirty(); }
-                }
+                    DrawFadeMaskPreview(layer.FadeMask, layer.FadeMaskFalloff, layer);
 
                 if (string.IsNullOrEmpty(group.MtrlGamePath))
                     ImGui.TextColored(new Vector4(1, 0.5f, 0.3f, 1), "需要选择材质(.mtrl)");
@@ -1497,9 +1813,16 @@ public class MainWindow : Window, IDisposable
         {
             if (previewService.CanSwapInPlace && config.UseGpuSwap)
             {
-                // GPU swap mode: trigger immediately every frame (async, non-blocking)
-                previewDirty = false;
-                TriggerPreview();
+                // GPU swap mode: throttle to ~30Hz so a sustained drag doesn't allocate
+                // ~20MB/frame and thrash the GC. previewDirty stays true until the
+                // throttle window passes, so the latest state is always picked up.
+                var now = DateTime.UtcNow;
+                if ((now - lastGpuPreviewFireUtc).TotalMilliseconds >= GpuPreviewMinIntervalMs)
+                {
+                    previewDirty = false;
+                    lastGpuPreviewFireUtc = now;
+                    TriggerPreview();
+                }
             }
             else
             {
@@ -2090,29 +2413,62 @@ public class MainWindow : Window, IDisposable
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    /// <summary>Start a new row in the PBR table: opens the row, selects column 0.</summary>
+    private static void BeginPbrRow()
+    {
+        ImGui.TableNextRow();
+        ImGui.TableNextColumn();
+    }
+
     /// <summary>
-    /// Draw a PBR-field checkbox. Toggling it on triggers row pair allocation;
-    /// on exhaustion, shows a toast and reverts the toggle to false.
-    /// Toggling off triggers release-if-unused.
+    /// Draw just the checkbox portion of a PBR row. Call <c>ImGui.SameLine()</c> after and
+    /// render the value UI (color picker / slider) yourself — wrap it in <c>ImRaii.Disabled</c>
+    /// when <paramref name="supported"/> is false so the value appears grayed.
+    ///
+    /// Checkbox behavior:
+    /// - disabled when unsupported AND currently off (prevents turning on something the
+    ///   material can't express);
+    /// - disabled when row pair is exhausted AND currently off (character.shpk PBR limit);
+    /// - toggling on may trigger a row-pair allocation that can fail → shows a toast and reverts;
+    /// - toggling off releases the row pair if no other field needs it, then runs
+    ///   <paramref name="onDisabled"/> for any caller-specific cleanup.
+    ///
+    /// Pass <paramref name="requiresRowPair"/> = false to skip allocation (used for the decal
+    /// composite on skin.shpk where no ColorTable exists, and for emissive on skin.shpk where
+    /// the CBuffer hook handles updates directly).
     /// </summary>
-    private void DrawPbrCheckbox(TargetGroup group, DecalLayer layer, string label,
-        Func<bool> get, Action<bool> set, bool exhausted)
+    private void DrawPbrRowStart(TargetGroup group, DecalLayer layer, string label,
+        Func<bool> get, Action<bool> set,
+        bool supported, bool requiresRowPair, bool exhausted,
+        Action? onDisabled = null)
     {
         var was = get();
         var v = was;
-        var disabled = exhausted && !was;
-        if (disabled) ImGui.BeginDisabled();
+        var disableCheckbox = (!supported || exhausted) && !was;
+        if (disableCheckbox) ImGui.BeginDisabled();
         if (ImGui.Checkbox(label, ref v))
         {
             if (v && !was)
             {
-                bool needsAlloc = layer.AllocatedRowPair < 0;
+                bool needsAlloc = requiresRowPair && layer.AllocatedRowPair < 0;
                 set(true);
-                if (needsAlloc && !previewService.TryAllocateRowPairForLayer(group, layer))
+                if (needsAlloc)
                 {
-                    set(false);
-                    rowPairToast = $"无法启用 {label}：该材质 PBR 行号已满。请关闭其他图层的 PBR 字段后再试。";
-                    rowPairToastUntil = DateTime.UtcNow.AddSeconds(4);
+                    if (!previewService.TryAllocateRowPairForLayer(group, layer, out var failure))
+                    {
+                        set(false);
+                        rowPairToast = failure switch
+                        {
+                            PreviewService.RowPairAllocFailure.Unsupported =>
+                                $"无法启用 {label}：当前材质（skin.shpk 类）不支持该 PBR 字段。",
+                            _ => $"无法启用 {label}：该材质 PBR 行号已满。请关闭其他图层的 PBR 字段后再试。",
+                        };
+                        rowPairToastUntil = DateTime.UtcNow.AddSeconds(4);
+                    }
+                    else
+                    {
+                        MarkPreviewDirty();
+                    }
                 }
                 else
                 {
@@ -2123,10 +2479,11 @@ public class MainWindow : Window, IDisposable
             {
                 set(false);
                 previewService.ReleaseRowPairIfUnused(group, layer);
+                onDisabled?.Invoke();
                 MarkPreviewDirty();
             }
         }
-        if (disabled) ImGui.EndDisabled();
+        if (disableCheckbox) ImGui.EndDisabled();
     }
 
     private void ResetSelectedLayer()
@@ -2173,8 +2530,26 @@ public class MainWindow : Window, IDisposable
         imagePathBuf = layer?.ImagePath ?? string.Empty;
     }
 
+    /// <summary>
+    /// Auto-fit a newly assigned decal image's UvScale to the ratio between the decal
+    /// resolution and the target base texture resolution. A 1000 px decal on a 4000 px
+    /// texture lands at scale 0.25 — close to natural pixel-for-pixel size so the user
+    /// only needs a minor tweak from the default.
+    /// </summary>
+    private void AutoFitLayerScale(TargetGroup? group, DecalLayer layer)
+    {
+        if (group == null || string.IsNullOrEmpty(layer.ImagePath)) return;
+        var decal = previewService.GetImageDimensions(layer.ImagePath);
+        if (decal == null) return;
+        var (tw, th) = previewService.GetBaseTextureSize(group);
+        if (tw <= 0 || th <= 0) return;
+        var sx = Math.Clamp((float)decal.Value.Width / tw, 0.02f, 1f);
+        var sy = Math.Clamp((float)decal.Value.Height / th, 0.02f, 1f);
+        layer.UvScale = new Vector2(sx, sy);
+    }
+
     public void Dispose()
     {
-        OnSaveRequested = null;
+        InitializeRequested = null;
     }
 }

@@ -27,6 +27,8 @@ public class ModelEditorWindow : Window, IDisposable
 
     private SharpDX.Direct3D11.ShaderResourceView? diffuseSrv;
     private SharpDX.Direct3D11.Texture2D? diffuseTex;
+    private int diffuseTexW;
+    private int diffuseTexH;
     private long lastCompositeVersion = -1;
 
     private bool isDraggingCamera;
@@ -423,6 +425,8 @@ public class ModelEditorWindow : Window, IDisposable
                 diffuseSrv = null;
                 diffuseTex?.Dispose();
                 diffuseTex = null;
+                diffuseTexW = 0;
+                diffuseTexH = 0;
                 return;
             }
         }
@@ -485,9 +489,25 @@ public class ModelEditorWindow : Window, IDisposable
         if (texData == null) return;
 
         lastCompositeVersion = ver;
-        diffuseSrv?.Dispose();
-        diffuseTex?.Dispose();
-        diffuseSrv = renderer.CreateTextureFromRgba(texData.Value.Data, texData.Value.Width, texData.Value.Height, out diffuseTex);
+        var (data, w, h, dirty) = texData.Value;
+
+        // Recreate only when size changes. Otherwise keep the persistent Texture2D and
+        // upload only the dirty sub-region — this kills the ~15ms/frame main-thread
+        // allocator + 64MB upload spike that used to hit on every drag frame.
+        if (diffuseTex == null || diffuseTexW != w || diffuseTexH != h)
+        {
+            diffuseSrv?.Dispose();
+            diffuseTex?.Dispose();
+            (diffuseTex, diffuseSrv) = renderer.CreateUpdatableRgbaTexture(w, h);
+            diffuseTexW = w;
+            diffuseTexH = h;
+            // Seed the whole texture on the first upload after (re)creation.
+            renderer.UpdateRgbaRegion(diffuseTex, data, w, 0, 0, w, h);
+            return;
+        }
+
+        if (dirty.IsEmpty) return;
+        renderer.UpdateRgbaRegion(diffuseTex, data, w, dirty.X, dirty.Y, dirty.W, dirty.H);
     }
 
     private void RefreshMdlList()

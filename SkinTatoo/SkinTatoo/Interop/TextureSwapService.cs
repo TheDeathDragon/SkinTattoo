@@ -517,14 +517,49 @@ public unsafe class TextureSwapService
     public static byte[] RgbaToBgra(byte[] rgba)
     {
         var bgra = new byte[rgba.Length];
-        for (int i = 0; i < rgba.Length; i += 4)
-        {
-            bgra[i]     = rgba[i + 2]; // B
-            bgra[i + 1] = rgba[i + 1]; // G
-            bgra[i + 2] = rgba[i];     // R
-            bgra[i + 3] = rgba[i + 3]; // A
-        }
+        RgbaToBgra(rgba, bgra, rgba.Length);
         return bgra;
+    }
+
+    /// <summary>
+    /// Convert RGBA → BGRA into a caller-provided destination buffer (no allocation).
+    /// <paramref name="byteCount"/> = number of valid bytes (multiple of 4).
+    /// </summary>
+    public static void RgbaToBgra(byte[] rgba, byte[] dst, int byteCount)
+    {
+        for (int i = 0; i < byteCount; i += 4)
+        {
+            dst[i]     = rgba[i + 2]; // B
+            dst[i + 1] = rgba[i + 1]; // G
+            dst[i + 2] = rgba[i];     // R
+            dst[i + 3] = rgba[i + 3]; // A
+        }
+    }
+
+    /// <summary>
+    /// Convert only a rectangular sub-region of RGBA → BGRA. Rows outside the rect are
+    /// untouched in <paramref name="dst"/>, which is the whole point — if the caller
+    /// only updates part of an RGBA buffer, it can mirror that same sub-region in its
+    /// BGRA scratch without re-swizzling 64MB every frame.
+    /// </summary>
+    public static void RgbaToBgraRegion(byte[] rgba, byte[] dst, int texW, int texH, SkinTatoo.Services.DirtyRect rect)
+    {
+        if (rect.IsEmpty) return;
+        int yEnd = rect.Y + rect.H;
+        int xEnd = rect.X + rect.W;
+        for (int py = rect.Y; py < yEnd; py++)
+        {
+            int rowBase = py * texW * 4;
+            int i0 = rowBase + rect.X * 4;
+            int i1 = rowBase + xEnd * 4;
+            for (int i = i0; i < i1; i += 4)
+            {
+                dst[i]     = rgba[i + 2]; // B
+                dst[i + 1] = rgba[i + 1]; // G
+                dst[i + 2] = rgba[i];     // R
+                dst[i + 3] = rgba[i + 3]; // A
+            }
+        }
     }
 
     /// <summary>Dump textures via Model→Material path (more reliable than CharacterBase.Materials).</summary>

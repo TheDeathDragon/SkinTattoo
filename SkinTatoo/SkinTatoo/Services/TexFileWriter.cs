@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 
 namespace SkinTatoo.Services;
@@ -19,10 +20,20 @@ public static class TexFileWriter
             bgra[i + 2] = rgbaBytes[i + 0]; // R
             bgra[i + 3] = rgbaBytes[i + 3]; // A
         }
-        WriteBgra(path, bgra, width, height);
+        WriteBgra(path, bgra, bgra.Length, width, height);
     }
 
-    private static void WriteBgra(string path, byte[] bgra, int width, int height)
+    /// <summary>
+    /// Write a B8G8R8A8 .tex file from a pre-swizzled BGRA buffer.
+    /// <paramref name="bgraLength"/> is the number of valid bytes (the buffer may be larger,
+    /// e.g. when rented from a pool / reused as a per-group scratch).
+    /// </summary>
+    public static void WriteBgra(string path, byte[] bgra, int bgraLength, int width, int height)
+    {
+        WriteBgra(path, new ReadOnlySpan<byte>(bgra, 0, bgraLength), width, height);
+    }
+
+    private static void WriteBgra(string path, ReadOnlySpan<byte> bgra, int width, int height)
     {
         // Use FileShare.Read so game/Penumbra can read while we write
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);

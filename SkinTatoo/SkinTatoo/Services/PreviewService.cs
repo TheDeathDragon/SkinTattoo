@@ -15,6 +15,46 @@ using SkinTatoo.Mesh;
 
 namespace SkinTatoo.Services;
 
+/// <summary>
+/// Axis-aligned dirty region in texture pixel space. Used by the composite pipeline to
+/// restrict per-frame work (base restore + layer paint + sub-region GPU upload) to the
+/// bbox that could have changed between frames.
+/// </summary>
+public readonly struct DirtyRect
+{
+    public readonly int X;
+    public readonly int Y;
+    public readonly int W;
+    public readonly int H;
+
+    public DirtyRect(int x, int y, int w, int h) { X = x; Y = y; W = w; H = h; }
+
+    public bool IsEmpty => W <= 0 || H <= 0;
+    public static DirtyRect Empty => default;
+    public static DirtyRect Full(int w, int h) => new(0, 0, w, h);
+
+    public static DirtyRect Union(DirtyRect a, DirtyRect b)
+    {
+        if (a.IsEmpty) return b;
+        if (b.IsEmpty) return a;
+        int x0 = Math.Min(a.X, b.X);
+        int y0 = Math.Min(a.Y, b.Y);
+        int x1 = Math.Max(a.X + a.W, b.X + b.W);
+        int y1 = Math.Max(a.Y + a.H, b.Y + b.H);
+        return new DirtyRect(x0, y0, x1 - x0, y1 - y0);
+    }
+
+    public DirtyRect Clamp(int texW, int texH)
+    {
+        int x0 = Math.Max(0, X);
+        int y0 = Math.Max(0, Y);
+        int x1 = Math.Min(texW, X + W);
+        int y1 = Math.Min(texH, Y + H);
+        if (x1 <= x0 || y1 <= y0) return Empty;
+        return new DirtyRect(x0, y0, x1 - x0, y1 - y0);
+    }
+}
+
 public class PreviewService : IDisposable
 {
     private readonly MeshExtractor meshExtractor;
@@ -65,9 +105,134 @@ public class PreviewService : IDisposable
     private readonly ConcurrentDictionary<string, (Half[] Data, int Width, int Height)> vanillaColorTables =
         new(StringComparer.OrdinalIgnoreCase);
 
+    // Most recently built (modified) ColorTable per material — populated by the background
+    // composite cycle each time a ColorTableEntry is queued. Surfaced via PBR inspector.
+    private readonly ConcurrentDictionary<string, (Half[] Data, int Width, int Height)> lastBuiltColorTables =
+        new(StringComparer.OrdinalIgnoreCase);
+
     // Async compositing
     private CancellationTokenSource? asyncCancel;
     private volatile SwapBatch? pendingBatch;
+
+    // Serialize background composite work + coalesce slider-spam:
+    // every StartAsyncInPlace bumps composeRequestSeq; the worker takes the lock and
+    // skips its run if a newer request has already arrived. Without this, slider drags
+    // queue dozens of Tasks that all race to write the same _n.tex / _id.tex files.
+    private readonly SemaphoreSlim composeLock = new(1, 1);
+    private long composeRequestSeq;
+
+    // File-write throttle. Each WriteBgraTexFile pushes ~64MB through the FS at 4096²
+    // (synchronous IO ≈ 64-128ms per file), and Penumbra only re-reads files on Full
+    // Redraw — during inplace cycles GPU swap is the source of truth. So we only flush
+    // disk every 250ms; sustained drag still pumps SwapTexture at ~30Hz, but disk IO
+    // doesn't dominate the compose thread anymore.
+    private DateTime lastFileFlushUtc = DateTime.MinValue;
+    private const double FileFlushIntervalMs = 250;
+
+    // Game-side GPU swap throttle. Each SwapTexture at 4096² costs 5-15ms of main thread
+    // work (GpuTexture.CreateTexture2D + 64MB InitializeContents + Interlocked.Exchange).
+    // At 30Hz drag that exceeds the frame budget. 3D editor preview already reflects the
+    // latest state via the ModelEditorWindow subresource upload path, so the game-side
+    // swap only needs to catch up every `config.GameSwapIntervalMs`. Idle detection forces
+    // a final flush shortly after the user stops dragging so the game doesn't lag behind.
+    private DateTime lastGameSwapUtc = DateTime.MinValue;
+    private DateTime lastComposeRequestUtc = DateTime.MinValue;
+    private bool pendingIdleFlush;
+    // ~50ms of quiet time is a reliable "user stopped interacting" signal at 30Hz drag.
+    private const double IdleFlushAfterMs = 50;
+
+    // Emissive dedupe: skip UpdateEmissiveViaColorTable + SetTargetByPath when the color
+    // for this material hasn't changed since last flush. Without this, a slider drag that
+    // doesn't touch emissive still spams tree-walks + GPU CT texture recreates every cycle.
+    private readonly Dictionary<string, Vector3> lastAppliedEmissive =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    // Per-group reusable scratch buffers — eliminates the per-cycle 4-67MB LOH allocations
+    // that thrashed GC during a 3D-editor drag. Filled on the background thread under
+    // composeLock; consumed by the main thread next frame.
+    //
+    // All buffers are SINGLE-buffered. With the 30Hz throttle + serialized compose,
+    // main-thread consumption finishes well before the next compose runs. The Rgba/PreviewRgba
+    // ones get stored in compositeResults for the 3D editor to read async; in the rare case
+    // where the 3D editor reads while a new compose is mid-write, we get at most one frame
+    // of torn pixels which self-heals on the next compose (≤33ms). The previous double-buffer
+    // strategy doubled resident memory (600MB+ at 4096²), unacceptable.
+    /// <summary>
+    /// Per-buffer dirty-rect state: tracks the previous cycle's layer-union so we can
+    /// compute `dirty = current_union ∪ previous_union` and only repaint that region.
+    /// </summary>
+    private class DirtyTracker
+    {
+        public DirtyRect LastUnion;     // union of layer bboxes painted last cycle
+        public bool NeedsFullInit = true; // first cycle must populate the full buffer
+        public DirtyRect LastDirty;     // dirty rect written this cycle (for downstream upload)
+
+        public DirtyRect ComputeDirty(DirtyRect currentUnion, int texW, int texH)
+        {
+            DirtyRect d = NeedsFullInit
+                ? DirtyRect.Full(texW, texH)
+                : DirtyRect.Union(currentUnion, LastUnion);
+            return d.Clamp(texW, texH);
+        }
+
+        public void Commit(DirtyRect currentUnion, DirtyRect dirty)
+        {
+            LastUnion = currentUnion;
+            LastDirty = dirty;
+            NeedsFullInit = false;
+        }
+
+        public void Reset()
+        {
+            LastUnion = DirtyRect.Empty;
+            LastDirty = DirtyRect.Empty;
+            NeedsFullInit = true;
+        }
+    }
+
+    private class GroupScratch
+    {
+        public byte[]? Bgra;        // diffuse BGRA → file write + GPU swap
+        public byte[]? Rgba;        // diffuse RGBA → compositeResults dict (3D editor)
+        public byte[]? PreviewRgba; // 3D-editor preview RGBA when AffectsDiffuse=false on a layer
+        public byte[]? IdxRgba;     // index map composite intermediate (RGBA)
+        public byte[]? IdxBgra;     // index map BGRA → file write + GPU swap
+        public byte[]? NormBgra;    // legacy emissive norm BGRA
+        public byte[]? NormRgba;    // legacy emissive norm intermediate (RGBA)
+
+        // Dirty rect trackers — one per output buffer, since each paints a different
+        // layer subset (all-visible, AffectsDiffuse, AllocatedRowPair, AffectsEmissive).
+        public readonly DirtyTracker RgbaTracker = new();
+        public readonly DirtyTracker PreviewTracker = new();
+        public readonly DirtyTracker IdxTracker = new();
+        public readonly DirtyTracker NormTracker = new();
+    }
+    private readonly ConcurrentDictionary<string, GroupScratch> groupScratch =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static byte[] EnsureBuf(ref byte[]? buf, int size)
+    {
+        if (buf == null || buf.Length < size) buf = new byte[size];
+        return buf;
+    }
+
+    /// <summary>
+    /// Parallel-row helper for the per-pixel composite loops. Falls back to serial when
+    /// the row count is small enough that worker dispatch overhead would dominate.
+    /// </summary>
+    private static void ParallelRows(int pyMin, int pyMax, Action<int> rowAction)
+    {
+        int rowCount = pyMax - pyMin + 1;
+        if (rowCount <= 0) return;
+        // Below this threshold a serial loop is faster than waking thread pool workers.
+        // ~64 rows × ~2k px/row at typical decal sizes is the crossover on a 4-core box.
+        if (rowCount < 64)
+        {
+            for (int py = pyMin; py <= pyMax; py++) rowAction(py);
+            return;
+        }
+        Parallel.For(pyMin, pyMax + 1, rowAction);
+    }
 
     private record SwapBatchEntry(string GamePath, string? DiskPath, byte[] BgraData, int Width, int Height);
     private record EmissiveEntry(string MtrlGamePath, string? MtrlDiskPath, Vector3 Color, int CBufferOffset);
@@ -82,12 +247,14 @@ public class PreviewService : IDisposable
     /// <summary>Number of paths currently initialized for GPU swap.</summary>
     public int InitializedPathCount => initializedRedirects.Count;
 
-    // 3D editor integration: per-group composite results keyed by diffuseGamePath
-    private readonly ConcurrentDictionary<string, (byte[] Data, int Width, int Height)> compositeResults =
+    // 3D editor integration: per-group composite results keyed by diffuseGamePath.
+    // Dirty rect lets the main thread upload only the changed region (UpdateSubresource
+    // with a ResourceRegion) instead of re-creating + re-uploading the whole 64MB texture.
+    private readonly ConcurrentDictionary<string, (byte[] Data, int Width, int Height, DirtyRect Dirty)> compositeResults =
         new(StringComparer.OrdinalIgnoreCase);
     private long compositeVersion;
     public bool ExternalDirty { get; set; }
-    public (byte[] Data, int Width, int Height)? GetCompositeForGroup(string? diffuseGamePath)
+    public (byte[] Data, int Width, int Height, DirtyRect Dirty)? GetCompositeForGroup(string? diffuseGamePath)
     {
         if (diffuseGamePath != null && compositeResults.TryGetValue(diffuseGamePath, out var result))
             return result;
@@ -203,6 +370,35 @@ public class PreviewService : IDisposable
         var batch = Interlocked.Exchange(ref pendingBatch, null);
         if (batch == null) return;
 
+        var nowUtc = DateTime.UtcNow;
+
+        // Idle detection: if the user has stopped triggering new composites for IdleFlushAfterMs,
+        // force a flush regardless of the throttle window so the "final" drag state lands with
+        // minimal tail latency. Otherwise the worst-case delay would be a full GameSwapIntervalMs.
+        bool idleFlush = false;
+        if (pendingIdleFlush
+            && (nowUtc - lastComposeRequestUtc).TotalMilliseconds >= IdleFlushAfterMs)
+        {
+            idleFlush = true;
+            pendingIdleFlush = false;
+        }
+
+        // Throttle: skip game-side swap work if we're still inside the throttle window AND the
+        // user is still actively dragging (no idle flush). Re-stash the batch for the next tick.
+        // Clamp at 33ms floor (~30Hz) regardless of config — anything lower is pure main-thread
+        // waste since compose itself is 30Hz capped, and defends against legacy configs with
+        // lower values that would otherwise hang the game until the user opens settings.
+        int intervalMs = System.Math.Max(33, config.GameSwapIntervalMs);
+        bool withinThrottle = (nowUtc - lastGameSwapUtc).TotalMilliseconds < intervalMs;
+        if (withinThrottle && !idleFlush)
+        {
+            // Only re-stash if no newer batch has arrived — the worker may have overwritten
+            // pendingBatch between our Exchange and now; in that case drop ours silently.
+            Interlocked.CompareExchange(ref pendingBatch, batch, null);
+            return;
+        }
+        lastGameSwapUtc = nowUtc;
+
         var charBase = textureSwap?.GetLocalPlayerCharacterBase();
         if (charBase == null) return;
 
@@ -222,6 +418,13 @@ public class PreviewService : IDisposable
         {
             // Legacy single-emissive path: only fires when no ColorTable entry was queued
             // for this material (skin.shpk fallback or non-Dawntrail layouts).
+            // Dedupe: skip if this mtrl's color is identical to what we pushed last time —
+            // otherwise a drag that never touches emissive still spams tree walks + CT
+            // texture recreation every cycle.
+            if (lastAppliedEmissive.TryGetValue(em.MtrlGamePath, out var prevColor) && prevColor == em.Color)
+                continue;
+            lastAppliedEmissive[em.MtrlGamePath] = em.Color;
+
             textureSwap!.UpdateEmissiveViaColorTable(charBase, em.MtrlGamePath, em.MtrlDiskPath, em.Color);
             if (emissiveHook != null && em.CBufferOffset > 0)
                 emissiveHook.SetTargetByPath(charBase, em.MtrlGamePath, em.MtrlDiskPath, em.Color);
@@ -373,10 +576,25 @@ public class PreviewService : IDisposable
     /// <summary>Kick off background compositing, results applied via ApplyPendingSwaps.</summary>
     private unsafe void StartAsyncInPlace(DecalProject project)
     {
-        // Cancel any previous background work
-        asyncCancel?.Cancel();
+        // Bump request sequence so any in-flight worker that hasn't taken the lock yet
+        // will see itself as superseded and skip its work.
+        var mySeq = Interlocked.Increment(ref composeRequestSeq);
+
+        // Interaction heartbeat for idle-flush detection in ApplyPendingSwaps.
+        lastComposeRequestUtc = DateTime.UtcNow;
+        pendingIdleFlush = true;
+
+        // Cancel any previous background work AND dispose the old CTS so we don't
+        // leak its WaitHandle / registration list (~30 leaks/sec during a sustained drag).
+        var oldCts = asyncCancel;
         asyncCancel = new CancellationTokenSource();
         var token = asyncCancel.Token;
+        try
+        {
+            oldCts?.Cancel();
+            oldCts?.Dispose();
+        }
+        catch { /* old CTS may already be disposed by Dispose() */ }
 
         // v1 PBR: cache vanilla ColorTable from GPU before spawning the background task.
         // Idempotent — only the FIRST successful cache per material counts. Vanilla normal
@@ -422,11 +640,27 @@ public class PreviewService : IDisposable
 
         Task.Run(() =>
         {
+            // Serialize composite cycles. We're already on a thread-pool thread so a
+            // synchronous Wait is fine — and it lets us stay in the unsafe-inheriting
+            // lambda without the async-state-machine restriction.
+            try { composeLock.Wait(token); }
+            catch (OperationCanceledException) { return; }
+
             try
             {
+                // Coalesce: if a newer request arrived while we were waiting on the
+                // lock, drop this one — the next worker will compose the latest state.
+                if (Interlocked.Read(ref composeRequestSeq) != mySeq) return;
+                if (token.IsCancellationRequested) return;
+
                 var texEntries = new List<SwapBatchEntry>();
                 var emEntries = new List<EmissiveEntry>();
                 var ctEntries = new List<ColorTableEntry>();
+
+                // Decide once per cycle whether this compose flushes disk (250ms throttle).
+                var nowUtc = DateTime.UtcNow;
+                bool flushFiles = (nowUtc - lastFileFlushUtc).TotalMilliseconds >= FileFlushIntervalMs;
+                if (flushFiles) lastFileFlushUtc = nowUtc;
 
                 foreach (var job in jobs)
                 {
@@ -437,9 +671,8 @@ public class PreviewService : IDisposable
 
                     // Diffuse composite
                     var baseTex = LoadBaseTexture(job.Group);
-
-                    // GPU diffuse — only paints layers with AffectsDiffuse=true
-                    var rgba = CpuUvComposite(layers, baseTex.Data, baseTex.Width, baseTex.Height);
+                    int byteCount = baseTex.Width * baseTex.Height * 4;
+                    var scratch = groupScratch.GetOrAdd(job.DiffuseGamePath, _ => new GroupScratch());
 
                     // 3D editor preview diffuse — paints ALL visible layers with images so the
                     // user sees decal placement even when AffectsDiffuse is off.
@@ -449,25 +682,50 @@ public class PreviewService : IDisposable
                         if (l.IsVisible && !string.IsNullOrEmpty(l.ImagePath) && !l.AffectsDiffuse)
                         { hasPreviewOnly = true; break; }
                     }
-                    var previewRgba = hasPreviewOnly
-                        ? CpuUvComposite(layers, baseTex.Data, baseTex.Width, baseTex.Height, ignoreAffectsDiffuseFilter: true)
-                        : rgba;
 
-                    // 3D editor consumes compositeResults — feed it the preview-with-all-layers version
+                    // GPU diffuse — only paints layers with AffectsDiffuse=true.
+                    var rgbaBuf = EnsureBuf(ref scratch.Rgba, byteCount);
+                    var rgba = CpuUvComposite(layers, baseTex.Data, baseTex.Width, baseTex.Height,
+                        outputBuffer: rgbaBuf, tracker: scratch.RgbaTracker);
+
+                    byte[]? previewRgba;
+                    DirtyRect previewDirty;
+                    if (hasPreviewOnly)
+                    {
+                        var prevBuf = EnsureBuf(ref scratch.PreviewRgba, byteCount);
+                        previewRgba = CpuUvComposite(layers, baseTex.Data, baseTex.Width, baseTex.Height,
+                            ignoreAffectsDiffuseFilter: true, outputBuffer: prevBuf,
+                            tracker: scratch.PreviewTracker);
+                        previewDirty = scratch.PreviewTracker.LastDirty;
+                    }
+                    else
+                    {
+                        previewRgba = rgba;
+                        previewDirty = scratch.RgbaTracker.LastDirty;
+                    }
+
+                    // 3D editor consumes compositeResults — feed it the preview-with-all-layers version.
+                    // Dirty rect accompanies the buffer so ModelEditorWindow only uploads the changed region.
                     if (previewRgba != null)
                     {
-                        compositeResults[job.DiffuseGamePath] = (previewRgba, baseTex.Width, baseTex.Height);
+                        compositeResults[job.DiffuseGamePath] =
+                            (previewRgba, baseTex.Width, baseTex.Height, previewDirty);
                         Interlocked.Increment(ref compositeVersion);
                     }
 
-                    // GPU/file path uses the filtered version
+                    // GPU/file path uses the filtered version. Swizzle only the dirty region —
+                    // outside dirty the bgraBuf still holds last cycle's correctly-swizzled bytes
+                    // (since rgbaBuf outside dirty is unchanged, so is the swizzled mirror).
                     if (rgba != null)
                     {
-                        if (job.DiskPath != null)
-                            WriteBgraTexFile(job.DiskPath, rgba, baseTex.Width, baseTex.Height);
-                        var bgra = TextureSwapService.RgbaToBgra(rgba);
+                        var bgraBuf = EnsureBuf(ref scratch.Bgra, byteCount);
+                        var diffuseDirty = scratch.RgbaTracker.LastDirty;
+                        TextureSwapService.RgbaToBgraRegion(rgba, bgraBuf,
+                            baseTex.Width, baseTex.Height, diffuseDirty);
+                        if (flushFiles && job.DiskPath != null)
+                            WriteBgraTexFile(job.DiskPath, bgraBuf, byteCount, baseTex.Width, baseTex.Height);
                         texEntries.Add(new SwapBatchEntry(
-                            job.DiffuseGamePath, job.DiskPath, bgra, baseTex.Width, baseTex.Height));
+                            job.DiffuseGamePath, job.DiskPath, bgraBuf, baseTex.Width, baseTex.Height));
                     }
 
                     // v1 PBR: layers with allocated row pairs drive the index-map + ColorTable path
@@ -481,13 +739,17 @@ public class PreviewService : IDisposable
                     // disk path that ProcessGroup populated, then cloned + modified.
                     if (hasPbrLayers && !string.IsNullOrEmpty(job.IndexGamePath) && !string.IsNullOrEmpty(job.IndexDiskPath))
                     {
-                        var idxRgba = CompositeIndexMap(allocatedLayers, job.IndexDiskPath!, baseTex.Width, baseTex.Height);
+                        var idxRgbaBuf = EnsureBuf(ref scratch.IdxRgba, byteCount);
+                        var idxRgba = CompositeIndexMap(allocatedLayers, job.IndexDiskPath!,
+                            baseTex.Width, baseTex.Height, outputBuffer: idxRgbaBuf);
                         if (idxRgba != null)
                         {
-                            WriteBgraTexFile(job.IndexDiskPath!, idxRgba, baseTex.Width, baseTex.Height);
-                            var idxBgra = TextureSwapService.RgbaToBgra(idxRgba);
+                            var idxBgraBuf = EnsureBuf(ref scratch.IdxBgra, byteCount);
+                            TextureSwapService.RgbaToBgra(idxRgba, idxBgraBuf, byteCount);
+                            if (flushFiles)
+                                WriteBgraTexFile(job.IndexDiskPath!, idxBgraBuf, byteCount, baseTex.Width, baseTex.Height);
                             texEntries.Add(new SwapBatchEntry(
-                                job.IndexGamePath!, job.IndexDiskPath, idxBgra, baseTex.Width, baseTex.Height));
+                                job.IndexGamePath!, job.IndexDiskPath, idxBgraBuf, baseTex.Width, baseTex.Height));
                             indexQueued = true;
                         }
                     }
@@ -500,6 +762,8 @@ public class PreviewService : IDisposable
                         var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(job.MtrlGamePath!);
                         ctEntries.Add(new ColorTableEntry(
                             job.MtrlGamePath!, mtrlDisk, modified, vanilla.Width, vanilla.Height));
+                        // Surface the modified table to the PBR inspector.
+                        lastBuiltColorTables[job.MtrlGamePath!] = (modified, vanilla.Width, vanilla.Height);
                         ctQueued = true;
                     }
 
@@ -517,16 +781,19 @@ public class PreviewService : IDisposable
                     // (skin.shpk-class materials, or non-Dawntrail layouts).
                     if (!ctQueued && HasEmissiveLayers(job.Layers) && !string.IsNullOrEmpty(job.NormDiskPath))
                     {
+                        var normRgbaBuf = EnsureBuf(ref scratch.NormRgba, byteCount);
                         var normRgba = CompositeEmissiveNorm(
-                            layers, job.NormDiskPath!, baseTex.Width, baseTex.Height);
+                            layers, job.NormDiskPath!, baseTex.Width, baseTex.Height,
+                            outputBuffer: normRgbaBuf);
                         if (normRgba != null)
                         {
+                            var normBgraBuf = EnsureBuf(ref scratch.NormBgra, byteCount);
+                            TextureSwapService.RgbaToBgra(normRgba, normBgraBuf, byteCount);
                             previewDiskPaths.TryGetValue(job.NormGamePath ?? "", out var normDiskOut);
-                            if (normDiskOut != null)
-                                WriteBgraTexFile(normDiskOut, normRgba, baseTex.Width, baseTex.Height);
-                            var normBgra = TextureSwapService.RgbaToBgra(normRgba);
+                            if (flushFiles && normDiskOut != null)
+                                WriteBgraTexFile(normDiskOut, normBgraBuf, byteCount, baseTex.Width, baseTex.Height);
                             texEntries.Add(new SwapBatchEntry(
-                                job.NormGamePath!, normDiskOut, normBgra, baseTex.Width, baseTex.Height));
+                                job.NormGamePath!, normDiskOut, normBgraBuf, baseTex.Width, baseTex.Height));
                         }
 
                         if (!string.IsNullOrEmpty(job.MtrlGamePath))
@@ -544,6 +811,10 @@ public class PreviewService : IDisposable
             catch (Exception ex)
             {
                 DebugServer.AppendLog($"[PreviewService] Async composite exception: {ex.Message}");
+            }
+            finally
+            {
+                composeLock.Release();
             }
         }, token);
     }
@@ -656,16 +927,41 @@ public class PreviewService : IDisposable
         return rowPairAllocators.GetOrAdd(key, _ => new RowPairAllocator());
     }
 
+    // ── PBR Inspector accessors ──────────────────────────────────────────────
+
+    /// <summary>Vanilla ColorTable bytes for a group's mtrl, or null if not yet cached.</summary>
+    public (Half[] Data, int Width, int Height)? GetVanillaColorTable(TargetGroup group)
+    {
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return null;
+        return vanillaColorTables.TryGetValue(group.MtrlGamePath!, out var v) ? v : null;
+    }
+
+    /// <summary>Most recently built (modified) ColorTable for a group, or null if no PBR layers active.</summary>
+    public (Half[] Data, int Width, int Height)? GetLastBuiltColorTable(TargetGroup group)
+    {
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return null;
+        return lastBuiltColorTables.TryGetValue(group.MtrlGamePath!, out var v) ? v : null;
+    }
+
+    /// <summary>Staged disk path for a redirected texture, or null if not initialized.</summary>
+    public string? GetStagedDiskPath(string? gamePath)
+    {
+        if (string.IsNullOrEmpty(gamePath)) return null;
+        return previewDiskPaths.TryGetValue(gamePath!, out var disk) ? disk : null;
+    }
+
     /// <summary>
     /// Resolve the g_SamplerIndex (0x565F8FD8) texture's game path from a group's mtrl,
     /// caching the result. Returns null if mtrl is unreadable, the sampler is missing,
     /// or its texture index is out of range.
+    /// Negative results are cached as <see cref="string.Empty"/> so we don't re-parse the
+    /// mtrl every frame on materials that simply don't have an index sampler (skin.shpk).
     /// </summary>
     public string? GetIndexMapGamePath(TargetGroup group)
     {
         if (string.IsNullOrEmpty(group.MtrlGamePath)) return null;
         if (indexMapGamePaths.TryGetValue(group.MtrlGamePath!, out var cached))
-            return cached;
+            return string.IsNullOrEmpty(cached) ? null : cached;
 
         try
         {
@@ -697,7 +993,9 @@ public class PreviewService : IDisposable
             }
             if (texIndex < 0 || texIndex >= mtrl.TextureOffsets.Length)
             {
-                DebugServer.AppendLog($"[PBR] No g_SamplerIndex (0x565F8FD8) in mtrl {group.MtrlGamePath}");
+                // Cache the negative result so we don't re-parse the mtrl every frame.
+                indexMapGamePaths[group.MtrlGamePath!] = string.Empty;
+                DebugServer.AppendLog($"[PBR] No g_SamplerIndex (0x565F8FD8) in mtrl {group.MtrlGamePath} (cached)");
                 return null;
             }
 
@@ -705,7 +1003,11 @@ public class PreviewService : IDisposable
             int end = strOffset;
             while (end < mtrl.Strings.Length && mtrl.Strings[end] != 0) end++;
             var indexGamePath = System.Text.Encoding.UTF8.GetString(mtrl.Strings, strOffset, end - strOffset);
-            if (string.IsNullOrEmpty(indexGamePath)) return null;
+            if (string.IsNullOrEmpty(indexGamePath))
+            {
+                indexMapGamePaths[group.MtrlGamePath!] = string.Empty;
+                return null;
+            }
 
             indexMapGamePaths[group.MtrlGamePath!] = indexGamePath;
             DebugServer.AppendLog($"[PBR] Resolved index map for {group.Name}: {indexGamePath}");
@@ -779,14 +1081,39 @@ public class PreviewService : IDisposable
     }
 
     /// <summary>
+    /// Whether this group's material supports the v1 PBR pipeline (has g_SamplerIndex
+    /// and ColorTable). False on skin.shpk class materials. Result is cached.
+    /// </summary>
+    public bool MaterialSupportsPbr(TargetGroup group)
+    {
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return false;
+        return !string.IsNullOrEmpty(GetIndexMapGamePath(group));
+    }
+
+    /// <summary>Reason codes for a failed row pair allocation, surfaced to the UI for toasting.</summary>
+    public enum RowPairAllocFailure { None, Unsupported, Exhausted }
+
+    /// <summary>
     /// Called from UI when a layer needs a row pair (first Affects* toggled on).
-    /// Returns true on success; false on exhaustion (caller must toast and revert the toggle).
-    /// Lazy-scans vanilla normal histogram on first allocation per group, so we never
+    /// Returns true on success; false on failure with the reason in <paramref name="failure"/>.
+    /// Lazy-scans vanilla index map histogram on first allocation per group, so we never
     /// hand out a slot that vanilla is already using.
     /// </summary>
-    public bool TryAllocateRowPairForLayer(TargetGroup group, DecalLayer layer)
+    public bool TryAllocateRowPairForLayer(TargetGroup group, DecalLayer layer, out RowPairAllocFailure failure)
     {
+        failure = RowPairAllocFailure.None;
         if (layer.AllocatedRowPair >= 0) return true;   // already has one
+
+        // Reject up front if the material has no g_SamplerIndex / ColorTable (skin.shpk).
+        // PBR row-pair fields are physically meaningless on those materials.
+        if (!MaterialSupportsPbr(group))
+        {
+            failure = RowPairAllocFailure.Unsupported;
+            DebugServer.AppendLog(
+                $"[PBR] Material does not support PBR row pairs: {group.MtrlGamePath} (no g_SamplerIndex)");
+            return false;
+        }
+
         var alloc = GetOrCreateAllocator(group);
 
         // Critical: scan vanilla BEFORE allocating, otherwise we may hand out a row pair
@@ -796,6 +1123,7 @@ public class PreviewService : IDisposable
         var slot = alloc.TryAllocate();
         if (slot == null)
         {
+            failure = RowPairAllocFailure.Exhausted;
             DebugServer.AppendLog(
                 $"[PBR] Row pair exhausted for {group.Name} " +
                 $"(avail={alloc.AvailableSlots}, vanilla={alloc.VanillaOccupiedCount})");
@@ -863,6 +1191,40 @@ public class PreviewService : IDisposable
     /// <summary>Clear emissive hook targets (e.g. when emissive is disabled).</summary>
     public void ClearEmissiveHookTargets() => emissiveHook?.ClearTargets();
 
+    /// <summary>
+    /// Invalidate a single group's emissive state without nuking row-pair allocators or
+    /// PBR caches. Removes the mtrl/norm redirects so the next UpdatePreview falls back
+    /// to a Full Redraw that re-binds vanilla files, clearing the CBuffer hook target so
+    /// the patched <c>g_EmissiveColor</c> stops being applied each frame.
+    /// Use this when a layer's emissive is toggled off.
+    /// </summary>
+    public void InvalidateEmissiveForGroup(TargetGroup group)
+    {
+        // Always clear hook targets — cheap, idempotent, and prevents the
+        // last-written color from continuing to glow after the user disables emissive.
+        emissiveHook?.ClearTargets();
+
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return;
+
+        // Drop the mtrl/norm initialisation so CheckCanSwapInPlace returns false next
+        // cycle and we go through Full Redraw, which rewrites vanilla mtrl + vanilla norm.
+        if (!string.IsNullOrEmpty(group.MtrlGamePath))
+        {
+            initializedRedirects.TryRemove(group.MtrlGamePath!, out _);
+            previewDiskPaths.TryRemove(group.MtrlGamePath!, out _);
+            previewMtrlDiskPaths.TryRemove(group.MtrlGamePath!, out _);
+            emissiveOffsets.TryRemove(group.MtrlGamePath!, out _);
+        }
+        if (!string.IsNullOrEmpty(group.NormGamePath))
+        {
+            initializedRedirects.TryRemove(group.NormGamePath!, out _);
+            previewDiskPaths.TryRemove(group.NormGamePath!, out _);
+        }
+        // Force CanSwap recompute next frame
+        CanSwapInPlace = false;
+        DebugServer.AppendLog($"[PreviewService] Invalidated emissive state for {group.Name}");
+    }
+
     /// <summary>Clear GPU swap state, forcing next update to do full redraw.</summary>
     public void ResetSwapState()
     {
@@ -874,7 +1236,11 @@ public class PreviewService : IDisposable
         previewMtrlDiskPaths.Clear();
         rowPairAllocators.Clear();
         vanillaColorTables.Clear();
+        lastBuiltColorTables.Clear();
         indexMapGamePaths.Clear();
+        lastAppliedEmissive.Clear();
+        lastGameSwapUtc = DateTime.MinValue;
+        pendingIdleFlush = false;
         activeProject = null;
         emissiveHook?.ClearTargets();
         CanSwapInPlace = false;
@@ -1118,11 +1484,21 @@ public class PreviewService : IDisposable
         if (diffPreview == null && group.HasPbrLayers())
             diffPreview = (byte[])baseTex.Data.Clone();
 
-        // 3D editor reads compositeResults — feed it the preview version
+        // 3D editor reads compositeResults — feed it the preview version.
+        // Full Redraw always writes the whole texture, so dirty = full rect.
         if (diffPreview != null)
         {
-            compositeResults[group.DiffuseGamePath!] = (diffPreview, w, h);
+            compositeResults[group.DiffuseGamePath!] = (diffPreview, w, h, DirtyRect.Full(w, h));
             Interlocked.Increment(ref compositeVersion);
+            // Also mark the async composite's tracker as "full init" so the first inplace
+            // cycle after this redraw re-establishes the invariant on its own scratch buffer.
+            if (groupScratch.TryGetValue(group.DiffuseGamePath!, out var scratchReset))
+            {
+                scratchReset.RgbaTracker.Reset();
+                scratchReset.PreviewTracker.Reset();
+                scratchReset.IdxTracker.Reset();
+                scratchReset.NormTracker.Reset();
+            }
         }
 
         // GPU/file path uses the filtered version
@@ -1214,15 +1590,20 @@ public class PreviewService : IDisposable
     /// <summary>
     /// Composite emissive area into normal map alpha channel.
     /// </summary>
-    private byte[]? CompositeEmissiveNorm(List<DecalLayer> layers, string normDiskPath, int w, int h)
+    private byte[]? CompositeEmissiveNorm(List<DecalLayer> layers, string normDiskPath, int w, int h,
+        byte[]? outputBuffer = null)
     {
-        byte[] baseNorm;
+        int needLen = w * h * 4;
+        var output = outputBuffer != null && outputBuffer.Length >= needLen
+            ? outputBuffer
+            : new byte[needLen];
 
-        // Cache the base normal texture
+        // Get base normal bytes WITHOUT mutating the cache entry.
+        byte[]? cachedBytes = null;
+        int cachedW = 0, cachedH = 0;
         if (baseTextureCache.TryGetValue(normDiskPath, out var cachedNorm))
         {
-            var (data, iw, ih) = cachedNorm;
-            baseNorm = (iw != w || ih != h) ? ResizeBilinear(data, iw, ih, w, h) : (byte[])data.Clone();
+            (cachedBytes, cachedW, cachedH) = cachedNorm;
         }
         else
         {
@@ -1230,19 +1611,27 @@ public class PreviewService : IDisposable
             if (normImg != null)
             {
                 baseTextureCache[normDiskPath] = normImg.Value;
-                var (data, iw, ih) = normImg.Value;
-                baseNorm = (iw != w || ih != h) ? ResizeBilinear(data, iw, ih, w, h) : (byte[])data.Clone();
-            }
-            else
-            {
-                baseNorm = new byte[w * h * 4];
+                (cachedBytes, cachedW, cachedH) = normImg.Value;
             }
         }
 
-        var output = (byte[])baseNorm.Clone();
+        if (cachedBytes == null)
+        {
+            Array.Clear(output, 0, needLen);
+        }
+        else if (cachedW != w || cachedH != h)
+        {
+            var resized = ResizeBilinear(cachedBytes, cachedW, cachedH, w, h);
+            Buffer.BlockCopy(resized, 0, output, 0, needLen);
+        }
+        else
+        {
+            Buffer.BlockCopy(cachedBytes, 0, output, 0, needLen);
+        }
 
-        // Zero out alpha channel everywhere
-        for (int i = 3; i < output.Length; i += 4)
+        // Zero out alpha channel everywhere — bound by needLen, not output.Length, since
+        // outputBuffer may be a reused over-sized scratch buffer.
+        for (int i = 3; i < needLen; i += 4)
             output[i] = 0;
 
         bool anyEmissive = false;
@@ -1266,7 +1655,10 @@ public class PreviewService : IDisposable
             int pyMin = Math.Max(0, (int)((center.Y - scale.Y / 2f) * h));
             int pyMax = Math.Min(h - 1, (int)((center.Y + scale.Y / 2f) * h));
 
-            for (int py = pyMin; py <= pyMax; py++)
+            // Per-row parallel — each row writes disjoint output bytes (alpha channel only).
+            // The Math.Max read-modify-write is per-pixel and rows don't overlap.
+            var layerLocal = layer;
+            ParallelRows(pyMin, pyMax, py =>
             {
                 for (int px = pxMin; px <= pxMax; px++)
                 {
@@ -1277,7 +1669,7 @@ public class PreviewService : IDisposable
                     float ru = lu * cosR + lv * sinR;
                     float rv = -lu * sinR + lv * cosR;
                     if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
-                    switch (layer.Clip)
+                    switch (layerLocal.Clip)
                     {
                         case ClipMode.ClipLeft when ru < 0f: continue;
                         case ClipMode.ClipRight when ru >= 0f: continue;
@@ -1292,10 +1684,10 @@ public class PreviewService : IDisposable
                     if (da < 0.001f) continue;
 
                     float maskValue;
-                    if (layer.FadeMask == LayerFadeMask.DirectionalGradient)
+                    if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
                         maskValue = ComputeDirectionalGradient(ru, rv, da,
-                            layer.GradientAngleDeg, layer.GradientScale, layer.FadeMaskFalloff, layer.GradientOffset);
-                    else if (layer.FadeMask == LayerFadeMask.ShapeOutline)
+                            layerLocal.GradientAngleDeg, layerLocal.GradientScale, layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
+                    else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
                     {
                         // Sample 8 neighbors at 1-pixel offset to detect alpha edges
                         float sum = 0; int cnt = 0;
@@ -1307,16 +1699,16 @@ public class PreviewService : IDisposable
                             SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
                             sum += na * opacity; cnt++;
                         }
-                        maskValue = ComputeShapeOutline(da, layer.FadeMaskFalloff, sum / cnt);
+                        maskValue = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
                     }
                     else
-                        maskValue = ComputeFadeMaskWeight(layer.FadeMask, layer.FadeMaskFalloff, ru, rv, da);
+                        maskValue = ComputeFadeMaskWeight(layerLocal.FadeMask, layerLocal.FadeMaskFalloff, ru, rv, da);
 
                     int oIdx = (py * w + px) * 4;
                     byte emByte = (byte)Math.Clamp((int)(maskValue * 255), 0, 255);
                     output[oIdx + 3] = (byte)Math.Max(output[oIdx + 3], emByte);
                 }
-            }
+            });
 
             anyEmissive = true;
         }
@@ -1332,13 +1724,16 @@ public class PreviewService : IDisposable
     ///   index.G = weight * 255  (weight=1 ⇒ G=255 ⇒ rowBlend=0 ⇒ reads layer override row)
     /// Vanilla B and A are preserved.
     /// </summary>
-    private byte[]? CompositeIndexMap(List<DecalLayer> allocatedLayers, string indexDiskOrGamePath, int w, int h)
+    private byte[]? CompositeIndexMap(List<DecalLayer> allocatedLayers, string indexDiskOrGamePath, int w, int h,
+        byte[]? outputBuffer = null)
     {
-        byte[] baseIndex;
+        // Get base index bytes — must NOT mutate the cached entry. When sizes match we
+        // skip the clone and copy straight into outputBuffer.
+        byte[] cachedBytes;
+        int cachedW, cachedH;
         if (baseTextureCache.TryGetValue(indexDiskOrGamePath, out var cachedIdx))
         {
-            var (data, iw, ih) = cachedIdx;
-            baseIndex = (iw != w || ih != h) ? ResizeBilinear(data, iw, ih, w, h) : (byte[])data.Clone();
+            (cachedBytes, cachedW, cachedH) = cachedIdx;
         }
         else
         {
@@ -1347,11 +1742,25 @@ public class PreviewService : IDisposable
                 : LoadGameTexture(indexDiskOrGamePath);
             if (indexImg == null) return null;
             baseTextureCache[indexDiskOrGamePath] = indexImg.Value;
-            var (data, iw, ih) = indexImg.Value;
-            baseIndex = (iw != w || ih != h) ? ResizeBilinear(data, iw, ih, w, h) : (byte[])data.Clone();
+            (cachedBytes, cachedW, cachedH) = indexImg.Value;
         }
 
-        var output = (byte[])baseIndex.Clone();
+        int needLen = w * h * 4;
+        var output = outputBuffer != null && outputBuffer.Length >= needLen
+            ? outputBuffer
+            : new byte[needLen];
+
+        if (cachedW != w || cachedH != h)
+        {
+            // Resize path still allocates inside ResizeBilinear, but that's the rare case
+            // where index map and diffuse have different dimensions.
+            var resized = ResizeBilinear(cachedBytes, cachedW, cachedH, w, h);
+            Buffer.BlockCopy(resized, 0, output, 0, needLen);
+        }
+        else
+        {
+            Buffer.BlockCopy(cachedBytes, 0, output, 0, needLen);
+        }
         bool anyWritten = false;
 
         // z-order: iterate layers front-to-back so later layers overwrite earlier ones
@@ -1378,7 +1787,11 @@ public class PreviewService : IDisposable
             int pyMin = Math.Max(0, (int)((center.Y - scale.Y / 2f) * h));
             int pyMax = Math.Min(h - 1, (int)((center.Y + scale.Y / 2f) * h));
 
-            for (int py = pyMin; py <= pyMax; py++)
+            // Per-row parallel — each row writes disjoint output pixels. anyWritten is a
+            // bool-set-to-true-only flag so concurrent races are benign.
+            var layerLocal = layer;
+            var anyWrittenFlag = new int[1];
+            ParallelRows(pyMin, pyMax, py =>
             {
                 for (int px = pxMin; px <= pxMax; px++)
                 {
@@ -1389,7 +1802,7 @@ public class PreviewService : IDisposable
                     float ru = lu * cosR + lv * sinR;
                     float rv = -lu * sinR + lv * cosR;
                     if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
-                    switch (layer.Clip)
+                    switch (layerLocal.Clip)
                     {
                         case ClipMode.ClipLeft when ru < 0f: continue;
                         case ClipMode.ClipRight when ru >= 0f: continue;
@@ -1404,10 +1817,10 @@ public class PreviewService : IDisposable
                     if (da < 0.001f) continue;
 
                     float weight;
-                    if (layer.FadeMask == LayerFadeMask.DirectionalGradient)
+                    if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
                         weight = ComputeDirectionalGradient(ru, rv, da,
-                            layer.GradientAngleDeg, layer.GradientScale, layer.FadeMaskFalloff, layer.GradientOffset);
-                    else if (layer.FadeMask == LayerFadeMask.ShapeOutline)
+                            layerLocal.GradientAngleDeg, layerLocal.GradientScale, layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
+                    else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
                     {
                         float sum = 0; int cnt = 0;
                         for (int dy = -1; dy <= 1; dy++)
@@ -1418,10 +1831,10 @@ public class PreviewService : IDisposable
                             SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
                             sum += na * opacity; cnt++;
                         }
-                        weight = ComputeShapeOutline(da, layer.FadeMaskFalloff, sum / cnt);
+                        weight = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
                     }
                     else
-                        weight = ComputeFadeMaskWeight(layer.FadeMask, layer.FadeMaskFalloff, ru, rv, da);
+                        weight = ComputeFadeMaskWeight(layerLocal.FadeMask, layerLocal.FadeMaskFalloff, ru, rv, da);
 
                     weight = Math.Clamp(weight, 0f, 1f);
                     if (weight <= 0.001f) continue;
@@ -1430,9 +1843,10 @@ public class PreviewService : IDisposable
                     output[oIdx + 0] = rowPairByte;                                  // .r = row pair * 17 (Penumbra MaterialExporter:136)
                     output[oIdx + 1] = (byte)Math.Clamp((int)(weight * 255), 0, 255); // .g = weight (rowBlend = 1 - g/255, :137)
                     // .b and .a left at vanilla values
-                    anyWritten = true;
+                    anyWrittenFlag[0] = 1;
                 }
-            }
+            });
+            if (anyWrittenFlag[0] != 0) anyWritten = true;
         }
 
         return anyWritten ? output : null;
@@ -1496,10 +1910,12 @@ public class PreviewService : IDisposable
             if (sqResult == null) return null;
 
             var rawBytes = sqResult.Value.file.RawData.ToArray();
-            // Unique temp file: avoid races between concurrent main/background callers
+            // Unique temp file: avoid races between concurrent main/background callers.
+            // useCache=false because each call uses a fresh GUID path — caching would
+            // never hit and just leak entries forever.
             var tempPath = Path.Combine(outputDir, $"temp_{Guid.NewGuid():N}.tex");
             File.WriteAllBytes(tempPath, rawBytes);
-            var result = imageLoader.LoadImage(tempPath);
+            var result = imageLoader.LoadImage(tempPath, useCache: false);
             try { File.Delete(tempPath); } catch { }
             return result;
         }
@@ -1516,18 +1932,73 @@ public class PreviewService : IDisposable
     /// image, regardless of AffectsDiffuse — used for the 3D editor preview where the user
     /// needs to see decal placement even when the layer doesn't actually paint the GPU diffuse.
     /// </summary>
-    private byte[]? CpuUvComposite(List<DecalLayer> layers, byte[] baseRgba, int w, int h,
-        bool ignoreAffectsDiffuseFilter = false)
+    /// <summary>
+    /// Compute the axis-aligned bbox of a decal layer in texture pixel coordinates.
+    /// Matches the scan-range derivation inside the paint loops (non-rotated extents,
+    /// same as the engine's own tile clamping). Rotation is handled per-pixel inside.
+    /// </summary>
+    private static DirtyRect ComputeLayerBbox(Vector2 uvCenter, Vector2 uvScale, int w, int h)
     {
-        var output = (byte[])baseRgba.Clone();
-        int processedLayers = 0;
+        int pxMin = Math.Max(0, (int)((uvCenter.X - uvScale.X / 2f) * w));
+        int pxMax = Math.Min(w - 1, (int)((uvCenter.X + uvScale.X / 2f) * w));
+        int pyMin = Math.Max(0, (int)((uvCenter.Y - uvScale.Y / 2f) * h));
+        int pyMax = Math.Min(h - 1, (int)((uvCenter.Y + uvScale.Y / 2f) * h));
+        if (pxMax < pxMin || pyMax < pyMin) return DirtyRect.Empty;
+        return new DirtyRect(pxMin, pyMin, pxMax - pxMin + 1, pyMax - pyMin + 1);
+    }
 
+    private byte[]? CpuUvComposite(List<DecalLayer> layers, byte[] baseRgba, int w, int h,
+        bool ignoreAffectsDiffuseFilter = false, byte[]? outputBuffer = null,
+        DirtyTracker? tracker = null)
+    {
+        // outputBuffer lets the caller pass a per-group reusable buffer; otherwise allocate.
+        var output = outputBuffer != null && outputBuffer.Length >= baseRgba.Length
+            ? outputBuffer
+            : new byte[baseRgba.Length];
+
+        // Collect applicable layers + precompute their bboxes once.
+        var applicable = new List<(DecalLayer Layer, DirtyRect Rect)>();
         foreach (var layer in layers)
         {
             if (!layer.IsVisible || string.IsNullOrEmpty(layer.ImagePath)) continue;
             if (!ignoreAffectsDiffuseFilter && !layer.AffectsDiffuse) continue;
 
-            var decalImage = imageLoader.LoadImage(layer.ImagePath);
+            var rect = ComputeLayerBbox(layer.UvCenter, layer.UvScale, w, h);
+            if (rect.IsEmpty) continue;
+            applicable.Add((layer, rect));
+        }
+
+        // Fast-out: nothing to paint AND no prior paint to clean up
+        if (applicable.Count == 0 && (tracker == null || tracker.NeedsFullInit || tracker.LastUnion.IsEmpty))
+            return null;
+
+        // Union of this cycle's layer bboxes
+        var currentUnion = DirtyRect.Empty;
+        foreach (var (_, r) in applicable)
+            currentUnion = DirtyRect.Union(currentUnion, r);
+
+        // dirty = current ∪ previous (or full on first init / no tracker)
+        DirtyRect dirty = tracker == null
+            ? DirtyRect.Full(w, h)
+            : tracker.ComputeDirty(currentUnion, w, h);
+
+        // Restore base pixels over the dirty region. Outside dirty, the output already
+        // equals base (since previous-cycle paint ⊆ previous_union ⊆ dirty), so no
+        // work needed there. This is the core CPU saving: 4096² → dirty W*H bytes.
+        if (!dirty.IsEmpty)
+        {
+            int rowBytes = dirty.W * 4;
+            int yEnd = dirty.Y + dirty.H;
+            for (int py = dirty.Y; py < yEnd; py++)
+            {
+                int off = (py * w + dirty.X) * 4;
+                Buffer.BlockCopy(baseRgba, off, output, off, rowBytes);
+            }
+        }
+
+        foreach (var (layer, rect) in applicable)
+        {
+            var decalImage = imageLoader.LoadImage(layer.ImagePath!);
             if (decalImage == null) continue;
 
             var (decalData, decalW, decalH) = decalImage.Value;
@@ -1538,12 +2009,16 @@ public class PreviewService : IDisposable
             var cosR = MathF.Cos(rotRad);
             var sinR = MathF.Sin(rotRad);
 
-            int pxMin = Math.Max(0, (int)((center.X - scale.X / 2f) * w));
-            int pxMax = Math.Min(w - 1, (int)((center.X + scale.X / 2f) * w));
-            int pyMin = Math.Max(0, (int)((center.Y - scale.Y / 2f) * h));
-            int pyMax = Math.Min(h - 1, (int)((center.Y + scale.Y / 2f) * h));
+            int pxMin = rect.X;
+            int pxMax = rect.X + rect.W - 1;
+            int pyMin = rect.Y;
+            int pyMax = rect.Y + rect.H - 1;
 
-            for (int py = pyMin; py <= pyMax; py++)
+            // Per-row parallelism — each row writes to non-overlapping output pixels.
+            // Layer iteration stays sequential so blend modes still see prior layers.
+            // Locals are captured by the lambda; that's fine — they're stable for this layer.
+            var layerLocal = layer;
+            ParallelRows(pyMin, pyMax, py =>
             {
                 for (int px = pxMin; px <= pxMax; px++)
                 {
@@ -1554,7 +2029,7 @@ public class PreviewService : IDisposable
                     float ru = lu * cosR + lv * sinR;
                     float rv = -lu * sinR + lv * cosR;
                     if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
-                    switch (layer.Clip)
+                    switch (layerLocal.Clip)
                     {
                         case ClipMode.ClipLeft when ru < 0f: continue;
                         case ClipMode.ClipRight when ru >= 0f: continue;
@@ -1577,7 +2052,7 @@ public class PreviewService : IDisposable
                     float bb = output[oIdx + 2] / 255f;
 
                     float rr, rg, rb;
-                    switch (layer.BlendMode)
+                    switch (layerLocal.BlendMode)
                     {
                         case BlendMode.Multiply:
                             rr = br * dr; rg = bg * dg; rb = bb * db;
@@ -1636,25 +2111,38 @@ public class PreviewService : IDisposable
                     output[oIdx + 2] = (byte)Math.Clamp((int)((rb * da + bb * (1 - da)) * 255), 0, 255);
                     output[oIdx + 3] = 255;
                 }
-            }
-
-            processedLayers++;
+            });
         }
 
-        if (processedLayers == 0)
-            return null;
-
+        tracker?.Commit(currentUnion, dirty);
         return output;
     }
 
+    /// <summary>RGBA-input variant — used by Full Redraw / export paths that haven't switched to scratch buffers.</summary>
     private static void WriteBgraTexFile(string path, byte[] rgbaData, int width, int height)
     {
-        // Retry — game/Penumbra may hold a transient lock during redraw
         for (int attempt = 0; attempt < 5; attempt++)
         {
             try
             {
                 TexFileWriter.WriteRgba(path, rgbaData, width, height);
+                return;
+            }
+            catch (IOException) when (attempt < 4)
+            {
+                Thread.Sleep(10 * (attempt + 1));
+            }
+        }
+    }
+
+    /// <summary>BGRA-input variant — used by the inplace composite path with reusable scratch buffers.</summary>
+    private static void WriteBgraTexFile(string path, byte[] bgraData, int bgraLength, int width, int height)
+    {
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                TexFileWriter.WriteBgra(path, bgraData, bgraLength, width, height);
                 return;
             }
             catch (IOException) when (attempt < 4)
@@ -1791,7 +2279,22 @@ public class PreviewService : IDisposable
     public void ClearTextureCache()
     {
         baseTextureCache.Clear();
+        imageLoader.ClearCache();
         DebugServer.AppendLog("[PreviewService] Texture cache cleared");
+    }
+
+    /// <summary>Read the on-disk dimensions of a decal image (PNG/JPG/TGA/DDS/TEX). Returns null on failure.</summary>
+    public (int Width, int Height)? GetImageDimensions(string path)
+    {
+        var img = imageLoader.LoadImage(path);
+        return img == null ? null : (img.Value.Width, img.Value.Height);
+    }
+
+    /// <summary>Get the base diffuse texture size for a group (used for scale auto-fit).</summary>
+    public (int Width, int Height) GetBaseTextureSize(TargetGroup group)
+    {
+        var tex = LoadBaseTexture(group);
+        return (tex.Width, tex.Height);
     }
 
     public void Dispose()
@@ -1804,8 +2307,11 @@ public class PreviewService : IDisposable
         asyncCancel?.Dispose();
         asyncCancel = null;
         pendingBatch = null;
+        composeLock.Dispose();
 
+        imageLoader.ClearCache();
         baseTextureCache.Clear();
+        groupScratch.Clear();
         compositeResults.Clear();
         previewDiskPaths.Clear();
         previewMtrlDiskPaths.Clear();
@@ -1813,7 +2319,9 @@ public class PreviewService : IDisposable
         initializedRedirects.Clear();
         rowPairAllocators.Clear();
         vanillaColorTables.Clear();
+        lastBuiltColorTables.Clear();
         indexMapGamePaths.Clear();
+        lastAppliedEmissive.Clear();
         emissiveHook?.ClearTargets();
     }
 }

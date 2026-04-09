@@ -54,6 +54,13 @@ public class DxRenderer : IDisposable
     private SamplerState? sampler;
     private RasterizerState? rasterState;
 
+    // Reusable BGRA scratch for CreateTextureFromRgba — without this every call
+    // allocates a fresh w*h*4 byte[] (67MB at 4096²) and pins it via the DataStream
+    // GCHandle. The unreleased pin keeps it stuck in LOH until the finalizer runs,
+    // so a sustained 3D-editor drag at 30Hz pumps ~2GB/s of pinned LOH and the
+    // working set climbs without bound.
+    private byte[]? bgraScratch;
+
     public nint OutputPointer => renderSrv?.NativePointer ?? nint.Zero;
     public Device Device => device;
     public DeviceContext Context => ctx;
@@ -231,16 +238,23 @@ public class DxRenderer : IDisposable
 
     public ShaderResourceView CreateTextureFromRgba(byte[] rgbaData, int texWidth, int texHeight, out Texture2D texture)
     {
-        var bgra = new byte[rgbaData.Length];
-        for (int i = 0; i < rgbaData.Length; i += 4)
+        int byteCount = texWidth * texHeight * 4;
+        if (bgraScratch == null || bgraScratch.Length < byteCount)
+            bgraScratch = new byte[byteCount];
+
+        for (int i = 0; i < byteCount; i += 4)
         {
-            bgra[i] = rgbaData[i + 2];     // B
-            bgra[i + 1] = rgbaData[i + 1]; // G
-            bgra[i + 2] = rgbaData[i];     // R
-            bgra[i + 3] = rgbaData[i + 3]; // A
+            bgraScratch[i]     = rgbaData[i + 2]; // B
+            bgraScratch[i + 1] = rgbaData[i + 1]; // G
+            bgraScratch[i + 2] = rgbaData[i];     // R
+            bgraScratch[i + 3] = rgbaData[i + 3]; // A
         }
 
-        var stream = DataStream.Create(bgra, true, true);
+        // `using` is critical: DataStream.Create pins the byte[] via a GCHandle and
+        // the Texture2D ctor copies from that pointer synchronously, so we can free
+        // the pin immediately on the next line. Without this, every call leaks a
+        // pinned LOH buffer until the finalizer eventually runs.
+        using var stream = DataStream.Create(bgraScratch, true, true);
         var rect = new DataRectangle(stream.DataPointer, texWidth * 4);
         texture = new Texture2D(device, new Texture2DDescription
         {
@@ -259,6 +273,49 @@ public class DxRenderer : IDisposable
         return new ShaderResourceView(device, texture);
     }
 
+    /// <summary>
+    /// Create an empty persistent RGBA texture sized for repeated sub-region updates.
+    /// Format is R8G8B8A8_UNorm so callers can feed RGBA buffers directly without the
+    /// RGBA→BGRA swizzle that CreateTextureFromRgba does — the shader's Sample() returns
+    /// the same float4 regardless of channel ordering, so it's transparent to HLSL.
+    /// </summary>
+    public (Texture2D Texture, ShaderResourceView Srv) CreateUpdatableRgbaTexture(int texWidth, int texHeight)
+    {
+        var tex = new Texture2D(device, new Texture2DDescription
+        {
+            Width = texWidth,
+            Height = texHeight,
+            ArraySize = 1,
+            BindFlags = BindFlags.ShaderResource,
+            Usage = ResourceUsage.Default,            // Default allows UpdateSubresource
+            CpuAccessFlags = CpuAccessFlags.None,
+            Format = Format.R8G8B8A8_UNorm,
+            MipLevels = 1,
+            OptionFlags = ResourceOptionFlags.None,
+            SampleDescription = new SampleDescription(1, 0),
+        });
+        var srv = new ShaderResourceView(device, tex);
+        return (tex, srv);
+    }
+
+    /// <summary>
+    /// Update a sub-rect of <paramref name="texture"/> from a full-sized RGBA source buffer.
+    /// Row pitch = full buffer row (so UpdateSubresource strides past the rows outside the
+    /// sub-region). Data pointer = offset into the buffer for the top-left of the sub-rect.
+    /// Call with (0,0,texW,texH) after (re)creating the texture to seed it fully.
+    /// </summary>
+    public void UpdateRgbaRegion(Texture2D texture, byte[] rgbaData, int bufferWidth,
+        int regionX, int regionY, int regionW, int regionH)
+    {
+        if (regionW <= 0 || regionH <= 0) return;
+
+        using var stream = DataStream.Create(rgbaData, true, true);
+        var ptr = stream.DataPointer + (regionY * bufferWidth + regionX) * 4;
+        var box = new DataBox(ptr, bufferWidth * 4, 0);
+        var region = new ResourceRegion(regionX, regionY, 0, regionX + regionW, regionY + regionH, 1);
+        ctx.UpdateSubresource(box, texture, 0, region);
+    }
+
     public void Dispose()
     {
         renderTexture?.Dispose();
@@ -274,5 +331,6 @@ public class DxRenderer : IDisposable
         inputLayout?.Dispose();
         vsCBuffer?.Dispose();
         psCBuffer?.Dispose();
+        bgraScratch = null;
     }
 }

@@ -115,6 +115,11 @@ public unsafe class EmissiveCBufferHook : IDisposable
                 if (matched)
                 {
                     var key = (nint)mrh;
+                    // Dedupe: the caller (ApplyPendingSwaps) may fire every cycle during a drag,
+                    // but if the MaterialResourceHandle and color are both identical, nothing
+                    // has changed — skip the log spam and the (cheap but non-zero) dict write.
+                    if (targets.TryGetValue(key, out var existing) && existing == emissiveColor)
+                        return;
                     targets[key] = emissiveColor;
                     if (!enabled) Enable();
                     DebugServer.AppendLog($"[EmissiveHook] Target set: {fileName} color=({emissiveColor.X:F2},{emissiveColor.Y:F2},{emissiveColor.Z:F2})");

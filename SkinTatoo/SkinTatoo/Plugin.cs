@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
@@ -50,14 +52,14 @@ public sealed class Plugin : IDalamudPlugin
     private readonly DebugWindow debugWindow;
     private readonly ModelEditorWindow modelEditorWindow;
     private readonly ModExportWindow modExportWindow;
+    private readonly PbrInspectorWindow pbrInspectorWindow;
 
-    // Auto-save throttle
+    // Periodic auto-save of project + window state (30 s is frequent enough that the
+    // user doesn't lose work after a crash, infrequent enough not to thrash the config file).
     private DateTime lastAutoSave = DateTime.MinValue;
     private const double AutoSaveIntervalSec = 30.0;
 
-    // Auto-load mesh on init
     private readonly IFramework framework;
-    private bool autoLoadAttempted;
 
     public Plugin(
         IDalamudPluginInterface pluginInterface,
@@ -107,12 +109,14 @@ public sealed class Plugin : IDalamudPlugin
         modelEditorWindow = new ModelEditorWindow(project, previewService, penumbra, pluginInterface.UiBuilder.DeviceHandle);
 
         modExportWindow = new ModExportWindow(project, modExportService, config);
+        pbrInspectorWindow = new PbrInspectorWindow(project, previewService, textureProvider);
 
         mainWindow.DebugWindowRef = debugWindow;
         mainWindow.ConfigWindowRef = configWindow;
         mainWindow.ModelEditorWindowRef = modelEditorWindow;
         mainWindow.ModExportWindowRef = modExportWindow;
-        mainWindow.OnSaveRequested += SaveProject;
+        mainWindow.PbrInspectorWindowRef = pbrInspectorWindow;
+        mainWindow.InitializeRequested = InitializeProjectPreview;
 
         windowSystem = new WindowSystem("SkinTatoo");
         windowSystem.AddWindow(mainWindow);
@@ -120,11 +124,14 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem.AddWindow(debugWindow);
         windowSystem.AddWindow(modelEditorWindow);
         windowSystem.AddWindow(modExportWindow);
+        windowSystem.AddWindow(pbrInspectorWindow);
 
-        // Restore window open states
-        mainWindow.IsOpen = config.MainWindowOpen;
-        debugWindow.IsOpen = config.DebugWindowOpen;
-        modelEditorWindow.IsOpen = config.ModelEditorWindowOpen;
+        // Every window starts closed on plugin load, regardless of prior session state.
+        // This avoids any heavy work (mesh load, preview upload, 3D editor DX init) the
+        // instant the game finishes loading; the user opens the windows explicitly via
+        // /skintatoo or toolbar buttons, and that first show drives the init path.
+        // Note: ImGui still persists window positions in imgui.ini, so reopening lands
+        // the window exactly where the user left it.
 
         // 7. UiBuilder hooks
         pluginInterface.UiBuilder.Draw += DrawUi;
@@ -138,7 +145,6 @@ public sealed class Plugin : IDalamudPlugin
         });
 
         this.framework = framework;
-        framework.Update += OnFrameworkUpdate;
 
         log.Information("SkinTatoo 已加载。Penumbra={0}", penumbra.IsAvailable);
     }
@@ -150,26 +156,87 @@ public sealed class Plugin : IDalamudPlugin
 
         windowSystem.Draw();
 
-        // Periodic auto-save
+        // Periodic auto-save: both project and window state.
         var now = DateTime.UtcNow;
         if ((now - lastAutoSave).TotalSeconds >= AutoSaveIntervalSec)
         {
             lastAutoSave = now;
+            project.SaveToConfig(config);
             SaveWindowStates();
         }
     }
 
-    private void SaveProject()
+    /// <summary>
+    /// Kick off mesh load + preview apply for every configured group. Returns a Task
+    /// that completes after both the background mesh load and the main-thread IPC hop
+    /// finish, so MainWindow can display a loading overlay until then.
+    ///
+    /// Runs entirely off the main thread: <c>LoadMeshes</c> (file IO + mesh extraction)
+    /// on a <see cref="Task.Run"/> worker, then hops back to the framework thread via
+    /// <see cref="IFramework.RunOnFrameworkThread(System.Action)"/> for the Penumbra IPC
+    /// + GPU swap hand-off. The first MainWindow draw is never blocked.
+    /// </summary>
+    private Task InitializeProjectPreview()
     {
-        project.SaveToConfig(config);
-        SaveWindowStates();
+        // Snapshot the work we need to do while we're still on the main thread — the
+        // background Task will then read frozen data and won't race the UI.
+        List<string>? meshPaths = null;
+        foreach (var group in project.Groups)
+        {
+            if (group.AllMeshPaths.Count > 0 && previewService.CurrentMesh == null)
+            {
+                meshPaths = new List<string>(group.AllMeshPaths);
+                break;
+            }
+        }
+
+        var hasLayers = false;
+        foreach (var group in project.Groups)
+        {
+            if (!string.IsNullOrEmpty(group.DiffuseGamePath) && group.Layers.Count > 0)
+            { hasLayers = true; break; }
+        }
+
+        return Task.Run(async () =>
+        {
+            try
+            {
+                if (meshPaths != null)
+                    previewService.LoadMeshes(meshPaths);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "[Init] background mesh load failed");
+            }
+
+            // Hop back to the framework thread: Penumbra IPC + mesh-editor state updates
+            // must run on main to be safe. Awaiting this means the returned Task only
+            // completes once the main-thread step is done — the MainWindow loading
+            // overlay stays up until everything is ready.
+            await framework.RunOnFrameworkThread(() =>
+            {
+                try
+                {
+                    modelEditorWindow.OnMeshChanged();
+                    if (hasLayers)
+                    {
+                        previewService.UpdatePreview(project);
+                        modelEditorWindow.MarkTexturesDirty();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "[Init] main-thread preview apply failed");
+                }
+            });
+        });
     }
 
     private void SaveWindowStates()
     {
-        config.MainWindowOpen = mainWindow.IsOpen;
-        config.DebugWindowOpen = debugWindow.IsOpen;
-        config.ModelEditorWindowOpen = modelEditorWindow.IsOpen;
+        // Window open state is intentionally NOT persisted for any window: on plugin
+        // load every window starts closed so the first frame is free of heavy work.
+        // ImGui still persists window positions in imgui.ini.
         config.Save();
     }
 
@@ -182,38 +249,6 @@ public sealed class Plugin : IDalamudPlugin
         mainWindow.IsOpen = !mainWindow.IsOpen;
     }
 
-    private void OnFrameworkUpdate(IFramework _)
-    {
-        if (autoLoadAttempted) return;
-        if (ObjectTable.LocalPlayer == null) return;
-
-        autoLoadAttempted = true;
-        // One-shot: unsubscribe so we don't keep paying the per-frame check cost
-        framework.Update -= OnFrameworkUpdate;
-
-        foreach (var group in project.Groups)
-        {
-            if (group.AllMeshPaths.Count > 0 && previewService.CurrentMesh == null)
-            {
-                previewService.LoadMeshes(group.AllMeshPaths);
-                modelEditorWindow.OnMeshChanged();
-                break;
-            }
-        }
-
-        // Auto-apply decals if there are configured groups with layers
-        var hasLayers = false;
-        foreach (var group in project.Groups)
-        {
-            if (!string.IsNullOrEmpty(group.DiffuseGamePath) && group.Layers.Count > 0)
-            { hasLayers = true; break; }
-        }
-        if (hasLayers && config.AutoPreview)
-        {
-            previewService.UpdatePreview(project);
-            modelEditorWindow.MarkTexturesDirty();
-        }
-    }
 
     public void Dispose()
     {
@@ -221,8 +256,6 @@ public sealed class Plugin : IDalamudPlugin
         project.SaveToConfig(config);
         SaveWindowStates();
 
-        // OnFrameworkUpdate may have already unsubscribed itself; -= is safe either way
-        framework.Update -= OnFrameworkUpdate;
         CommandManager.RemoveHandler(CommandName);
 
         PluginInterface.UiBuilder.Draw -= DrawUi;
@@ -230,7 +263,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
 
         windowSystem.RemoveAllWindows();
-        mainWindow.OnSaveRequested -= SaveProject;
+        mainWindow.InitializeRequested = null;
         mainWindow.Dispose();
         modelEditorWindow.Dispose();
 

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using Dalamud.Plugin.Services;
 using Lumina.Data.Files;
@@ -13,11 +14,22 @@ public class DecalImageLoader
     private readonly IDataManager dataManager;
     private Lumina.GameData? luminaForDisk;
 
+    // Decoded image cache keyed by absolute path. Stores file mtime + size so we can
+    // invalidate when the underlying file changes. Critical for slider drags: a single
+    // 1024x1024 PNG decode allocates ~4MB and stb_image is not cheap — without this cache
+    // PreviewService re-decodes the same decal hundreds of times per second.
+    private record CacheEntry(byte[] Data, int Width, int Height, DateTime Mtime, long Size);
+    private readonly ConcurrentDictionary<string, CacheEntry> imageCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
     public DecalImageLoader(IPluginLog log, IDataManager dataManager)
     {
         this.log = log;
         this.dataManager = dataManager;
     }
+
+    /// <summary>Drop the decoded-image cache (e.g. on plugin reset).</summary>
+    public void ClearCache() => imageCache.Clear();
 
     private Lumina.GameData GetLuminaForDisk()
     {
@@ -34,14 +46,31 @@ public class DecalImageLoader
         return luminaForDisk;
     }
 
-    public (byte[] Data, int Width, int Height)? LoadImage(string path)
+    public (byte[] Data, int Width, int Height)? LoadImage(string path, bool useCache = true)
     {
-        if (!File.Exists(path))
+        FileInfo fi;
+        try
         {
-            log.Error("Image file not found: {0}", path);
-            DebugServer.AppendLog($"[ImageLoader] File not found: {path}");
+            fi = new FileInfo(path);
+            if (!fi.Exists)
+            {
+                log.Error("Image file not found: {0}", path);
+                DebugServer.AppendLog($"[ImageLoader] File not found: {path}");
+                return null;
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex, "Image file stat failed: {0}", path);
             return null;
         }
+
+        var key = Path.GetFullPath(path);
+        var mtime = fi.LastWriteTimeUtc;
+        var size = fi.Length;
+
+        if (useCache && imageCache.TryGetValue(key, out var hit) && hit.Mtime == mtime && hit.Size == size)
+            return (hit.Data, hit.Width, hit.Height);
 
         var ext = Path.GetExtension(path).ToLowerInvariant();
         try
@@ -53,6 +82,8 @@ public class DecalImageLoader
                 ".tex" => LoadTexFile(path),
                 _ => throw new NotSupportedException($"Unsupported image format: {ext}"),
             };
+            if (useCache)
+                imageCache[key] = new CacheEntry(result.Data, result.Width, result.Height, mtime, size);
             DebugServer.AppendLog($"[ImageLoader] Loaded {ext}: {result.Width}x{result.Height} from {Path.GetFileName(path)}");
             return result;
         }
