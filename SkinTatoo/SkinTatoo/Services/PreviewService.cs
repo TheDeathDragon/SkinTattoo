@@ -69,6 +69,20 @@ public class PreviewService : IDisposable
     private readonly string outputDir;
     private bool disposed;
 
+    /// <summary>
+    /// Fired by callers (NOT by LoadMesh*/ClearMesh internals) to notify that
+    /// the mesh state has been mutated and any view caching it needs to
+    /// re-evaluate. Subscribers should be cheap and main-thread only —
+    /// callers on background threads must marshal to the framework thread
+    /// before invoking <see cref="NotifyMeshChanged"/>.
+    ///
+    /// Why not auto-fire from inside LoadMesh*: Plugin.cs project init runs
+    /// LoadMeshForGroup on a background thread, and ImGui-state subscribers
+    /// (e.g. ModelEditorWindow) cannot tolerate cross-thread invocation.
+    /// </summary>
+    public event Action? MeshChanged;
+    public void NotifyMeshChanged() => MeshChanged?.Invoke();
+
     // GPU swap state tracking — ConcurrentDictionary because background composite Task and
     // main thread (UpdatePreviewFull / EnsureEmissiveInitialized / ResetSwapState) can race.
     private readonly ConcurrentDictionary<string, byte> initializedRedirects =
@@ -293,13 +307,23 @@ public class PreviewService : IDisposable
     }
 
     public bool LoadMesh(string gameMdlPath)
+        => LoadMeshWithMatIdx(gameMdlPath, null, null);
+
+    /// <summary>
+    /// Load a single mdl, applying an optional matIdx filter and an optional
+    /// Penumbra-resolved disk path. Used by SkinMeshResolver-driven flows
+    /// where we know exactly which mat slots to extract and have the
+    /// mod-aware disk path in hand.
+    /// </summary>
+    public bool LoadMeshWithMatIdx(string gameMdlPath, int[]? matIdx, string? diskPath)
     {
-        DebugServer.AppendLog($"[PreviewService] LoadMesh: {gameMdlPath}");
+        DebugServer.AppendLog($"[PreviewService] LoadMesh: {gameMdlPath}"
+            + (matIdx != null ? $" matIdx=[{string.Join(",", matIdx)}]" : ""));
 
         MeshData? meshData;
         try
         {
-            meshData = meshExtractor.ExtractMesh(gameMdlPath);
+            meshData = meshExtractor.ExtractMesh(gameMdlPath, matIdx, diskPath);
         }
         catch (Exception ex)
         {
@@ -336,6 +360,64 @@ public class PreviewService : IDisposable
         catch (Exception ex)
         {
             log.Error(ex, $"LoadMeshes exception: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Load mesh for a target group, picking the right code path based on
+    /// what fields are populated. Use this for any mesh load triggered by
+    /// "the user wants to see this group's mesh on the canvas":
+    /// - new resolver groups → MeshSlots (multi-mdl + per-mdl matIdx filter)
+    /// - migrated single-mdl groups → MeshGamePath + TargetMatIdx
+    /// - pre-resolver groups from old configs → AllMeshPaths
+    ///
+    /// All three callsites (resource browser reload button, ModelEditorWindow
+    /// group switch, plugin startup project init) should funnel through here
+    /// so the legacy paths can never accidentally drop slots.
+    /// </summary>
+    public bool LoadMeshForGroup(TargetGroup group)
+    {
+        if (group.MeshSlots.Count > 0)
+            return LoadMeshSlots(group.MeshSlots);
+
+        if (!string.IsNullOrEmpty(group.MeshGamePath))
+            return LoadMeshWithMatIdx(
+                group.MeshGamePath!,
+                group.TargetMatIdx.Length > 0 ? group.TargetMatIdx : null,
+                group.MeshDiskPath);
+
+        if (group.AllMeshPaths.Count > 0)
+            return LoadMeshes(group.AllMeshPaths);
+
+        return false;
+    }
+
+    /// <summary>
+    /// Load a list of mdl + matIdx slots and merge them into a single mesh.
+    /// This is what SkinMeshResolver-driven flows use — body skin with a
+    /// mod-injected material can map to several equipment mdls that each
+    /// contribute a body region (top/glv/dwn/sho).
+    /// </summary>
+    public bool LoadMeshSlots(List<MeshSlot> slots)
+    {
+        if (slots.Count == 0) return false;
+        DebugServer.AppendLog($"[PreviewService] LoadMeshSlots: {slots.Count} slot(s)");
+        try
+        {
+            var merged = meshExtractor.ExtractAndMergeSlots(slots);
+            if (merged == null)
+            {
+                log.Error($"LoadMeshSlots failed: ExtractAndMergeSlots returned null");
+                return false;
+            }
+            currentMesh = merged;
+            DebugServer.AppendLog($"[PreviewService] Mesh loaded: {merged.Vertices.Length} verts, {merged.TriangleCount} tris");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex, $"LoadMeshSlots exception: {ex.Message}");
             return false;
         }
     }

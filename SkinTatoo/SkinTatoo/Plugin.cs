@@ -35,6 +35,7 @@ public sealed class Plugin : IDalamudPlugin
 
     // Services
     private readonly MeshExtractor meshExtractor;
+    private readonly SkinMeshResolver skinMeshResolver;
     private readonly DecalImageLoader imageLoader;
     private readonly PreviewService previewService;
     private readonly ModExportService modExportService;
@@ -82,6 +83,7 @@ public sealed class Plugin : IDalamudPlugin
 
         // 3. Services
         meshExtractor = new MeshExtractor(dataManager, log);
+        skinMeshResolver = new SkinMeshResolver(meshExtractor);
         imageLoader = new DecalImageLoader(log, dataManager);
 
         var outputDir = Path.Combine(pluginInterface.GetPluginConfigDirectory(), "preview");
@@ -97,16 +99,16 @@ public sealed class Plugin : IDalamudPlugin
         project.LoadFromConfig(config);
 
         // 5. HTTP
-        debugServer = new DebugServer(config, project, penumbra, previewService, dataManager, modExportService, textureSwap);
+        debugServer = new DebugServer(config, project, penumbra, previewService, dataManager, modExportService, skinMeshResolver, textureSwap);
         debugServer.Start();
 
         // 6. GUI
-        mainWindow = new MainWindow(project, previewService, penumbra, config, textureProvider);
+        mainWindow = new MainWindow(project, previewService, penumbra, config, textureProvider, dataManager, skinMeshResolver);
         configWindow = new ConfigWindow(config);
         debugWindow = new DebugWindow();
 
         // 3D Editor
-        modelEditorWindow = new ModelEditorWindow(project, previewService, penumbra, pluginInterface.UiBuilder.DeviceHandle);
+        modelEditorWindow = new ModelEditorWindow(project, previewService, penumbra, skinMeshResolver, pluginInterface.UiBuilder.DeviceHandle);
 
         modExportWindow = new ModExportWindow(project, modExportService, config);
         pbrInspectorWindow = new PbrInspectorWindow(project, previewService, textureProvider);
@@ -180,12 +182,13 @@ public sealed class Plugin : IDalamudPlugin
     {
         // Snapshot the work we need to do while we're still on the main thread — the
         // background Task will then read frozen data and won't race the UI.
-        List<string>? meshPaths = null;
+        TargetGroup? meshGroup = null;
         foreach (var group in project.Groups)
         {
-            if (group.AllMeshPaths.Count > 0 && previewService.CurrentMesh == null)
+            if ((group.MeshSlots.Count > 0 || group.AllMeshPaths.Count > 0)
+                && previewService.CurrentMesh == null)
             {
-                meshPaths = new List<string>(group.AllMeshPaths);
+                meshGroup = group;
                 break;
             }
         }
@@ -201,8 +204,8 @@ public sealed class Plugin : IDalamudPlugin
         {
             try
             {
-                if (meshPaths != null)
-                    previewService.LoadMeshes(meshPaths);
+                if (meshGroup != null)
+                    previewService.LoadMeshForGroup(meshGroup);
             }
             catch (Exception ex)
             {
@@ -217,7 +220,7 @@ public sealed class Plugin : IDalamudPlugin
             {
                 try
                 {
-                    modelEditorWindow.OnMeshChanged();
+                    previewService.NotifyMeshChanged();
                     if (hasLayers)
                     {
                         previewService.UpdatePreview(project);

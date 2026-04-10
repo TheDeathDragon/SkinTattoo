@@ -162,11 +162,14 @@ public partial class MainWindow
             drawList.Flags &= ~ImDrawListFlags.AntiAliasedLinesUseTex;
         }
 
-        // Detect UV tile origin: body models use UV X∈[1,2] (tile 1), others use [0,1] (tile 0).
-        // Subtract the tile base so all UVs become [0,1] texture-space, then use the same
-        // texOffset + uv * uvScale formula as the texture and layer overlays.
+        // Per-vertex UV tile normalization. FFXIV uses UDIM-style tiling for
+        // skin meshes — body verts live in tile 1 (X∈[1,2]) and other parts
+        // in tile 0 (X∈[0,1]). After merging multiple mdls (e.g. cross-race
+        // body cutouts) the same mesh can contain BOTH tiles, so a single
+        // global "uvBase = floor(min)" normalization breaks half the mesh.
+        // Take fract() per-vertex instead — both (1.6, 0.5) and (0.6, 0.5)
+        // become (0.6, 0.5), which is the same texel anyway.
         var texOffset = Vector2.One - uvScale;
-        var uvBase = ComputeMeshUvBase(mesh);
 
         var clipMin = canvasPos;
         var clipMax = canvasPos + canvasSize;
@@ -176,6 +179,12 @@ public partial class MainWindow
         if (config.UvWireframeDedup)
             drawnEdges = new HashSet<long>(mesh.Indices.Length);
 
+        Vector2 ToScreen(Vector2 uv)
+        {
+            var fract = new Vector2(uv.X - MathF.Floor(uv.X), uv.Y - MathF.Floor(uv.Y));
+            return uvOrigin + (texOffset + fract * uvScale) * fitSize;
+        }
+
         for (int i = 0; i + 2 < mesh.Indices.Length; i += 3)
         {
             var i0 = mesh.Indices[i];
@@ -184,10 +193,9 @@ public partial class MainWindow
             if (i0 >= mesh.Vertices.Length || i1 >= mesh.Vertices.Length || i2 >= mesh.Vertices.Length)
                 continue;
 
-            // raw mesh UV → texture UV [0,1] → virtual UV → screen
-            var p0 = uvOrigin + (texOffset + (mesh.Vertices[i0].UV - uvBase) * uvScale) * fitSize;
-            var p1 = uvOrigin + (texOffset + (mesh.Vertices[i1].UV - uvBase) * uvScale) * fitSize;
-            var p2 = uvOrigin + (texOffset + (mesh.Vertices[i2].UV - uvBase) * uvScale) * fitSize;
+            var p0 = ToScreen(mesh.Vertices[i0].UV);
+            var p1 = ToScreen(mesh.Vertices[i1].UV);
+            var p2 = ToScreen(mesh.Vertices[i2].UV);
 
             if (doCull)
             {

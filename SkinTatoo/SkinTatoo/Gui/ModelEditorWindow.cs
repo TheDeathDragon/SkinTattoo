@@ -21,6 +21,7 @@ public class ModelEditorWindow : Window, IDisposable
     private readonly DecalProject project;
     private readonly PreviewService previewService;
     private readonly PenumbraBridge penumbra;
+    private readonly SkinMeshResolver skinMeshResolver;
     private readonly DxRenderer renderer;
     private readonly MeshBuffer meshBuffer;
     private readonly OrbitCamera camera;
@@ -37,6 +38,11 @@ public class ModelEditorWindow : Window, IDisposable
     private string? lastMeshPath;
     private int lastGroupIndex = -2;
 
+    // 1Hz live-tree poll: re-runs the resolver and compares LiveTreeHash to
+    // detect equipment / body-mod swaps and auto-refresh the cached mesh.
+    private DateTime lastLiveTreePollUtc = DateTime.MinValue;
+    private const double LiveTreePollIntervalSec = 1.0;
+
     private List<(string name, string diskPath)>? cachedMdlList;
 
     private static SharpDX.Vector3 ToSDX(Vector3 v) => new(v.X, v.Y, v.Z);
@@ -46,6 +52,7 @@ public class ModelEditorWindow : Window, IDisposable
         DecalProject project,
         PreviewService previewService,
         PenumbraBridge penumbra,
+        SkinMeshResolver skinMeshResolver,
         nint deviceHandle)
         : base("3D 编辑器###SkinTatooModelEditor",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
@@ -53,6 +60,7 @@ public class ModelEditorWindow : Window, IDisposable
         this.project = project;
         this.previewService = previewService;
         this.penumbra = penumbra;
+        this.skinMeshResolver = skinMeshResolver;
 
         renderer = new DxRenderer(deviceHandle);
         meshBuffer = new MeshBuffer();
@@ -64,18 +72,26 @@ public class ModelEditorWindow : Window, IDisposable
             MinimumSize = new Vector2(400, 350),
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
         };
+
+        previewService.MeshChanged += OnPreviewMeshChanged;
     }
 
-    public void MarkTexturesDirty() { } // kept for API compat; version tracking handles sync
-
-    public void OnMeshChanged()
+    // Reset only GPU upload tokens — NEVER touch lastMeshPath here. If we
+    // did, TryUploadMesh's pathKey diff would re-trigger LoadMeshForGroup
+    // every frame after a load, which would re-fire MeshChanged → infinite
+    // loop. lastMeshPath is owned by TryUploadMesh's own group-switch and
+    // pathKey diff logic.
+    private void OnPreviewMeshChanged()
     {
         uploadedMesh = null;
         lastCompositeVersion = -1;
     }
 
+    public void MarkTexturesDirty() { } // kept for API compat; version tracking handles sync
+
     public override void Draw()
     {
+        PollLiveTreeChange();
         TryUploadMesh();
         TryUpdateTexture();
 
@@ -95,6 +111,32 @@ public class ModelEditorWindow : Window, IDisposable
             RefreshMdlList();
             ImGui.OpenPopup("AddMdlPopup");
         }
+
+        ImGui.SameLine();
+        var reGroup = project.SelectedGroup;
+        var canReResolve = reGroup != null && !string.IsNullOrEmpty(reGroup.MtrlGamePath);
+        using (ImRaii.Disabled(!canReResolve))
+        {
+            if (ImGui.Button("重新解析"))
+            {
+                var trees = penumbra.GetPlayerTrees();
+                var resolution = skinMeshResolver.Resolve(reGroup!.MtrlGamePath!, trees);
+                foreach (var diag in resolution.Diagnostics)
+                    Http.DebugServer.AppendLog($"[SkinMeshResolver] {diag}");
+                if (resolution.Success)
+                {
+                    reGroup.MeshSlots     = resolution.MeshSlots;
+                    reGroup.LiveTreeHash  = resolution.LiveTreeHash;
+                    reGroup.MeshGamePath  = resolution.PrimaryMdlGamePath;
+                    reGroup.MeshDiskPath  = resolution.PrimaryMdlDiskPath;
+                    reGroup.TargetMatIdx  = resolution.MeshSlots[0].MatIdx;
+                    previewService.LoadMeshForGroup(reGroup);
+                    previewService.NotifyMeshChanged();
+                }
+            }
+        }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip("重新检测角色当前装备/mod 状态并刷新网格");
 
         if (ImGui.BeginPopup("AddMdlPopup"))
         {
@@ -123,7 +165,8 @@ public class ModelEditorWindow : Window, IDisposable
                                 group.MeshDiskPath = diskPath;
                             else if (!group.MeshDiskPaths.Contains(diskPath))
                                 group.MeshDiskPaths.Add(diskPath);
-                            OnMeshChanged();
+                            previewService.LoadMeshForGroup(group);
+                            previewService.NotifyMeshChanged();
                         }
                     }
                     if (ImGui.IsItemHovered())
@@ -191,7 +234,10 @@ public class ModelEditorWindow : Window, IDisposable
                     changed = true;
                 }
                 if (changed)
-                    OnMeshChanged();
+                {
+                    previewService.LoadMeshForGroup(group2);
+                    previewService.NotifyMeshChanged();
+                }
                 ImGui.EndPopup();
             }
         }
@@ -409,6 +455,44 @@ public class ModelEditorWindow : Window, IDisposable
         }
     }
 
+    // Poll Penumbra's live resource tree once per second; if the resolver
+    // would now produce a different LiveTreeHash than what we cached on the
+    // current group, the player has changed equipment or toggled a body
+    // mod — refresh MeshSlots and reload the mesh automatically.
+    //
+    // Cheap because: window only draws while open (so polling stops when
+    // hidden), GetPlayerTrees is a single Penumbra IPC call on the main
+    // thread, hash comparison is a string equality.
+    private void PollLiveTreeChange()
+    {
+        var group = project.SelectedGroup;
+        if (group == null
+            || string.IsNullOrEmpty(group.MtrlGamePath)
+            || group.MeshSlots.Count == 0
+            || group.LiveTreeHash == null)
+            return;
+
+        var now = DateTime.UtcNow;
+        if ((now - lastLiveTreePollUtc).TotalSeconds < LiveTreePollIntervalSec) return;
+        lastLiveTreePollUtc = now;
+
+        var trees = penumbra.GetPlayerTrees();
+        if (trees == null) return;
+
+        var newRes = skinMeshResolver.Resolve(group.MtrlGamePath!, trees);
+        if (!newRes.Success) return;
+        if (newRes.LiveTreeHash == group.LiveTreeHash) return;
+
+        Http.DebugServer.AppendLog($"[ModelEditor] Live tree changed → re-resolving {group.Name}");
+        group.MeshSlots     = newRes.MeshSlots;
+        group.LiveTreeHash  = newRes.LiveTreeHash;
+        group.MeshGamePath  = newRes.PrimaryMdlGamePath;
+        group.MeshDiskPath  = newRes.PrimaryMdlDiskPath;
+        group.TargetMatIdx  = newRes.MeshSlots[0].MatIdx;
+        previewService.LoadMeshForGroup(group);
+        previewService.NotifyMeshChanged();
+    }
+
     private void TryUploadMesh()
     {
         var groupIdx = project.SelectedGroupIndex;
@@ -436,15 +520,25 @@ public class ModelEditorWindow : Window, IDisposable
             }
         }
 
-        // Load mesh when paths change
-        var paths = group?.VisibleMeshPaths;
-        var pathKey = paths != null && paths.Count > 0 ? string.Join("|", paths) : null;
+        // Load mesh when the group changes. We use a key built from the
+        // resolver MeshSlots if present, otherwise fall back to the legacy
+        // VisibleMeshPaths list. Either way the actual load goes through
+        // PreviewService.LoadMeshForGroup so the resolver path is honored.
+        string? pathKey;
+        if (group != null && group.MeshSlots.Count > 0)
+            pathKey = "slots:" + string.Join("|", group.MeshSlots.Select(s => s.GamePath + "#" + string.Join(",", s.MatIdx)));
+        else
+        {
+            var paths = group?.VisibleMeshPaths;
+            pathKey = paths != null && paths.Count > 0 ? string.Join("|", paths) : null;
+        }
+
         if (pathKey != lastMeshPath)
         {
             lastMeshPath = pathKey;
-            if (pathKey != null)
+            if (pathKey != null && group != null)
             {
-                previewService.LoadMeshes(paths!);
+                previewService.LoadMeshForGroup(group);
                 uploadedMesh = null;
             }
             else
@@ -547,6 +641,7 @@ public class ModelEditorWindow : Window, IDisposable
 
     public void Dispose()
     {
+        previewService.MeshChanged -= OnPreviewMeshChanged;
         diffuseSrv?.Dispose();
         diffuseTex?.Dispose();
         meshBuffer.Dispose();

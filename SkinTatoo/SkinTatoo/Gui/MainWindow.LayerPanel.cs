@@ -38,6 +38,7 @@ public partial class MainWindow
                     previewService.ClearTextureCache();
                     previewService.ResetSwapState();
                     previewService.ClearMesh();
+                    previewService.NotifyMeshChanged();
                     penumbra.RedrawPlayer();
                     project.RemoveGroup(gi2);
                     DebugServer.AppendLog($"[MainWindow] Removed group {gi2}, cleared redirects");

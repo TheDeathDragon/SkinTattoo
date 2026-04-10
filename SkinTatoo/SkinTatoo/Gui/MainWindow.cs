@@ -25,6 +25,8 @@ public partial class MainWindow : Window, IDisposable
     private readonly PenumbraBridge penumbra;
     private readonly Configuration config;
     private readonly ITextureProvider textureProvider;
+    private readonly IDataManager dataManager;
+    private readonly Mesh.SkinMeshResolver skinMeshResolver;
     private readonly FileDialogManager fileDialog = new();
 
     private string imagePathBuf = string.Empty;
@@ -35,8 +37,6 @@ public partial class MainWindow : Window, IDisposable
     // Resource browser state
     private Dictionary<ushort, ResourceTreeDto>? cachedTrees;
     private bool resourceWindowOpen;
-    private bool treeExpandRequest;
-    private bool treeCollapseRequest;
 
     // Canvas state
     private float canvasZoom = 1.0f;
@@ -101,7 +101,9 @@ public partial class MainWindow : Window, IDisposable
         PreviewService previewService,
         PenumbraBridge penumbra,
         Configuration config,
-        ITextureProvider textureProvider)
+        ITextureProvider textureProvider,
+        IDataManager dataManager,
+        Mesh.SkinMeshResolver skinMeshResolver)
         : base("SkinTatoo 纹身编辑器###SkinTatooMain",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
@@ -110,6 +112,8 @@ public partial class MainWindow : Window, IDisposable
         this.penumbra = penumbra;
         this.config = config;
         this.textureProvider = textureProvider;
+        this.dataManager = dataManager;
+        this.skinMeshResolver = skinMeshResolver;
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -458,17 +462,16 @@ public partial class MainWindow : Window, IDisposable
         ImGui.SameLine();
 
         var group = project.SelectedGroup;
-        if (group != null && group.AllMeshPaths.Count > 0)
+        if (group != null && (!string.IsNullOrEmpty(group.MeshGamePath) || group.AllMeshPaths.Count > 0))
         {
             var meshIcon = previewService.CurrentMesh == null ? FontAwesomeIcon.Cube : FontAwesomeIcon.SyncAlt;
             if (ImGuiComponents.IconButton(4, meshIcon))
             {
-                previewService.LoadMeshes(group.AllMeshPaths);
-                ModelEditorWindowRef?.OnMeshChanged();
+                ReloadGroupMesh(group);
+                previewService.NotifyMeshChanged();
             }
-            var meshCount = group.AllMeshPaths.Count;
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip(previewService.CurrentMesh == null
-                ? $"加载模型 ({meshCount} 个)" : $"重新加载模型 ({meshCount} 个)");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(previewService.CurrentMesh == null ? "加载模型" : "重新加载模型");
             ImGui.SameLine();
         }
 
@@ -607,12 +610,20 @@ public partial class MainWindow : Window, IDisposable
         var group = project.SelectedGroup;
         var hasTarget = group != null && !string.IsNullOrEmpty(group.DiffuseGamePath);
 
-        // Clear mesh when switching or deleting groups
+        // When the selected group changes, only clear the mesh if the new
+        // selection is invalid (deletion / nothing selected). For a real
+        // group switch, ModelEditorWindow.TryUploadMesh handles the
+        // reload via its pathKey diff — clearing here would race with
+        // AddTargetGroupFromMtrl's just-completed LoadMeshSlots, leaving
+        // the editor stuck on "未加载网格" until the next manual reload.
         if (project.SelectedGroupIndex != lastSelectedGroupIndex)
         {
             lastSelectedGroupIndex = project.SelectedGroupIndex;
-            previewService.ClearMesh();
-            ModelEditorWindowRef?.OnMeshChanged();
+            if (project.SelectedGroup == null)
+            {
+                previewService.ClearMesh();
+                previewService.NotifyMeshChanged();
+            }
         }
 
         // Poll external file changes (PS save, etc.)

@@ -30,7 +30,7 @@ public class DebugServer : IDisposable
     private readonly ModExportService _exportService;
 
     public static readonly ConcurrentQueue<string> LogBuffer = new();
-    private const int MaxLogEntries = 200;
+    private const int MaxLogEntries = 1000;
 
     public static void AppendLog(string message)
     {
@@ -40,6 +40,7 @@ public class DebugServer : IDisposable
     }
 
     private readonly TextureSwapService? _textureSwap;
+    private readonly Mesh.SkinMeshResolver _resolver;
 
     public DebugServer(
         Configuration config,
@@ -48,6 +49,7 @@ public class DebugServer : IDisposable
         PreviewService preview,
         IDataManager dataManager,
         ModExportService exportService,
+        Mesh.SkinMeshResolver resolver,
         TextureSwapService? textureSwap = null)
     {
         _config   = config;
@@ -56,6 +58,7 @@ public class DebugServer : IDisposable
         _preview  = preview;
         _dataManager = dataManager;
         _exportService = exportService;
+        _resolver = resolver;
         _textureSwap = textureSwap;
     }
 
@@ -68,7 +71,7 @@ public class DebugServer : IDisposable
             .WithUrlPrefix(url)
             .WithMode(HttpListenerMode.EmbedIO))
             .WithWebApi("/api", m => m.WithController(() =>
-                new ApiController(_project, _penumbra, _preview, _config, _dataManager, _exportService, _textureSwap)));
+                new ApiController(_project, _penumbra, _preview, _config, _dataManager, _exportService, _resolver, _textureSwap)));
 
         _ = _server.RunAsync(_cts.Token).ContinueWith(t =>
         {
@@ -99,6 +102,7 @@ internal sealed class ApiController : WebApiController
     private readonly Configuration _config;
     private readonly IDataManager _dataManager;
     private readonly ModExportService _exportService;
+    private readonly Mesh.SkinMeshResolver _resolver;
     private readonly TextureSwapService? _textureSwap;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -113,6 +117,7 @@ internal sealed class ApiController : WebApiController
         Configuration config,
         IDataManager dataManager,
         ModExportService exportService,
+        Mesh.SkinMeshResolver resolver,
         TextureSwapService? textureSwap = null)
     {
         _project  = project;
@@ -121,6 +126,7 @@ internal sealed class ApiController : WebApiController
         _config   = config;
         _dataManager = dataManager;
         _exportService = exportService;
+        _resolver = resolver;
         _textureSwap = textureSwap;
     }
 
@@ -379,6 +385,126 @@ internal sealed class ApiController : WebApiController
             rawFile = rawInfo,
             gameDataPath = _dataManager.GameData.DataPath.FullName,
         };
+    }
+
+    [Route(HttpVerbs.Get, "/debug/skin-chain")]
+    public object GetSkinChain()
+    {
+        var query = HttpContext.GetRequestQueryData();
+        var mtrl  = query["mtrl"];
+        var tex   = query["tex"];
+
+        // If only tex is given, walk the live tree to find a parent mtrl that
+        // owns this tex, then use its game path. tex paths are unreliable
+        // under mods (they get rewritten to mod paths), but mtrl game paths
+        // stay vanilla — that's why the resolver wants mtrl as input.
+        var trees = _penumbra.GetPlayerTrees();
+        if (string.IsNullOrWhiteSpace(mtrl) && !string.IsNullOrWhiteSpace(tex) && trees != null)
+        {
+            foreach (var (_, tree) in trees)
+            {
+                foreach (var top in tree.Nodes)
+                {
+                    var found = FindMtrlForTex(top, tex);
+                    if (found != null) { mtrl = found.GamePath; break; }
+                }
+                if (!string.IsNullOrEmpty(mtrl)) break;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(mtrl))
+            return new { error = "missing ?mtrl= (or ?tex= that resolves to a mtrl in the live tree)" };
+
+        var parsed = Core.TexPathParser.ParseFromMtrl(mtrl);
+
+        string? mtrlResolved = null;
+        try { mtrlResolved = _penumbra.ResolvePlayer(mtrl); } catch { }
+
+        var resolution = _resolver.Resolve(mtrl, trees);
+
+        // For diagnostics, also list every mdl node in the tree that references
+        // this exact mtrl (engine-rewritten form). The race-filtered resolver
+        // result is just one of these — the others are noise.
+        var liveMdls = new List<object>();
+        if (trees != null)
+        {
+            foreach (var (treeId, tree) in trees)
+            {
+                foreach (var top in tree.Nodes)
+                    CollectMdlsReferencingMtrl(top, null, mtrl!, treeId, tree.Name, liveMdls);
+            }
+        }
+
+        return new
+        {
+            input = new { mtrl, tex },
+            parsed = new
+            {
+                race                 = parsed.Race,
+                slotKind             = parsed.SlotKind,
+                slotAbbr             = parsed.SlotAbbr,
+                slotId               = parsed.SlotId,
+                roleSuffix           = parsed.RoleSuffix,
+                bodySlotIdRewritten  = parsed.BodySlotIdIsRewritten,
+            },
+            mtrlPenumbraResolved = mtrlResolved,
+            resolution = new
+            {
+                success      = resolution.Success,
+                playerRace   = resolution.PlayerRace,
+                slotKind     = resolution.SlotKind,
+                slotId       = resolution.SlotId,
+                meshSlots    = resolution.MeshSlots.Select(s => new
+                {
+                    gamePath = s.GamePath,
+                    diskPath = s.DiskPath,
+                    matIdx   = s.MatIdx,
+                }).ToList(),
+                diagnostics  = resolution.Diagnostics,
+            },
+            liveMdlsReferencingThisMtrl = liveMdls,
+        };
+    }
+
+    private static ResourceNodeDto? FindMtrlForTex(ResourceNodeDto node, string targetTex)
+    {
+        if (node.Type == Penumbra.Api.Enums.ResourceType.Mtrl)
+        {
+            foreach (var child in node.Children)
+                if (child.Type == Penumbra.Api.Enums.ResourceType.Tex
+                    && string.Equals(child.GamePath, targetTex, StringComparison.OrdinalIgnoreCase))
+                    return node;
+        }
+        foreach (var child in node.Children)
+        {
+            var found = FindMtrlForTex(child, targetTex);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static void CollectMdlsReferencingMtrl(
+        ResourceNodeDto node, ResourceNodeDto? parentMdl,
+        string targetMtrlGamePath, ushort treeId, string? treeName,
+        List<object> sink)
+    {
+        var mdl = node.Type == Penumbra.Api.Enums.ResourceType.Mdl ? node : parentMdl;
+
+        if (node.Type == Penumbra.Api.Enums.ResourceType.Mtrl
+            && string.Equals(node.GamePath, targetMtrlGamePath, StringComparison.OrdinalIgnoreCase)
+            && mdl != null)
+        {
+            sink.Add(new
+            {
+                treeId,
+                treeName,
+                mdlGamePath   = mdl.GamePath,
+                mdlActualPath = mdl.ActualPath,
+            });
+        }
+
+        foreach (var child in node.Children)
+            CollectMdlsReferencingMtrl(child, mdl, targetMtrlGamePath, treeId, treeName, sink);
     }
 
     [Route(HttpVerbs.Get, "/player/trees")]

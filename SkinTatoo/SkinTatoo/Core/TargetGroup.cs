@@ -17,6 +17,25 @@ public class TargetGroup
     public List<string> MeshDiskPaths { get; set; } = [];
     public HashSet<string> HiddenMeshPaths { get; set; } = [];
 
+    // Legacy single-mdl fields, kept for migration of pre-resolver groups.
+    public string? MeshGamePath { get; set; }
+    public int[] TargetMatIdx { get; set; } = [];
+
+    // Set by SkinMeshResolver. May be 1 mdl (face/tail/iris/canonical body)
+    // or N mdls (mod-injected body materials with no canonical owner).
+    public List<MeshSlot> MeshSlots { get; set; } = [];
+
+    /// <summary>
+    /// Stable hash of the resolved MeshSlots, written by the resolver and
+    /// persisted with the project. The 1Hz polling in ModelEditorWindow
+    /// recomputes the resolver result and compares hashes — mismatch means
+    /// the player switched gear / toggled a body mod, and the cached
+    /// MeshSlots need to be refreshed. Nullable: old configs that don't
+    /// have this field deserialize to null, polling short-circuits until
+    /// the next manual re-resolve / re-add fills it in.
+    /// </summary>
+    public string? LiveTreeHash { get; set; }
+
     public List<string> AllMeshPaths
     {
         get
