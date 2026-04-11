@@ -1,266 +1,266 @@
-# SkinTatoo - FFXIV 实时皮肤贴花插件
+# SkinTattoo - FFXIV Real-Time Skin Decal Plugin
 
-## 项目概述
+## Project Overview
 
-Dalamud 插件，将 PNG 贴花合成到 FFXIV 角色皮肤 UV 贴图上，通过 Penumbra 临时 Mod 实时预览。
+Dalamud plugin that composites PNG decals onto FFXIV character skin UV textures with real-time preview via Penumbra temporary mods.
 
-## 构建
+## Build
 
 ```bash
-cd /c/Users/Shiro/Desktop/FF14Plugins/SkinTatoo
+cd /c/Users/Shiro/Desktop/FF14Plugins/SkinTattoo
 dotnet build -c Release
 ```
 
-Dalamud SDK 路径通过 `Directory.Build.props` 自动指向 `XIVLauncherCN`。如果构建失败检查 `%AppData%\XIVLauncherCN\addon\Hooks\dev\` 是否存在。
+Dalamud SDK path is auto-configured via `Directory.Build.props` to point to `XIVLauncherCN`. If the build fails, check that `%AppData%\XIVLauncherCN\addon\Hooks\dev\` exists.
 
-**每次修改代码后必须执行 `dotnet build -c Release` 验证编译通过。**
+**Always run `dotnet build -c Release` after code changes to verify compilation.**
 
-## 项目结构
+## Project Structure
 
 ```
-SkinTatoo.slnx                       # 解决方案
+SkinTattoo.slnx                       # Solution
 Penumbra.Api/                         # git submodule (MeowZWR cn-temp)
-SkinTatoo/SkinTatoo/                  # 主项目
-  Plugin.cs                           # 入口
-  Configuration.cs                    # 持久化配置
-  Core/                               # 数据模型 (DecalLayer, DecalProject, TargetGroup)
-  Mesh/                               # 网格提取 (MeshExtractor, MeshData, RayPicker)
-  DirectX/                            # DX11 离屏渲染 (DxRenderer, MeshBuffer, OrbitCamera)
+SkinTattoo/SkinTattoo/                  # Main project
+  Plugin.cs                           # Entry point
+  Configuration.cs                    # Persistent configuration
+  Core/                               # Data models (DecalLayer, DecalProject, TargetGroup)
+  Mesh/                               # Mesh extraction (MeshExtractor, MeshData, RayPicker)
+  DirectX/                            # DX11 offscreen rendering (DxRenderer, MeshBuffer, OrbitCamera)
   Interop/                            # PenumbraBridge, TextureSwapService, EmissiveCBufferHook
   Services/                           # PreviewService, TexFileWriter, DecalImageLoader, MtrlFileWriter
-  Shaders/                            # HLSL 着色器 (Model.hlsl)
-  Http/                               # EmbedIO HTTP 调试服务器 (localhost:14780)
-  Gui/                                # ImGui 窗口
-    MainWindow.cs                     # 主窗口核心 (partial: 工具栏/布局/初始化)
-    MainWindow.Canvas.cs              # UV 画布 + 网格线
-    MainWindow.LayerPanel.cs          # 左面板: 图层列表
-    MainWindow.ParameterPanel.cs      # 右面板: 参数/PBR
-    MainWindow.ResourceBrowser.cs     # 资源浏览器 + 模型检测
-    ModelEditorWindow.cs              # 3D 编辑器
-    PbrInspectorWindow.cs             # PBR 通道查看器
-    ConfigWindow.cs / DebugWindow.cs / ModExportWindow.cs
-docs/                                 # 技术文档
-  ConstantBuffer逆向分析.md           # CBuffer 内存布局和渲染管线分析
-  材质替换路线研究.md                 # PBR/金属化/石化的可行路线评估
-  PBR材质属性独立化调研.md            # ColorTable 行选择机制 + Glamourer 数据流
-  PBR材质属性独立化-设计决策记录.md   # brainstorming Q&A 记录
-  路线C-IDA调研补充.md                # IDA 反编译 vanilla shader package 加载机制
-  superpowers/specs/                   # 设计文档
-  superpowers/plans/                   # 实施计划
+  Shaders/                            # HLSL shaders (Model.hlsl)
+  Http/                               # EmbedIO HTTP debug server (localhost:12580)
+  Gui/                                # ImGui windows
+    MainWindow.cs                     # Main window core (partial: tabs/toolbar/layout/init)
+    MainWindow.Canvas.cs              # UV canvas + wireframe
+    MainWindow.LayerPanel.cs          # Left panel: layer list
+    MainWindow.ParameterPanel.cs      # Right panel: parameters/PBR
+    MainWindow.SettingsTab.cs         # Settings tab: master toggle/texture/wireframe/HTTP
+    MainWindow.ResourceBrowser.cs     # Resource browser + model detection
+    ModelEditorWindow.cs              # 3D editor
+    PbrInspectorWindow.cs             # PBR channel inspector
+    DebugWindow.cs / ModExportWindow.cs
+docs/                                 # Technical documentation
+  development-notes.md                # Development pitfalls (CN environment, Penumbra IPC, threading, etc.)
+  constant-buffer-analysis.md         # CBuffer memory layout and render pipeline analysis
+  material-replacement-research.md    # PBR/metallic/petrify feasibility assessment
+  pbr-material-research.md            # ColorTable row selection + Glamourer data flow
+  pbr-material-design-decisions.md    # Brainstorming Q&A record
+  route-c-ida-research.md             # IDA decompilation of vanilla shader package loading
+  skin-uv-mesh-matching.md            # SkinMeshResolver design rationale (body mod UV matching strategy)
 ```
 
-## 关键约定
+## Key Conventions
 
-- 命名空间：`SkinTatoo.*`（如 `SkinTatoo.Mesh`, `SkinTatoo.Core`）
-- UI 语言：中文
-- 代码注释：仅在关键处写英文注释
-- 提交信息：不写 Co-Authored-By
+- Namespace: `SkinTattoo.*` (e.g. `SkinTattoo.Mesh`, `SkinTattoo.Core`)
+- UI language: Chinese
+- Code comments: English only, at critical points
+- Commit messages: no Co-Authored-By
 
-## 依赖
+## Dependencies
 
-| 库 | 用途 |
+| Library | Purpose |
 |---|---|
-| Penumbra.Api (submodule) | Penumbra IPC 类型安全封装 |
-| Lumina | .mdl/.tex 文件解析 |
-| StbImageSharp | 图片加载 |
-| EmbedIO | HTTP 调试服务器 |
-| SharpDX 4.2.0 | DX11 离屏渲染 (Direct3D11, D3DCompiler, DXGI, Mathematics) |
+| Penumbra.Api (submodule) | Type-safe Penumbra IPC wrapper |
+| Lumina | .mdl/.tex file parsing |
+| StbImageSharp | Image loading |
+| EmbedIO | HTTP debug server |
+| SharpDX 4.2.0 | DX11 offscreen rendering (Direct3D11, D3DCompiler, DXGI, Mathematics) |
 
-## 参考项目（同目录下）
+## Reference Projects (same directory)
 
-| 项目 | 用途 |
+| Project | Purpose |
 |---|---|
-| FFXIVClientStructs | 游戏结构体定义（CharacterBase, Material, ConstantBuffer 等） |
-| Glamourer-CN | 材质实时修改参考（ColorTable 纹理交换、PrepareColorSet hook） |
-| Meddle | 材质/纹理读取参考（OnRenderMaterial 拦截） |
-| VFXEditor-CN | VFX 编辑器参考 |
+| FFXIVClientStructs | Game struct definitions (CharacterBase, Material, ConstantBuffer, etc.) |
+| Glamourer-CN | Material live-edit reference (ColorTable texture swap, PrepareColorSet hook) |
+| Meddle | Material/texture read reference (OnRenderMaterial interception) |
+| VFXEditor-CN | VFX editor reference |
 
-## HTTP 调试 API
+## HTTP Debug API
 
-插件启动后在 `http://localhost:14780/` 提供 REST API：
+The plugin serves a REST API at `http://localhost:12580/` after startup:
 
-- `GET /api/status` — 插件状态
-- `GET /api/project` — 当前项目 JSON
-- `POST /api/layer` — 添加图层
-- `PUT /api/layer/{id}` — 修改图层参数
-- `DELETE /api/layer/{id}` — 删除图层
-- `POST /api/preview` — 触发预览（自动选择 inplace/full）
-- `POST /api/preview/full` — 强制 Full Redraw
-- `POST /api/preview/inplace` — 强制 inplace swap
-- `POST /api/mesh/load` — 加载网格
-- `GET /api/mesh/info` — 网格信息
-- `GET /api/log` — 最近日志
-- `POST /api/export` — 导出 Mod（body: `{name, author?, version?, description?, target: "local"|"penumbra", outputPath?, groupIndices?: [int]}`）
+- `GET /api/status` — Plugin status
+- `GET /api/project` — Current project JSON
+- `POST /api/layer` — Add layer
+- `PUT /api/layer/{id}` — Modify layer params
+- `DELETE /api/layer/{id}` — Delete layer
+- `POST /api/preview` — Trigger preview (auto-selects inplace/full)
+- `POST /api/preview/full` — Force full redraw
+- `POST /api/preview/inplace` — Force inplace swap
+- `POST /api/mesh/load` — Load mesh
+- `GET /api/mesh/info` — Mesh info
+- `GET /api/log` — Recent log entries
+- `POST /api/export` — Export mod (body: `{name, author?, version?, description?, target: "local"|"penumbra", outputPath?, groupIndices?: [int]}`)
 
-## 核心管线流程
+## Core Pipeline
 
-### 首次预览（Full Redraw）
+### First Preview (Full Redraw)
 ```
-PNG 图片 → CPU UV 合成 → 写临时 .tex/.mtrl → Penumbra 临时 Mod → 角色重绘（闪一次）
-```
-
-### 后续参数调整（GPU Swap，无闪烁）
-```
-参数变化 → 异步 CPU 合成（后台线程） → GPU 纹理原子替换（主线程，瞬间完成）
+PNG image → CPU UV composite → write temp .tex/.mtrl → Penumbra temp mod → character redraw (flashes once)
 ```
 
-通过 `TextureSwapService` 直接操作 `CharacterBase→Model→Material→TextureResourceHandle→Texture*` 指针，
-用 `Device.CreateTexture2D` + `InitializeContents` + `Interlocked.Exchange` 实现零闪烁纹理替换。
+### Subsequent Adjustments (GPU Swap, flicker-free)
+```
+Parameter change → async CPU composite (background thread) → atomic GPU texture swap (main thread, instant)
+```
 
-### Mod 导出
-- `Services/ModExportService.cs` 协调导出，结果通过 Dalamud `INotificationManager` 弹通知
-- 复用 `PreviewService.CompositeForExport` 入口（仅 visible 图层、不污染运行时状态）
-- `Services/PmpPackageWriter.cs` 打包 staging 目录为 `.pmp` zip（meta.json + default_mod.json + 游戏路径镜像）
-- 两条路径：本地保存 / `PenumbraBridge.InstallMod` IPC
-- **install pmp 路径**：`<pluginConfigDir>/export_temp/install_pending.pmp`，固定位置、下次安装覆盖，`ModExportService.Dispose()` 时清理。**不能**在 IPC 返回后立刻删，因为 `InstallMod` 是异步排队，Penumbra 真正读文件发生在 IPC 返回之后
-- 详细设计：`docs/superpowers/specs/2026-04-07-mod-export-design.md`
+`TextureSwapService` directly manipulates `CharacterBase→Model→Material→TextureResourceHandle→Texture*` pointers.
+Uses `Device.CreateTexture2D` + `InitializeContents` + `Interlocked.Exchange` for zero-flicker texture replacement.
+`ReplaceColorTableRaw` / `UpdateEmissiveViaColorTable` scan **all** matching material slots and replace each one (same mtrl may be referenced by multiple Model slots).
 
-贴花直接在 UV 空间合成：以 `UvCenter`/`UvScale`/`RotationDeg` 定位，对每个输出纹理像素采样贴花，alpha blend 叠加到基础贴图上。
+### Mod Export
+- `Services/ModExportService.cs` orchestrates export; results notified via Dalamud `INotificationManager`
+- Reuses `PreviewService.CompositeForExport` entry point (visible layers only, no runtime state pollution)
+- `Services/PmpPackageWriter.cs` packs staging dir into `.pmp` zip (meta.json + default_mod.json + game path mirror)
+- Two paths: local save / `PenumbraBridge.InstallMod` IPC
+- **install pmp path**: `<pluginConfigDir>/export_temp/install_pending.pmp`, fixed location, overwritten on next install, cleaned on `ModExportService.Dispose()`. Cannot delete immediately after IPC return — `InstallMod` is async-queued, Penumbra reads the file after IPC returns.
 
-贴花支持半切预处理：`ClipMode`（None/ClipLeft/ClipRight/ClipTop/ClipBottom）在 decal-local 空间裁剪，
-解决 FFXIV 镜像纹理问题。
+Decals composite directly in UV space: positioned by `UvCenter`/`UvScale`/`RotationDeg`, sampling each output texture pixel from the decal, alpha-blended onto the base texture.
 
-### 发光（Emissive）系统
+Decal half-clip preprocessing: `ClipMode` (None/ClipLeft/ClipRight/ClipTop/ClipBottom) clips in decal-local space, solving the FFXIV mirrored texture problem.
 
-**初始化路径（Full Redraw 时执行一次）：**
-- `MtrlFileWriter` 修改 .mtrl 文件：
-  - 设置 `CategorySkinType` shader key → `ValueEmissive` (0x72E697CD)
-  - 写入 `g_EmissiveColor` (0x38A64362) 着色器常量
-  - 保留原始 `AdditionalData` 字节（Lumina 跳过此字段）
-- 法线贴图 Alpha 通道作为发光遮罩（UV 空间合成）
-- 记录 `emissiveOffset`（g_EmissiveColor 在 CBuffer 中的字节偏移）
+### Emissive System
 
-**实时更新路径（每帧，无闪烁）：**
-- `EmissiveCBufferHook` hook `ModelRenderer.OnRenderMaterial`
-- 在渲染管线内通过 `LoadSourcePointer` 修改 CBuffer 数据
-- UI 颜色/强度滑块直接调用 `TryDirectEmissiveUpdate()`，延迟仅 1 帧
-- 有 ColorTable 的材质（character.shpk 等）→ ColorTable 纹理原子交换（参考 Glamourer）
-- skin.shpk 材质（无 ColorTable）→ EmissiveCBufferHook 实时 CBuffer 更新
+**Initialization path (executed once during Full Redraw):**
+- `MtrlFileWriter` modifies .mtrl file:
+  - Sets `CategorySkinType` shader key → `ValueEmissive` (0x72E697CD)
+  - Writes `g_EmissiveColor` (0x38A64362) shader constant
+  - Preserves original `AdditionalData` bytes (Lumina skips this field)
+- Normal map alpha channel as emissive mask (UV-space composite)
+- Records `emissiveOffset` (g_EmissiveColor byte offset in CBuffer)
 
-**状态清理：**
-- 取消勾选"发光"或隐藏图层时，调用 `ClearEmissiveHookTargets()` 清除 hook 状态
-- `ResetSwapState()` 清除所有 GPU swap 和 hook 状态
+**Real-time update path (per-frame, flicker-free):**
+- `EmissiveCBufferHook` hooks `ModelRenderer.OnRenderMaterial`
+- Modifies CBuffer data via `LoadSourcePointer` within the render pipeline
+- UI color/intensity sliders call `TryDirectEmissiveUpdate()` directly, 1-frame latency
+- Materials with ColorTable (character.shpk etc.) → ColorTable texture atomic swap (ref. Glamourer)
+- skin.shpk materials (no ColorTable) → EmissiveCBufferHook real-time CBuffer update
 
-## 已验证的技术结论
+**State cleanup:**
+- Unchecking "emissive" or hiding a layer calls `ClearEmissiveHookTargets()` to clear hook state
+- `ResetSwapState()` clears all GPU swap and hook state
 
-### 材质 CBuffer 通过 OnRenderMaterial 内 LoadSourcePointer 可实时更新
-- 在 OnRenderMaterial **外部** 调用 LoadSourcePointer：CPU 写入成功但 GPU 不重新上传（渲染命令已构建）
-- 在 OnRenderMaterial **内部** 调用 LoadSourcePointer：设置 DirtySize + UnsafeSourcePointer，随后的渲染提交会读取更新后的数据
-- `ConstantBuffer.Flags` 初始值为 `0x4`（静态），Buffer[0/1/2] 指向 CPU 内存（非 ID3D11Buffer）
-- 详细分析见 `docs/ConstantBuffer逆向分析.md`
+## Verified Technical Conclusions
 
-### skin.shpk 材质无 ColorTable
-- `DataSetSize = 0`，`HasColorTable = false`
-- emissive 颜色完全存在 CBuffer 着色器常量 `g_EmissiveColor` 中
-- ColorTable 纹理交换对 skin.shpk 不适用
+### Material CBuffer can be live-updated via LoadSourcePointer inside OnRenderMaterial
+- Calling LoadSourcePointer **outside** OnRenderMaterial: CPU write succeeds but GPU doesn't re-upload (render command already built)
+- Calling LoadSourcePointer **inside** OnRenderMaterial: sets DirtySize + UnsafeSourcePointer, subsequent render submission reads updated data
+- `ConstantBuffer.Flags` initial value is `0x4` (static), Buffer[0/1/2] point to CPU memory (not ID3D11Buffer)
+- Detailed analysis in `docs/constant-buffer-analysis.md`
 
-### Penumbra 重定向后 MaterialResourceHandle.FileName 格式
-- 格式：`|prefix_hash|disk_path.mtrl`（如 `|1_2_FE59D746_0893|C:/.../preview_gBD8558DD.mtrl`）
-- 不再是游戏路径，匹配时需同时用游戏路径和磁盘路径
+### skin.shpk materials have no ColorTable
+- `DataSetSize = 0`, `HasColorTable = false`
+- Emissive color is entirely in CBuffer shader constant `g_EmissiveColor`
+- ColorTable texture swap is not applicable to skin.shpk
 
-### character.shpk 系列的 ColorTable 行号由 normal.a 决定
-- 32 行 ColorTable 实际上是 16 个 row pair，按 normal map alpha 通道索引
-- 行号公式：`tablePair = round(normal.a / 17)` → 0-15
-- 行对内插值权重：`rowBlend = 1 - normal.g / 255`
-- 同一 row pair 的两行做 lerp，所有 PBR 字段（diffuse/specular/emissive/roughness/metalness）一起插值
-- 来源：`Penumbra/Import/Models/Export/MaterialExporter.cs:136-149`
-- 这是"每个贴花图层独立 PBR"方案的物理基础——给每个图层分配独立 row pair，合成 normal.a 时贴花区域写对应行号即可
+### Penumbra-redirected MaterialResourceHandle.FileName format
+- Format: `|prefix_hash|disk_path.mtrl` (e.g. `|1_2_FE59D746_0893|C:/.../preview_gBD8558DD.mtrl`)
+- No longer a game path; matching requires both game path and disk path
 
-### Vanilla 引擎自带 charactertattoo.shpk
-- shader package 字符串数组 @ `0x14206d3a0`（IDA: ffxiv_dx11.exe）共 57 个 entry
-- 包含 `shader/sm5/shpk/charactertattoo.shpk` @ `0x14206dca8`
-- 名字暗示这是 vanilla 自己的"角色贴花" shader，可能是身体材质 PBR 化的最佳转换目标（比 character.shpk 更轻量）
-- 详见 `docs/路线C-IDA调研补充.md`
+### character.shpk ColorTable row number is determined by normal.a
+- 32-row ColorTable is actually 16 row pairs, indexed by normal map alpha channel
+- Row formula: `tablePair = round(normal.a / 17)` → 0-15
+- Intra-pair interpolation weight: `rowBlend = 1 - normal.g / 255`
+- Both rows in a pair are lerped, all PBR fields (diffuse/specular/emissive/roughness/metalness) interpolate together
+- Source: `Penumbra/Import/Models/Export/MaterialExporter.cs:136-149`
+- This is the physical basis for "independent PBR per decal layer" — assign each layer an independent row pair, write the corresponding row index in normal.a during composite
 
-### MaterialResourceHandle 字段 offset（vtable 之外的关键数据）
+### Vanilla engine includes charactertattoo.shpk
+- Shader package string array @ `0x14206d3a0` (IDA: ffxiv_dx11.exe), 57 entries
+- Contains `shader/sm5/shpk/charactertattoo.shpk` @ `0x14206dca8`
+- Name suggests this is vanilla's own "character tattoo" shader, potentially the best conversion target for body material PBR (lighter than character.shpk)
+- See `docs/route-c-ida-research.md`
+
+### MaterialResourceHandle field offsets (key data beyond vtable)
 - `+200` (0xC8) = ShaderPackage handle (QWORD)
-- `+232` (0xE8) = ShaderPackage flags (DWORD，渲染分支位 `& 0x4000` / `& 0x8000`)
-- 通过 IDA 反编译 OnRenderMaterial (sub_14026EE10) 确认，与 FFXIVClientStructs 的定义一致
+- `+232` (0xE8) = ShaderPackage flags (DWORD, render branch bits `& 0x4000` / `& 0x8000`)
+- Confirmed via IDA decompilation of OnRenderMaterial (sub_14026EE10), consistent with FFXIVClientStructs definitions
 
-### Vanilla 引擎对 ShaderPackage 做 fast-path 指针比较
-- OnRenderMaterial 内 `material->ShaderPackage` 跟 ModelRenderer 缓存的 5 个 ShaderPackage 指针逐个比较
-- 走不同的渲染 flag 分支
-- **意义**：把 .mtrl 的 ShaderPackage 切换到另一个有效 shader 后，引擎会自动按 fast-path 分流——不需要任何 hook 干预，**只要 .mtrl 文件里 ShaderPackageName 改对就能切 shader**
-- 这是路线 C（skin.shpk → character.shpk 转换）大幅简化的根据
+### Vanilla engine does fast-path pointer comparison on ShaderPackage
+- Inside OnRenderMaterial, `material->ShaderPackage` is compared against 5 cached ShaderPackage pointers in ModelRenderer
+- Different render flag branches
+- **Implication**: switching a .mtrl's ShaderPackage to another valid shader causes the engine to automatically route via fast-path — no hook intervention needed, **just changing ShaderPackageName in the .mtrl file is enough to switch shaders**
+- This is the basis for greatly simplifying Route C (skin.shpk → character.shpk conversion)
 
-### ConstantBuffer 内存布局（已确认，0x70 bytes）
+### ConstantBuffer Memory Layout (confirmed, 0x70 bytes)
 ```
 +0x00  vtable pointer (ReferencedClassBase)
-+0x18  int InitFlags (创建时传入)
-+0x20  int ByteSize (16 字节对齐)
++0x18  int InitFlags (passed at creation)
++0x20  int ByteSize (16-byte aligned)
 +0x24  int Flags (0x4 = static, 0x1 = dynamic, 0x4000 = GPU D3D11Buffer)
-+0x28  void* UnsafeSourcePointer (由 LoadSourcePointer 设置)
++0x28  void* UnsafeSourcePointer (set by LoadSourcePointer)
 +0x30  int StagingSize
-+0x34  int DirtySize (渲染提交读取此值决定上传大小)
++0x34  int DirtySize (render submission reads this to determine upload size)
 +0x38  vtable2 pointer
-+0x50  void* Buffer[0] (三重缓冲 CPU 内存指针 / 或 ID3D11Buffer* 当 flags & 0x4000)
++0x50  void* Buffer[0] (triple-buffered CPU memory pointers / or ID3D11Buffer* when flags & 0x4000)
 +0x58  void* Buffer[1]
 +0x60  void* Buffer[2]
 +0x68  void* StagingPtr
 ```
-**结论**：材质 CBuffer (Flags=0x4) 的 Buffer[] 是 CPU 内存，不含 ID3D11Buffer*。
-GPU 缓冲区由渲染提交管线按需创建上传。
+**Conclusion**: Material CBuffer (Flags=0x4) Buffer[] is CPU memory, not ID3D11Buffer*.
+GPU buffers are created/uploaded on-demand by the render submission pipeline.
 
-## EmissiveCBufferHook 实现细节
+## EmissiveCBufferHook Implementation Details
 
-**文件**: `Interop/EmissiveCBufferHook.cs`
+**File**: `Interop/EmissiveCBufferHook.cs`
 
-**Hook 目标**: `ModelRenderer.OnRenderMaterial`（签名 `"E8 ?? ?? ?? ?? 44 0F B7 28"`）
+**Hook target**: `ModelRenderer.OnRenderMaterial` (signature `"E8 ?? ?? ?? ?? 44 0F B7 28"`)
 
-**工作原理**:
-1. hook detour 在原始函数调用**之前**执行
-2. 通过 `MaterialResourceHandle` 指针匹配目标材质（ConcurrentDictionary，线程安全）
-3. 从 `ShaderPackage.MaterialElements` 查找 `g_EmissiveColor` (CRC 0x38A64362) 的偏移（结果缓存）
-4. 调用 `LoadSourcePointer(offset, 12, 2)` 标记脏并获取可写指针
-5. 写入新的 RGB 值
-6. 调用原始函数 → 渲染提交读取更新后的数据 → GPU 上传
+**How it works**:
+1. Hook detour executes **before** the original function call
+2. Matches target material via `MaterialResourceHandle` pointer (ConcurrentDictionary, thread-safe)
+3. Looks up `g_EmissiveColor` (CRC 0x38A64362) offset from `ShaderPackage.MaterialElements` (result cached)
+4. Calls `LoadSourcePointer(offset, 12, 2)` to mark dirty and get writable pointer
+5. Writes new RGB values
+6. Calls original function → render submission reads updated data → GPU upload
 
-**线程安全**: `ConcurrentDictionary` 保证 UI 线程写 / 渲染线程读不冲突
+**Thread safety**: `ConcurrentDictionary` ensures UI thread writes / render thread reads don't conflict
 
-**异常处理**: 限流机制，最多记录 5 次错误防止日志爆炸
+**Error handling**: Throttle mechanism, logs at most 5 errors to prevent log flooding
 
-**相关 IDA 地址**: 见 `docs/ConstantBuffer逆向分析.md`
+**Related IDA addresses**: see `docs/constant-buffer-analysis.md`
 
-## 3D 贴花编辑器
+## 3D Decal Editor
 
-独立 ImGui 窗口（`ModelEditorWindow`），DX11 离屏渲染 → `ImGui.ImageButton` 显示。
+Standalone ImGui window (`ModelEditorWindow`), DX11 offscreen rendering → `ImGui.ImageButton` display.
 
-### 架构
+### Architecture
 ```
-DxRenderer (离屏渲染) → ShaderResourceView → ImGui.ImageButton
-OrbitCamera (轨道相机) → View/Proj 矩阵
-MeshBuffer (GPU 缓冲) ← MeshData (CPU)
-RayPicker (射线拾取) → UV 坐标 → DecalLayer.UvCenter → 合成管线
+DxRenderer (offscreen render) → ShaderResourceView → ImGui.ImageButton
+OrbitCamera (orbit camera) → View/Proj matrices
+MeshBuffer (GPU buffers) ← MeshData (CPU)
+RayPicker (ray picking) → UV coordinates → DecalLayer.UvCenter → composite pipeline
 ```
 
-### 坐标系约定
-- **World 矩阵**: `Scaling(-1, 1, 1)` — FFXIV 模型 X 轴镜像
-- **相机默认**: `Yaw = 0` — 模型正面朝向相机
-- **Mesh UV**: `uv = rawUv` — Meddle 返回原始 UV，直接使用（FFXIV 身体模型 UV X 通常在 [1,2]，画布通过 `uvScale` 映射到虚拟正方形空间的右半边）
-- **射线拾取**: 射线 X 取反（匹配 World X 镜像），UV 直接使用（无需翻转）
-- **Shader**: `output.uv = input.uv`（无翻转）
+### Coordinate System Conventions
+- **World matrix**: `Scaling(-1, 1, 1)` — FFXIV model X-axis mirrored
+- **Camera default**: `Yaw = 0` — model faces camera
+- **Mesh UV**: `uv = rawUv` — Meddle returns raw UV, used directly (FFXIV body model UV X is typically in [1,2], canvas maps to the right half of virtual square space via `uvScale`)
+- **Ray picking**: Ray X negated (matches World X mirror), UV used directly (no flip)
+- **Shader**: `output.uv = input.uv` (no flip)
 
-### 多模型支持
-- `TargetGroup.AllMeshPaths` 合并主模型 + 额外模型路径
-- `TargetGroup.VisibleMeshPaths` 排除 `HiddenMeshPaths` 中隐藏的模型
-- `MeshExtractor.ExtractAndMerge()` 合并多个 .mdl
-- 导入投影目标时自动检测共享同一纹理的所有 Mdl
-- 添加模型从 Penumbra 资源树列表选择（非手动文件对话框）
-- 管理模型弹窗支持勾选显隐和移除
-- 只加载 `MaterialIdx == 0` 的 mesh（跳过饰品/阴影等）
+### Multi-Model Support
+- `TargetGroup.AllMeshPaths` merges primary model + additional model paths
+- `TargetGroup.VisibleMeshPaths` excludes models in `HiddenMeshPaths`
+- `MeshExtractor.ExtractAndMerge()` merges multiple .mdl files
+- Auto-detects all Mdl sharing the same texture when importing projection targets
+- Model selection from Penumbra resource tree list (not manual file dialog)
+- Model management popup supports visibility toggle and removal
+- Only loads meshes with `MaterialIdx == 0` (skips accessories/shadows etc.)
 
-### 交互
-| 输入 | 动作 |
-|------|------|
-| 右键拖拽 | 旋转相机 |
-| 中键拖拽 | 平移相机 |
-| Ctrl+滚轮 | 相机缩放 |
-| 左键点击模型 | 放置贴花 |
-| 滚轮 | 缩放贴花 |
+### Controls
+| Input | Action |
+|-------|--------|
+| Right-drag | Rotate camera |
+| Middle-drag | Pan camera |
+| Ctrl+Scroll | Camera zoom |
+| Left-click model | Place decal |
+| Scroll | Scale decal |
 
-## 游戏内测试
+## In-Game Testing
 
-1. `/xlsettings` → Dev Plugin Locations 添加输出目录
-2. `/xlplugins` 启用 SkinTatoo
-3. `/skintatoo` 打开编辑器
-4. HTTP: `curl http://localhost:14780/api/status`
+1. `/xlsettings` → Dev Plugin Locations → add output directory
+2. `/xlplugins` → enable SkinTattoo
+3. `/skintattoo` → open editor
+4. HTTP: `curl http://localhost:12580/api/status`

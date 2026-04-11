@@ -1,64 +1,64 @@
-# SkinTatoo 开发踩坑记录
+# SkinTattoo Development Notes
 
-> 这是一份"过来人备忘录"，记录那些**只能踩进去才知道**的细节。新手向，不展开 API 文档已有的内容。
+> This is a "lessons learned" memo documenting details that **you can only discover by running into them**. Written for newcomers; does not repeat what is already covered in the API docs.
 
-## 目录
-- [国服 (CN) 环境](#国服-cn-环境)
+## Table of Contents
+- [CN (China) Environment](#cn-china-environment)
 - [Penumbra IPC](#penumbra-ipc)
-- [.tex 文件格式](#tex-文件格式)
-- [合成 vs 投影](#uv-空间贴花-vs-3d-投影)
-- [游戏内贴图尺寸](#游戏内贴图尺寸)
-- [线程模型 / 状态隔离](#线程模型--状态隔离)
-- [Mod 导出](#mod-导出pmp-打包)
+- [.tex File Format](#tex-file-format)
+- [Compositing vs Projection](#uv-space-decal-vs-3d-projection)
+- [In-Game Texture Dimensions](#in-game-texture-dimensions)
+- [Threading Model / State Isolation](#threading-model--state-isolation)
+- [Mod Export](#mod-exportpmp-packaging)
 
-## 国服 (CN) 环境
+## CN (China) Environment
 
-### Dalamud SDK 路径
-- 国服使用 `XIVLauncherCN`，路径：`%AppData%\XIVLauncherCN\addon\Hooks\dev\`
-- 不是国际服的 `XIVLauncher\addon\Hooks\dev\`
-- 通过 `Directory.Build.props` 设置 `DALAMUD_HOME` 指向正确路径
+### Dalamud SDK Path
+- The CN client uses `XIVLauncherCN`, path: `%AppData%\XIVLauncherCN\addon\Hooks\dev\`
+- Not the international `XIVLauncher\addon\Hooks\dev\`
+- Set `DALAMUD_HOME` to the correct path via `Directory.Build.props`
 
-### Lumina 版本冲突
-- **Dalamud CN 自带 Lumina 2.4.2**，不要通过 NuGet 引用其他版本
-- NuGet 的 `Lumina 4.*` 会导致 `IDataManager.GetFile<MdlFile>()` 返回 null（类型不匹配）
-- 使用 `AtmoOmen/Lumina` fork 作为 submodule 可解决 `.tex` 文件解码
+### Lumina Version Conflict
+- **Dalamud CN ships with Lumina 2.4.2** — do not reference any other version via NuGet
+- NuGet `Lumina 4.*` causes `IDataManager.GetFile<MdlFile>()` to return null (type mismatch)
+- Using the `AtmoOmen/Lumina` fork as a submodule resolves `.tex` file decoding
 
-### SqPack 读取限制
-- `IDataManager.FileExists()` 对国服的 `.mdl` 和 `.tex` 文件返回 false
-- `.mtrl` 文件可以正常读取
-- 原因：国服 SqPack 的 Model/Texture 类型文件解码格式可能和 Lumina 2.4.2 不兼容
-- **解决方案**：使用 Meddle 的 SqPack 读取器（`Meddle.Utils.Files.SqPack`），它有独立的 Model/Texture 文件解析实现
+### SqPack Read Limitations
+- `IDataManager.FileExists()` returns false for CN-client `.mdl` and `.tex` files
+- `.mtrl` files can be read normally
+- Reason: the CN SqPack's Model/Texture file encoding format may be incompatible with Lumina 2.4.2
+- **Solution**: use Meddle's SqPack reader (`Meddle.Utils.Files.SqPack`), which has its own Model/Texture file parsing implementation
 
-### 从 Meddle 提取网格数据
-- `Meddle.Utils.Export.Model` 类正确处理顶点声明、位置/法线/UV 解析
-- FFXIV 的 **UV V 坐标是负数**（范围 [-1, 0]），需要取反：`uv.Y = -rawUv.Y`
-- 不取反会导致 `PositionMapGenerator` 生成空的位置图（0 valid pixels）
+### Extracting Mesh Data from Meddle
+- `Meddle.Utils.Export.Model` correctly handles vertex declarations, position/normal/UV parsing
+- FFXIV **UV V coordinates are negative** (range [-1, 0]) and must be negated: `uv.Y = -rawUv.Y`
+- Skipping the negation causes `PositionMapGenerator` to produce an empty position map (0 valid pixels)
 
 ## Penumbra IPC
 
-### 临时 Mod 方式
-- **不要用** `CreateTemporaryCollection` + `AssignTemporaryCollection`
-  - 这会**替换**玩家的整个 Penumbra 集合，导致所有已有 Mod（如 Eve body mod）失效
-- **应该用** `AddTemporaryModAll`
-  - 全局叠加，不影响现有 Mod 集合
-  - 在所有集合之上添加临时文件重定向
+### Temporary Mod Approach
+- **Do not use** `CreateTemporaryCollection` + `AssignTemporaryCollection`
+  - This **replaces** the player's entire Penumbra collection, disabling all existing mods (e.g. Eve body mod)
+- **Use** `AddTemporaryModAll` instead
+  - Overlays globally without affecting existing mod collections
+  - Adds temporary file redirects on top of all existing collections
 
-### GetPlayerResources 的路径格式
-- 返回 `Dictionary<ushort, Dictionary<string, HashSet<string>>>`
-- 格式：`objectIndex → diskPath → Set<gamePath>`
-- **注意**：设置临时 Mod 后，disk path 可能变成我们自己的输出文件（preview.tex），形成自引用
-- 应在创建临时 Mod 之前缓存原始路径
+### Path Format Returned by GetPlayerResources
+- Returns `Dictionary<ushort, Dictionary<string, HashSet<string>>>`
+- Format: `objectIndex → diskPath → Set<gamePath>`
+- **Note**: after applying a temporary mod, the disk path may become our own output file (preview.tex), creating a self-reference
+- Cache the original paths before creating the temporary mod
 
-### Eve 等身体 Mod 的路径特殊性
-- Eve 不使用标准路径 `chara/human/cXXXX/obj/body/b0001/texture/...`
-- Eve 使用自定义路径如 `chara/nyaughty/eve/gen3_raen_base.tex`
-- 材质文件 `.mtrl` 引用这些自定义路径
-- 不能用种族码硬编码来查找，应让用户在调试窗口手动选择
+### Special Path Behaviour for Body Mods like Eve
+- Eve does not use the standard path `chara/human/cXXXX/obj/body/b0001/texture/...`
+- Eve uses custom paths such as `chara/nyaughty/eve/gen3_raen_base.tex`
+- `.mtrl` material files reference these custom paths
+- Do not hardcode race codes to locate them; let the user select manually in the debug window
 
-## .tex 文件格式
+## .tex File Format
 
 ### Header (80 bytes)
-- offset 0: `uint32` attributes — 必须包含 `0x00800000` (TextureType2D)
+- offset 0: `uint32` attributes — must include `0x00800000` (TextureType2D)
 - offset 4: `uint32` format — `0x1450` = B8G8R8A8
 - offset 8: `uint16` width
 - offset 10: `uint16` height
@@ -66,68 +66,64 @@
 - offset 14: `uint16` mip count (1)
 - offset 24: `uint32` surface 0 offset (80)
 
-### 常见错误
-- attributes 写 0 会导致游戏不显示贴图（透明）
-- 像素字节序必须是 **BGRA**（不是 RGBA），format 0x1450 对应 B8G8R8A8
-- 写文件时用 `FileShare.Read` 防止 Penumbra/游戏读取时文件锁定
+### Common Mistakes
+- Writing 0 for attributes causes the game to not display the texture (appears transparent)
+- Pixel byte order must be **BGRA** (not RGBA); format 0x1450 corresponds to B8G8R8A8
+- Use `FileShare.Read` when writing the file to prevent file locking when Penumbra/the game reads it
 
-### .tex 解码
-- 使用 `Lumina.GameData.GetFileFromDisk<TexFile>(path)` 可以解码 BC 压缩的 .tex 文件
-- `TexFile.ImageData` 返回 B8G8R8A8 数据，需要手动转换为 RGBA
+### .tex Decoding
+- Use `Lumina.GameData.GetFileFromDisk<TexFile>(path)` to decode BC-compressed .tex files
+- `TexFile.ImageData` returns B8G8R8A8 data; you need to manually convert it to RGBA
 
-## UV 空间贴花 vs 3D 投影
+## UV Space Decal vs 3D Projection
 
-### 3D 投影的问题
-- 正交投影到 UV 空间会导致贴花碎片化——因为 UV 岛是分散的
-- 一个连续的 3D 区域在 UV 空间中可能分布在多个岛上
-- 效果类似"破碎的贴纸"
+### Problems with 3D Projection
+- Orthographic projection into UV space causes decal fragmentation — because UV islands are scattered
+- A continuous 3D region may be spread across multiple UV islands
+- The result looks like a "shattered sticker"
 
-### UV 空间直接贴图（当前方案）
-- 直接在 UV 坐标系中放置贴花图片
-- 参数：UV 中心点、UV 大小、旋转角度
-- 简单、精确、不碎片化
-- 类似 Photoshop 中在 UV 展开图上贴图
-- 缺点：需要用户理解 UV 布局（通过贴图预览辅助）
+### UV Space Direct Compositing (Current Approach)
+- Place the decal image directly in UV coordinate space
+- Parameters: UV center, UV size, rotation angle
+- Simple, precise, no fragmentation
+- Similar to placing artwork on a UV unwrap in Photoshop
+- Drawback: users need to understand the UV layout (assisted by the texture preview)
 
-## 游戏内贴图尺寸
-- 原版身体贴图：1024x1024 或 1024x2048
-- Eve 等高清 Mod：4096x4096
-- 输出分辨率应匹配或可配置
-- 底图需要缩放到 map 分辨率（最近邻插值足够）
+## In-Game Texture Dimensions
+- Vanilla body texture: 1024x1024 or 1024x2048
+- HD mods such as Eve: 4096x4096
+- Output resolution should match the base texture or be configurable
+- The base texture needs to be scaled to the map resolution (nearest-neighbour interpolation is sufficient)
 
-## 线程模型 / 状态隔离
+## Threading Model / State Isolation
 
-### `PreviewService` 的并发约束
-- `UpdatePreviewFull` 跑在主线程；`StartAsyncInPlace` 后台 `Task.Run`；`CompositeForExport` 也由后台 `Task.Run` 调用
-- 三条路径共享 `baseTextureCache` / `compositeResults` / `previewDiskPaths` / `previewMtrlDiskPaths` / `emissiveOffsets` / `initializedRedirects`
-- **必须用 `ConcurrentDictionary`**——之前用普通 `Dictionary` 导致滑动滑块时偶发 `InvalidOperationException` 和实时预览/导出互相污染状态
-- `EmissiveCBufferHook.targets` / `offsetCache` 也是 `ConcurrentDictionary`，因为 detour 跑在渲染线程、`SetTargetByPath` 跑在主线程
+### Concurrency Constraints in `PreviewService`
+- `UpdatePreviewFull` runs on the main thread; `StartAsyncInPlace` runs on a background `Task.Run`; `CompositeForExport` is also called via background `Task.Run`
+- All three paths share `baseTextureCache` / `compositeResults` / `previewDiskPaths` / `previewMtrlDiskPaths` / `emissiveOffsets` / `initializedRedirects`
+- **Must use `ConcurrentDictionary`** — using a plain `Dictionary` previously caused intermittent `InvalidOperationException` when sliding sliders, and live preview / export contaminating each other's state
+- `EmissiveCBufferHook.targets` / `offsetCache` are also `ConcurrentDictionary` because the detour runs on the render thread while `SetTargetByPath` runs on the main thread
 
-### Lumina 临时文件不能用固定文件名
-- `TryBuildEmissiveMtrl` / `LoadGameTexture` 把 SqPack 字节流写到 `outputDir/temp_*.mtrl|tex` 然后调 `Lumina.GetFileFromDisk`
-- **必须用 GUID 后缀** (`temp_{Guid:N}.mtrl`)，否则主线程 + 后台线程同时调用会写同一个文件，互相覆盖 → 解析错位
+### Lumina Temp Files Must Not Use Fixed Filenames
+- `TryBuildEmissiveMtrl` / `LoadGameTexture` write SqPack byte streams to `outputDir/temp_*.mtrl|tex` and then call `Lumina.GetFileFromDisk`
+- **Must use a GUID suffix** (`temp_{Guid:N}.mtrl`); otherwise the main thread and background thread calling simultaneously will write to the same file, overwriting each other and causing parse corruption
 
-### `EmissiveCBufferHook.Dispose` 顺序
-- 先 `Disable()` 后 `hook.Dispose()`，否则 `hook.Dispose()` 内部可能在新线程上 detour 时遇到已清空的 dict
-- 限流计数器 `errorCount` 不会自动重置——首次 5 次错误后日志静默；调试时如果"看不到新错误"先重启插件
+### `EmissiveCBufferHook.Dispose` Order
+- Call `Disable()` before `hook.Dispose()`; otherwise `hook.Dispose()` may encounter an already-cleared dictionary on a new thread executing the detour
+- The rate-limit counter `errorCount` does not reset automatically — after the first 5 errors, logging goes silent; if "no new errors appear" during debugging, restart the plugin first
 
-### `Plugin.OnFrameworkUpdate` 是一次性的
-- 用于自动加载持久化的 mesh 路径
-- **第一次成功执行后必须 `framework.Update -= OnFrameworkUpdate;`**——否则之后每帧都会做一次条件检查，纯浪费
+## Mod Export (.pmp Packaging)
 
-## Mod 导出（.pmp 打包）
+### `InstallMod` IPC is Asynchronous
+- `Penumbra.Api.IpcSubscribers.InstallMod` returning `Success` only means the request has been **queued**; Penumbra actually reads the .pmp file on a worker thread **after** the IPC call returns
+- Therefore the .pmp for "install to Penumbra" **must not** be written to a temp file and immediately deleted
+- **Solution**: write to the fixed path `<pluginConfigDir>/export_temp/install_pending.pmp`, which is overwritten on the next install and cleaned up in `ModExportService.Dispose()`. Also clean up in the constructor to handle leftovers from a previous crash
 
-### `InstallMod` IPC 是异步的
-- `Penumbra.Api.IpcSubscribers.InstallMod` 返回 `Success` 时只表示**入队**，Penumbra 真正读 .pmp 文件发生在 IPC 返回**之后**的 worker 线程上
-- 所以"安装到 Penumbra"的 .pmp **不能**写到临时文件然后立刻删
-- **解决**：写到 `<pluginConfigDir>/export_temp/install_pending.pmp` 这个固定路径，下次安装时被覆盖，`ModExportService.Dispose()` 时清理。构造函数里也清一次（处理上次崩溃残留）
+### `default_mod.json` Field Set
+- Penumbra's deserializer tolerates missing fields, but **omitting the composite fields `FileSwaps` / `Manipulations` causes them to use wrong defaults**
+- Full field list: `Version`, `Name`, `Description`, `Priority`, `Files`, `FileSwaps`, `Manipulations`
+- Keys in `Files` are game paths; values are paths relative to the mod root — **use forward slashes on both sides** (even on Windows)
 
-### `default_mod.json` 字段集
-- Penumbra 反序列化对缺字段是容忍的，但**少了 `FileSwaps` / `Manipulations` 这两个复合字段会用错的默认值**
-- 完整字段：`Version`, `Name`, `Description`, `Priority`, `Files`, `FileSwaps`, `Manipulations`
-- `Files` 的 key 是游戏路径、value 是相对 mod 根的路径，**两端都用正斜杠**（即使在 Windows 上）
-
-### HTTP `/api/export` 必须包到 `Task.Run`
-- `ModExportService.Export` 是同步的、合成 + 写 zip 几秒级
-- HTTP 端点直接 `await` 它会**阻塞 EmbedIO 监听线程**，期间所有其他 HTTP 请求都卡住
-- 修复：`var result = await Task.Run(() => _exportService.Export(options));`
+### HTTP `/api/export` Must Be Wrapped in `Task.Run`
+- `ModExportService.Export` is synchronous; compositing + writing the zip takes several seconds
+- `await`-ing it directly in the HTTP endpoint **blocks the EmbedIO listener thread**, causing all other HTTP requests to hang during that time
+- Fix: `var result = await Task.Run(() => _exportService.Export(options));`

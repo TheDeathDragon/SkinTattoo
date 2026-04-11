@@ -1,7 +1,16 @@
 <Project>
   <PropertyGroup>
-    <!-- Point to XIVLauncherCN's Dalamud dev directory -->
     <DALAMUD_HOME Condition="'$(DALAMUD_HOME)' == ''">$(AppData)\XIVLauncherCN\addon\Hooks\dev</DALAMUD_HOME>
     <DalamudLibPath>$(DALAMUD_HOME)\</DalamudLibPath>
   </PropertyGroup>
+
+  <!-- Auto version: YYMM.commits (e.g. 2604.161) -->
+  <Target Name="ComputeSkinTattooVersion" BeforeTargets="GetAssemblyVersion;GenerateNuspec;Build">
+    <Exec Command="git rev-list --count HEAD" ConsoleToMsBuild="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitCommitCount" />
+    </Exec>
+    <PropertyGroup>
+      <SkinTattooVersion>$([System.DateTime]::UtcNow.ToString("yyMM")).$(GitCommitCount)</SkinTattooVersion>
+    </PropertyGroup>
+  </Target>
 </Project>

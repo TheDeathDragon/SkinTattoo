@@ -1,0 +1,14 @@
+{
+  "Author": "Shiro",
+  "Name": "SkinTattoo",
+  "Punchline": "实时皮肤贴花投影与预览",
+  "Description": "将 PNG 贴花投影到角色皮肤上，支持漫反射和法线通道，通过 Penumbra 实时预览。使用 /skintattoo 打开。",
+  "ApplicableVersion": "any",
+  "Tags": [
+    "texture",
+    "decal",
+    "tattoo",
+    "skin",
+    "penumbra"
+  ]
+}

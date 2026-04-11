@@ -7,6 +7,5 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 echo.
-echo latest.zip:
-dir /b SkinTatoo\SkinTatoo\bin\Release\SkinTatoo\latest.zip
+echo Output: SkinTattoo\SkinTattoo\bin\Release\win-x64\
 pause
