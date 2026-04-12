@@ -25,6 +25,10 @@ public unsafe class TextureSwapService
     private readonly IPluginLog log;
     private readonly HashSet<string> loggedEmissiveNotFound = new(StringComparer.OrdinalIgnoreCase);
 
+    // Diagnostic throttle for ReplaceColorTableRaw: log per-mtrl at most once per window.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> ctSwapLogCooldown = new();
+    private const long CtSwapLogCooldownTicks = TimeSpan.TicksPerSecond * 2;
+
     private const TexFlags CreateFlags =
         TexFlags.TextureType2D | TexFlags.Managed | TexFlags.Immutable;
 
@@ -263,6 +267,28 @@ public unsafe class TextureSwapService
         var normMtrl = mtrlGamePath.Replace('\\', '/').ToLowerInvariant();
         var normDisk = mtrlDiskPath?.Replace('\\', '/').ToLowerInvariant();
 
+        // Throttled diagnostic: one structured report per mtrl per CtSwapLogCooldownTicks.
+        bool verbose = false;
+        long nowTicks = DateTime.UtcNow.Ticks;
+        if (ctSwapLogCooldown.TryGetValue(normMtrl, out var last))
+        {
+            if (nowTicks - last >= CtSwapLogCooldownTicks)
+            {
+                ctSwapLogCooldown[normMtrl] = nowTicks;
+                verbose = true;
+            }
+        }
+        else
+        {
+            ctSwapLogCooldown[normMtrl] = nowTicks;
+            verbose = true;
+        }
+
+        int candidatesScanned = 0, matches = 0, noCt = 0, slotNull = 0, swapped = 0;
+        string? firstMatchName = null;
+        bool bestHasCt = false;
+        nint bestSlotPtr = 0;
+
         bool anySwapped = false;
         for (int s = 0; s < slotCount; s++)
         {
@@ -284,6 +310,7 @@ public unsafe class TextureSwapService
                 try { mtrlFileName = ((ResourceHandle*)mtrlHandle)->FileName.ToString(); }
                 catch { continue; }
                 if (string.IsNullOrEmpty(mtrlFileName)) continue;
+                candidatesScanned++;
 
                 var normFileName = mtrlFileName.Replace('\\', '/').ToLowerInvariant();
                 bool matched = normFileName.EndsWith(normMtrl) || normMtrl.EndsWith(normFileName);
@@ -291,14 +318,23 @@ public unsafe class TextureSwapService
                     matched = normFileName.EndsWith(normDisk) || normDisk.EndsWith(normFileName)
                            || normFileName.Contains(Path.GetFileName(normDisk));
                 if (!matched) continue;
+                matches++;
+                if (firstMatchName == null) firstMatchName = mtrlFileName;
 
-                if (!mtrlHandle->HasColorTable) continue;
+                bool hasCt = mtrlHandle->HasColorTable;
+                int flatIndexDiag = s * CharacterBase.MaterialsPerSlot + m;
+                var slotPtrDiag = ctTextures[flatIndexDiag];
+                if (matches == 1) { bestHasCt = hasCt; bestSlotPtr = (nint)slotPtrDiag; }
+
+                if (!hasCt) { noCt++; continue; }
 
                 int flatIndex = s * CharacterBase.MaterialsPerSlot + m;
                 var texSlot = &ctTextures[flatIndex];
                 if (*texSlot == null)
                 {
-                    DebugServer.AppendLog($"[TextureSwap] ReplaceColorTableRaw: slot null Model[{s}]Mat[{m}]");
+                    slotNull++;
+                    if (verbose)
+                        DebugServer.AppendLog($"[CTSwap] slot null Model[{s}]Mat[{m}] file={mtrlFileName}");
                     continue;
                 }
 
@@ -326,7 +362,18 @@ public unsafe class TextureSwapService
                 if (oldPtr != 0)
                     ((GpuTexture*)oldPtr)->DecRef();
                 anySwapped = true;
+                swapped++;
             }
+        }
+
+        if (verbose)
+        {
+            DebugServer.AppendLog(
+                $"[CTSwap] mtrl={mtrlGamePath} scanned={candidatesScanned} matches={matches} " +
+                $"noCT={noCt} slotNull={slotNull} swapped={swapped}" +
+                (firstMatchName != null
+                    ? $" firstMatch={firstMatchName} hasCT={bestHasCt} slotPtr=0x{bestSlotPtr:X}"
+                    : " (no path match)"));
         }
 
         return anySwapped;

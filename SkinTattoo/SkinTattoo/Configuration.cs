@@ -87,7 +87,6 @@ public class Configuration : IPluginConfiguration
     public bool MainWindowOpen { get; set; }
     public bool DebugWindowOpen { get; set; }
     public bool ModelEditorWindowOpen { get; set; }
-    public bool PbrInspectorWindowOpen { get; set; }
     public string? LastImageDir { get; set; }
     public bool AutoPreview { get; set; } = true;
     public bool UseGpuSwap { get; set; } = true;

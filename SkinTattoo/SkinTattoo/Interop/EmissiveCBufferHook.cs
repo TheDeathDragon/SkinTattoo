@@ -19,12 +19,18 @@ namespace SkinTattoo.Interop;
 public unsafe class EmissiveCBufferHook : IDisposable
 {
     private const uint CrcEmissiveColor = 0x38A64362;
+    private const uint CrcSamplerTable = 0x2005679F;
 
     private readonly IPluginLog log;
     private readonly Hook<OnRenderMaterialDelegate> hook;
 
     private readonly ConcurrentDictionary<nint, Vector3> targets = new();
     private readonly ConcurrentDictionary<nint, int> offsetCache = new();
+
+    // Diagnostic: one-shot log per MaterialResourceHandle to dump ShaderPackage info
+    // for skin-family materials. Verifies whether the patched skin.shpk is actually bound
+    // to the face/body/iris mtrl during rendering.
+    private readonly ConcurrentDictionary<nint, byte> shpkDiagLogged = new();
 
     private bool enabled;
     private int errorCount;
@@ -46,6 +52,18 @@ public unsafe class EmissiveCBufferHook : IDisposable
             hook.Enable();
             enabled = true;
             DebugServer.AppendLog("[EmissiveHook] Enabled");
+        }
+    }
+
+    /// <summary>Force-enable hook without setting any target (diagnostics only).
+    /// Used to capture ShaderPackage info for skin-family materials during rendering.</summary>
+    public void EnableForDiagnostics()
+    {
+        if (!enabled)
+        {
+            hook.Enable();
+            enabled = true;
+            DebugServer.AppendLog("[EmissiveHook] Enabled (diagnostics)");
         }
     }
 
@@ -128,19 +146,180 @@ public unsafe class EmissiveCBufferHook : IDisposable
         if (enabled) Disable();
     }
 
+    /// <summary>Remove hook target for a specific material by searching the path.</summary>
+    public void ClearTargetByPath(
+        FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase,
+        string mtrlGamePath, string? mtrlDiskPath)
+    {
+        if (charBase == null) return;
+
+        var normGame = mtrlGamePath.Replace('\\', '/').ToLowerInvariant();
+        var normDisk = mtrlDiskPath?.Replace('\\', '/').ToLowerInvariant();
+
+        var slotCount = charBase->SlotCount;
+        if (slotCount <= 0 || slotCount > 30) return;
+
+        var models = charBase->Models;
+        if (models == null) return;
+
+        for (int s = 0; s < slotCount; s++)
+        {
+            var model = models[s];
+            if (model == null) continue;
+
+            var matCount = model->MaterialCount;
+            if (matCount <= 0 || matCount > 20) continue;
+
+            var mats = model->Materials;
+            if (mats == null) continue;
+
+            for (int m = 0; m < matCount; m++)
+            {
+                var mat = mats[m];
+                if (mat == null) continue;
+
+                var mrh = mat->MaterialResourceHandle;
+                if (mrh == null) continue;
+
+                string fileName;
+                try { fileName = ((ResourceHandle*)mrh)->FileName.ToString(); }
+                catch { continue; }
+
+                if (string.IsNullOrEmpty(fileName)) continue;
+                var normFile = fileName.Replace('\\', '/').ToLowerInvariant();
+
+                bool matched = normFile.EndsWith(normGame) || normGame.EndsWith(normFile);
+                if (!matched && normDisk != null)
+                    matched = normFile.Contains(System.IO.Path.GetFileName(normDisk));
+
+                if (matched)
+                {
+                    targets.TryRemove((nint)mrh, out _);
+                    offsetCache.TryRemove((nint)mrh, out _);
+                    if (targets.IsEmpty && enabled) Disable();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// <summary>Set emissive color for iris materials (_iri_a / _iri_b) on the character.</summary>
+    public void SetIrisEmissive(
+        FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase,
+        Vector3 leftColor, Vector3 rightColor)
+    {
+        if (charBase == null) return;
+
+        var slotCount = charBase->SlotCount;
+        if (slotCount <= 0 || slotCount > 30) return;
+
+        var models = charBase->Models;
+        if (models == null) return;
+
+        for (int s = 0; s < slotCount; s++)
+        {
+            var model = models[s];
+            if (model == null) continue;
+
+            var matCount = model->MaterialCount;
+            if (matCount <= 0 || matCount > 20) continue;
+
+            var mats = model->Materials;
+            if (mats == null) continue;
+
+            for (int m = 0; m < matCount; m++)
+            {
+                var mat = mats[m];
+                if (mat == null) continue;
+
+                var mrh = mat->MaterialResourceHandle;
+                if (mrh == null) continue;
+
+                string fileName;
+                try { fileName = ((ResourceHandle*)mrh)->FileName.ToString(); }
+                catch { continue; }
+
+                if (string.IsNullOrEmpty(fileName)) continue;
+                var lower = fileName.ToLowerInvariant();
+
+                if (lower.Contains("_iri_a"))
+                {
+                    targets[(nint)mrh] = leftColor;
+                    if (!enabled) Enable();
+                }
+                else if (lower.Contains("_iri_b"))
+                {
+                    targets[(nint)mrh] = rightColor;
+                    if (!enabled) Enable();
+                }
+            }
+        }
+    }
+
+    /// <summary>Remove iris material targets.</summary>
+    public void ClearIrisTargets(
+        FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase)
+    {
+        if (charBase == null) return;
+
+        var slotCount = charBase->SlotCount;
+        if (slotCount <= 0 || slotCount > 30) return;
+
+        var models = charBase->Models;
+        if (models == null) return;
+
+        for (int s = 0; s < slotCount; s++)
+        {
+            var model = models[s];
+            if (model == null) continue;
+
+            var matCount = model->MaterialCount;
+            if (matCount <= 0 || matCount > 20) continue;
+
+            var mats = model->Materials;
+            if (mats == null) continue;
+
+            for (int m = 0; m < matCount; m++)
+            {
+                var mat = mats[m];
+                if (mat == null) continue;
+
+                var mrh = mat->MaterialResourceHandle;
+                if (mrh == null) continue;
+
+                string fileName;
+                try { fileName = ((ResourceHandle*)mrh)->FileName.ToString(); }
+                catch { continue; }
+
+                if (string.IsNullOrEmpty(fileName)) continue;
+                var lower = fileName.ToLowerInvariant();
+
+                if (lower.Contains("_iri_a") || lower.Contains("_iri_b"))
+                {
+                    targets.TryRemove((nint)mrh, out _);
+                    offsetCache.TryRemove((nint)mrh, out _);
+                }
+            }
+        }
+
+        if (targets.IsEmpty && enabled) Disable();
+    }
+
     public bool HasTargets => !targets.IsEmpty;
 
     private nint Detour(nint modelRenderer, nint outFlags, nint param, nint materialPtr, uint materialIndex)
     {
-        if (!targets.IsEmpty && materialPtr != 0)
+        if (materialPtr != 0)
         {
             try
             {
                 var material = (Material*)materialPtr;
                 var mrh = material->MaterialResourceHandle;
-                if (mrh != null && targets.TryGetValue((nint)mrh, out var color))
+                if (mrh != null)
                 {
-                    PatchEmissive(material, mrh, color);
+                    LogSkinShpkDiag(mrh);
+                    if (!targets.IsEmpty && targets.TryGetValue((nint)mrh, out var color))
+                        PatchEmissive(material, mrh, color);
                 }
             }
             catch (Exception ex)
@@ -151,6 +330,66 @@ public unsafe class EmissiveCBufferHook : IDisposable
         }
 
         return hook.Original(modelRenderer, outFlags, param, materialPtr, materialIndex);
+    }
+
+    /// <summary>One-shot per-mrh diagnostic for skin-family materials. Reports ShaderPackage
+    /// resource counts + whether g_SamplerTable (patched skin.shpk marker) is declared.</summary>
+    private void LogSkinShpkDiag(MaterialResourceHandle* mrh)
+    {
+        var key = (nint)mrh;
+        if (shpkDiagLogged.ContainsKey(key)) return;
+
+        string fileName;
+        try { fileName = ((ResourceHandle*)mrh)->FileName.ToString(); }
+        catch { return; }
+        if (string.IsNullOrEmpty(fileName)) return;
+
+        var lower = fileName.ToLowerInvariant();
+        bool isSkinFamily = lower.Contains("_fac_") || lower.Contains("_bibo")
+                            || lower.Contains("_iri_") || lower.Contains("/body/")
+                            || lower.Contains("/face/")
+                            || lower.Contains("/preview_g") || lower.Contains("\\preview_g");
+        if (!isSkinFamily) return;
+
+        shpkDiagLogged[key] = 1;
+
+        var shpkHandle = mrh->ShaderPackageResourceHandle;
+        if (shpkHandle == null)
+        {
+            DebugServer.AppendLog($"[ShpkDiag] {fileName}: shpkHandle=null");
+            return;
+        }
+        var shpk = shpkHandle->ShaderPackage;
+        if (shpk == null)
+        {
+            DebugServer.AppendLog($"[ShpkDiag] {fileName}: shpk=null");
+            return;
+        }
+
+        bool hasSamplerTable = false;
+        var samplers = shpk->SamplersSpan;
+        for (int i = 0; i < samplers.Length; i++)
+            if (samplers[i].CRC == CrcSamplerTable) { hasSamplerTable = true; break; }
+
+        bool hasEmissive = false;
+        int emOff = -1, emSize = -1;
+        var elems = shpk->MaterialElementsSpan;
+        for (int i = 0; i < elems.Length; i++)
+            if (elems[i].CRC == CrcEmissiveColor)
+            {
+                hasEmissive = true; emOff = elems[i].Offset; emSize = elems[i].Size; break;
+            }
+
+        string shpkFileName = "?";
+        try { shpkFileName = ((ResourceHandle*)shpkHandle)->FileName.ToString(); } catch { }
+
+        DebugServer.AppendLog(
+            $"[ShpkDiag] {fileName} -> {shpkFileName} shpk=0x{(nint)shpk:X} " +
+            $"vs={shpk->VertexShaders.Vector.Count} ps={shpk->PixelShaders.Vector.Count} " +
+            $"smp={shpk->SamplerCount} tex={shpk->TextureCount} " +
+            $"matKeys={shpk->MaterialKeyCount} " +
+            $"g_SamplerTable={hasSamplerTable} " +
+            $"g_EmissiveColor={hasEmissive}(off={emOff},sz={emSize})");
     }
 
     private void PatchEmissive(Material* material, MaterialResourceHandle* mrh, Vector3 color)

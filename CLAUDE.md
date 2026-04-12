@@ -34,12 +34,18 @@ SkinTattoo/SkinTattoo/                  # Main project
     MainWindow.cs                     # Main window core (partial: tabs/toolbar/layout/init)
     MainWindow.Canvas.cs              # UV canvas + wireframe
     MainWindow.LayerPanel.cs          # Left panel: layer list
-    MainWindow.ParameterPanel.cs      # Right panel: parameters/PBR
+    MainWindow.ParameterPanel.cs      # Right panel: parameters (decal attributes)
     MainWindow.SettingsTab.cs         # Settings tab: master toggle/texture/wireframe/HTTP
     MainWindow.ResourceBrowser.cs     # Resource browser + model detection
     ModelEditorWindow.cs              # 3D editor
-    PbrInspectorWindow.cs             # PBR channel inspector
     DebugWindow.cs / ModExportWindow.cs
+ShaderPatcher/                        # Python tools: patch skin.shpk for ColorTable emissive
+  parse_shpk.py                       # .shpk binary parser (material params, keys, nodes)
+  dxbc_patcher.py                     # DXBC container parser + SHEX instruction stream + PS extraction
+  dxbc_patch_colortable.py            # Patch PS[19]: inject s5/t10 + ColorTable sampling + checksum
+  shpk_patcher.py                     # Rebuild skin.shpk: replace PS[19] blob + add g_SamplerTable resource
+  skin_patched.shpk                   # Output: patched skin.shpk (deployed via Penumbra at runtime)
+  reference/                          # Disassembly reference (D3DCompiler output)
 docs/                                 # Technical documentation
   development-notes.md                # Development pitfalls (CN environment, Penumbra IPC, threading, etc.)
   constant-buffer-analysis.md         # CBuffer memory layout and render pipeline analysis
@@ -48,6 +54,7 @@ docs/                                 # Technical documentation
   pbr-material-design-decisions.md    # Brainstorming Q&A record
   route-c-ida-research.md             # IDA decompilation of vanilla shader package loading
   skin-uv-mesh-matching.md            # SkinMeshResolver design rationale (body mod UV matching strategy)
+  skin-shpk-colortable-implementation.md  # skin.shpk + ColorTable implementation (IDA逆向 + DXBC patch + 验证)
 ```
 
 ## Key Conventions
@@ -138,8 +145,30 @@ Decal half-clip preprocessing: `ClipMode` (None/ClipLeft/ClipRight/ClipTop/ClipB
 - skin.shpk materials (no ColorTable) → EmissiveCBufferHook real-time CBuffer update
 
 **State cleanup:**
-- Unchecking "emissive" or hiding a layer calls `ClearEmissiveHookTargets()` to clear hook state
+- Unchecking "emissive" or hiding a layer calls `InvalidateEmissiveForGroup()` which clears only that group's hook target (not all groups)
 - `ResetSwapState()` clears all GPU swap and hook state
+
+### Iris (Eye) Emissive System
+
+Iris emissive is auto-detected when TargetGroup.MtrlGamePath contains `_iri_`.
+Uses the same EmissiveCBufferHook (g_EmissiveColor CRC 0x38A64362 exists in iris.shpk).
+
+**Full Redraw path:**
+- `TryPatchEmissiveRaw` patches g_EmissiveColor + g_IrisRingEmissiveIntensity (0x7DABA471, default 0.25 → 1.0) in mtrl
+- `CompositeIrisMask` composites decal shapes into mask texture red channel (emissive mask)
+  - Loads vanilla mask via g_SamplerMask (CRC 0x8A4E82B6) from mtrl
+  - Red channel = decal alpha × blue channel (iris area clip)
+- Redirects patched mask + mtrl via Penumbra
+
+**In-place swap path:**
+- Re-composites iris mask on UV changes, GPU-swaps mask texture
+- CBuffer hook updates g_EmissiveColor in real-time
+
+**Key constraint:** iris emissive requires mask red channel ≠ 0. Vanilla eyes may have red=0; glow-compatible eye mods have it pre-set. Plugin auto-generates mask from blue channel.
+
+### skin.shpk Emissive Limitation
+
+skin.shpk has a single g_EmissiveColor CBuffer constant per material. All layers sharing the same body material share one emissive color (combined/accumulated). Per-layer independent emissive colors require shader swap (Route C) which is not implemented.
 
 ## Verified Technical Conclusions
 

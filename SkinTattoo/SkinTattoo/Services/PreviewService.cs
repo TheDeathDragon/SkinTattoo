@@ -110,8 +110,15 @@ public class PreviewService : IDisposable
     private readonly ConcurrentDictionary<string, string> indexMapGamePaths =
         new(StringComparer.OrdinalIgnoreCase);
 
+    // skin.shpk + patched ColorTable: tracks which MtrlGamePaths entered the skin CT
+    // pipeline during Full Redraw. Background composite checks this to decide between
+    // skin CT (build-from-scratch) vs PBR CT (clone-vanilla) vs legacy CBuffer paths.
+    private readonly ConcurrentDictionary<string, byte> skinCtMaterials =
+        new(StringComparer.OrdinalIgnoreCase);
+
     // sampler ID for g_SamplerIndex per Penumbra ShpkFile.cs:17
     private const uint IndexSamplerId = 0x565F8FD8u;
+    private const uint MaskSamplerId = 0x8A4E82B6u;
 
     // Cached vanilla ColorTable bytes per material (keyed by MtrlGamePath).
     // Populated on first ColorTable write from the main thread; background composite
@@ -211,8 +218,9 @@ public class PreviewService : IDisposable
         public byte[]? PreviewRgba; // 3D-editor preview RGBA when AffectsDiffuse=false on a layer
         public byte[]? IdxRgba;     // index map composite intermediate (RGBA)
         public byte[]? IdxBgra;     // index map BGRA -> file write + GPU swap
-        public byte[]? NormBgra;    // legacy emissive norm BGRA
-        public byte[]? NormRgba;    // legacy emissive norm intermediate (RGBA)
+        public byte[]? NormBgra;
+        public byte[]? NormRgba;
+        public byte[]? MaskBgra;
 
         // Dirty rect trackers  -- one per output buffer, since each paints a different
         // layer subset (all-visible, AffectsDiffuse, AllocatedRowPair, AffectsEmissive).
@@ -538,19 +546,65 @@ public class PreviewService : IDisposable
         => textureSwap?.GetLocalPlayerCharacterBase();
 
     /// <summary>Write highlight emissive color via ColorTable texture swap or CBuffer hook.</summary>
+    /// <param name="highlightLayerIndex">For skin CT: only highlight this layer, others keep original color. -1 = all.</param>
     public unsafe void HighlightEmissiveColor(
         FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase,
-        TargetGroup group, Vector3 color)
+        TargetGroup group, Vector3 color, int highlightLayerIndex = -1)
     {
         if (textureSwap == null) return;
         if (string.IsNullOrEmpty(group.MtrlGamePath)) return;
 
         var mtrlDiskPath = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
+
+        // skin CT materials: build a CT where the target layer uses highlight color
+        // and all other layers keep their real emissive colors.
+        if (skinCtMaterials.ContainsKey(group.MtrlGamePath!))
+        {
+            var tempLayers = new List<DecalLayer>();
+            for (int i = 0; i < group.Layers.Count; i++)
+            {
+                var l = group.Layers[i];
+                if (!l.IsVisible || !l.AffectsEmissive || l.AllocatedRowPair < 0) continue;
+                bool isTarget = (highlightLayerIndex < 0 || highlightLayerIndex == i);
+                tempLayers.Add(new DecalLayer
+                {
+                    IsVisible = true, AffectsEmissive = true,
+                    AllocatedRowPair = l.AllocatedRowPair,
+                    EmissiveColor = isTarget ? color : l.EmissiveColor,
+                    EmissiveIntensity = isTarget ? 1f : l.EmissiveIntensity,
+                });
+            }
+            if (tempLayers.Count == 0) return;
+            var ctBytes = MtrlFileWriter.BuildSkinColorTablePerLayer(tempLayers);
+            var ctHalfs = System.Runtime.InteropServices.MemoryMarshal
+                .Cast<byte, Half>((ReadOnlySpan<byte>)ctBytes).ToArray();
+            textureSwap.ReplaceColorTableRaw(charBase, group.MtrlGamePath!, mtrlDiskPath, ctHalfs, 8, 32);
+            return;
+        }
+
         emissiveOffsets.TryGetValue(group.MtrlGamePath!, out var cbufOffset);
         textureSwap.UpdateEmissiveViaColorTable(charBase, group.MtrlGamePath!, mtrlDiskPath, color);
-        // Always set hook target for materials with known CBuffer offset (skin.shpk etc.)
         if (emissiveHook != null && cbufOffset > 0)
             emissiveHook.SetTargetByPath(charBase, group.MtrlGamePath!, mtrlDiskPath, color);
+    }
+
+    /// <summary>
+    /// Restore the real per-layer ColorTable after highlight override on skin CT materials.
+    /// Returns true if this group uses skin CT and the swap was attempted.
+    /// </summary>
+    public unsafe bool RestoreSkinCtAfterHighlight(
+        FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase, TargetGroup group)
+    {
+        if (textureSwap == null) return false;
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return false;
+        if (!skinCtMaterials.ContainsKey(group.MtrlGamePath!)) return false;
+
+        var ctBytes = MtrlFileWriter.BuildSkinColorTablePerLayer(group.Layers);
+        var ctHalfs = System.Runtime.InteropServices.MemoryMarshal
+            .Cast<byte, Half>((ReadOnlySpan<byte>)ctBytes).ToArray();
+        var mtrlDiskPath = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
+        textureSwap.ReplaceColorTableRaw(charBase, group.MtrlGamePath!, mtrlDiskPath, ctHalfs, 8, 32);
+        return true;
     }
 
     /// <summary>
@@ -658,6 +712,10 @@ public class PreviewService : IDisposable
     {
         var redirects = new Dictionary<string, string>();
 
+        // Deploy patched skin.shpk BEFORE processing groups so ProcessGroup
+        // can detect the patched shader and route to ColorTable path.
+        TryDeployPatchedSkinShpk(project, redirects);
+
         foreach (var group in project.Groups)
         {
             if (string.IsNullOrEmpty(group.DiffuseGamePath)) continue;
@@ -681,6 +739,7 @@ public class PreviewService : IDisposable
 
         penumbra.RedrawPlayer();
 
+        DebugServer.AppendLog($"[PreviewService] Registering {redirects.Count} redirect paths");
         foreach (var (gamePath, diskPath) in redirects)
         {
             initializedRedirects.TryAdd(gamePath, 0);
@@ -722,7 +781,7 @@ public class PreviewService : IDisposable
         var jobs = new List<(TargetGroup Group, string DiffuseGamePath, string? DiskPath,
             string? NormGamePath, string? NormDiskPath, string? MtrlGamePath, int EmissiveOffset,
             string? IndexGamePath, string? IndexDiskPath,
-            List<LayerSnapshot> Layers, Vector3 EmissiveColor)>();
+            List<LayerSnapshot> Layers, Vector3 EmissiveColor, bool IsSkinCt)>();
 
         foreach (var group in project.Groups)
         {
@@ -742,6 +801,10 @@ public class PreviewService : IDisposable
             if (!string.IsNullOrEmpty(indexGame))
                 previewDiskPaths.TryGetValue(indexGame, out indexDisk);
 
+            // skin.shpk ColorTable mode: set during Full Redraw when patched shader is active
+            bool isSkinCt = !string.IsNullOrEmpty(group.MtrlGamePath)
+                            && skinCtMaterials.ContainsKey(group.MtrlGamePath!);
+
             // Snapshot layer parameters so background thread reads stable data
             var snapshots = new List<LayerSnapshot>();
             foreach (var l in group.Layers)
@@ -752,7 +815,7 @@ public class PreviewService : IDisposable
                 group.MtrlGamePath, emOff,
                 indexGame, indexDisk,
                 snapshots,
-                GetCombinedEmissiveColor(group.Layers)));
+                GetCombinedEmissiveColor(group.Layers), isSkinCt));
         }
 
         Task.Run(() =>
@@ -850,10 +913,44 @@ public class PreviewService : IDisposable
                     bool hasPbrLayers = allocatedLayers.Count > 0;
                     bool ctQueued = false;
 
+                    // skin.shpk + patched ColorTable: build CT from scratch (no vanilla base),
+                    // composite row indices to normal.alpha, queue CT for GPU swap.
+                    if (job.IsSkinCt && hasPbrLayers && !string.IsNullOrEmpty(job.MtrlGamePath))
+                    {
+                        var skinCtBytes = MtrlFileWriter.BuildSkinColorTablePerLayer(layers);
+                        var skinCtHalfs = System.Runtime.InteropServices.MemoryMarshal
+                            .Cast<byte, Half>((ReadOnlySpan<byte>)skinCtBytes).ToArray();
+
+                        var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(job.MtrlGamePath!);
+                        ctEntries.Add(new ColorTableEntry(
+                            job.MtrlGamePath!, mtrlDisk, skinCtHalfs, 8, 32));
+                        lastBuiltColorTables[job.MtrlGamePath!] = (skinCtHalfs, 8, 32);
+                        ctQueued = true;
+
+                        // Normal map: row pair index in alpha channel
+                        if (!string.IsNullOrEmpty(job.NormGamePath) && !string.IsNullOrEmpty(job.NormDiskPath))
+                        {
+                            var normRgbaBuf = EnsureBuf(ref scratch.NormRgba, byteCount);
+                            var normRgba = CompositeRowIndexNorm(
+                                layers, job.NormDiskPath!, baseTex.Width, baseTex.Height,
+                                outputBuffer: normRgbaBuf);
+                            if (normRgba != null)
+                            {
+                                var normBgraBuf = EnsureBuf(ref scratch.NormBgra, byteCount);
+                                TextureSwapService.RgbaToBgra(normRgba, normBgraBuf, byteCount);
+                                previewDiskPaths.TryGetValue(job.NormGamePath ?? "", out var normDiskOut);
+                                if (flushFiles && normDiskOut != null)
+                                    WriteBgraTexFile(normDiskOut, normBgraBuf, byteCount, baseTex.Width, baseTex.Height);
+                                texEntries.Add(new SwapBatchEntry(
+                                    job.NormGamePath!, normDiskOut, normBgraBuf, baseTex.Width, baseTex.Height));
+                            }
+                        }
+                    }
+
                     // Index map: rewrite R = rowPair*17, G = weight*255 (per Penumbra
                     // MaterialExporter:136-137). Vanilla bytes are read from the staged
                     // disk path that ProcessGroup populated, then cloned + modified.
-                    if (hasPbrLayers && !string.IsNullOrEmpty(job.IndexGamePath) && !string.IsNullOrEmpty(job.IndexDiskPath))
+                    if (!job.IsSkinCt && hasPbrLayers && !string.IsNullOrEmpty(job.IndexGamePath) && !string.IsNullOrEmpty(job.IndexDiskPath))
                     {
                         var idxRgbaBuf = EnsureBuf(ref scratch.IdxRgba, byteCount);
                         var idxRgba = CompositeIndexMap(allocatedLayers, job.IndexDiskPath!,
@@ -869,7 +966,7 @@ public class PreviewService : IDisposable
                         }
                     }
 
-                    if (hasPbrLayers && !string.IsNullOrEmpty(job.MtrlGamePath)
+                    if (!job.IsSkinCt && hasPbrLayers && !string.IsNullOrEmpty(job.MtrlGamePath)
                         && vanillaColorTables.TryGetValue(job.MtrlGamePath!, out var vanilla)
                         && ColorTableBuilder.IsDawntrailLayout(vanilla.Width, vanilla.Height))
                     {
@@ -883,7 +980,7 @@ public class PreviewService : IDisposable
                     }
 
                     // Legacy emissive fallback path: only fires when no ColorTable entry was queued
-                    // (skin.shpk-class materials, or non-Dawntrail layouts).
+                    // (non-Dawntrail layouts or materials without patched skin.shpk).
                     bool hasVisibleEmissive = HasEmissiveLayers(job.Layers);
                     bool hadEmissiveState = !string.IsNullOrEmpty(job.MtrlGamePath) && job.EmissiveOffset > 0;
                     if (!ctQueued && (hasVisibleEmissive || hadEmissiveState) && !string.IsNullOrEmpty(job.NormDiskPath))
@@ -911,6 +1008,32 @@ public class PreviewService : IDisposable
                             var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(job.MtrlGamePath!);
                             emissiveOffsets.TryGetValue(job.MtrlGamePath!, out var emOff);
                             emEntries.Add(new EmissiveEntry(job.MtrlGamePath!, mtrlDisk, job.EmissiveColor, emOff));
+                        }
+                    }
+
+                    if (hasVisibleEmissive && !string.IsNullOrEmpty(job.MtrlGamePath) && job.MtrlGamePath!.Contains("_iri_"))
+                    {
+                        var irisMtrlDisk = job.Group.OrigMtrlDiskPath ?? job.Group.MtrlDiskPath;
+                        var maskGamePath = GetMaskGamePathFromMtrl(job.MtrlGamePath!, irisMtrlDisk);
+                        if (!string.IsNullOrEmpty(maskGamePath))
+                        {
+                            var maskTex = LoadGameTexture(maskGamePath);
+                            if (maskTex != null)
+                            {
+                                var (maskData, maskW, maskH) = maskTex.Value;
+                                var maskRgba = CompositeIrisMask(layers, maskData, maskW, maskH);
+                                if (maskRgba != null)
+                                {
+                                    int maskBytes = maskW * maskH * 4;
+                                    var maskBgra = EnsureBuf(ref scratch.MaskBgra, maskBytes);
+                                    TextureSwapService.RgbaToBgra(maskRgba, maskBgra, maskBytes);
+                                    previewDiskPaths.TryGetValue(maskGamePath, out var maskDiskOut);
+                                    if (flushFiles && maskDiskOut != null)
+                                        WriteBgraTexFile(maskDiskOut, maskBgra, maskBytes, maskW, maskH);
+                                    texEntries.Add(new SwapBatchEntry(
+                                        maskGamePath, maskDiskOut, maskBgra, maskW, maskH));
+                                }
+                            }
                         }
                     }
                 }
@@ -1143,6 +1266,46 @@ public class PreviewService : IDisposable
         }
     }
 
+    private string? GetMaskGamePathFromMtrl(string mtrlGamePath, string? mtrlDiskPath)
+    {
+        try
+        {
+            var mtrlDisk = mtrlDiskPath;
+            byte[]? mtrlBytes = null;
+            if (!string.IsNullOrEmpty(mtrlDisk) && File.Exists(mtrlDisk))
+                mtrlBytes = File.ReadAllBytes(mtrlDisk);
+            else
+            {
+                var pack = meshExtractor.GetSqPackInstance();
+                var sqResult = pack?.GetFile(mtrlGamePath);
+                if (sqResult != null) mtrlBytes = sqResult.Value.file.RawData.ToArray();
+            }
+            if (mtrlBytes == null) return null;
+
+            var tempPath = Path.Combine(outputDir, $"temp_mask_{Guid.NewGuid():N}.mtrl");
+            File.WriteAllBytes(tempPath, mtrlBytes);
+            var lumina = meshExtractor.GetLuminaForDisk();
+            var mtrl = lumina!.GetFileFromDisk<MtrlFile>(tempPath);
+            try { File.Delete(tempPath); } catch { }
+
+            int texIndex = -1;
+            foreach (var s in mtrl.Samplers)
+            {
+                if (s.SamplerId == MaskSamplerId) { texIndex = s.TextureIndex; break; }
+            }
+            if (texIndex < 0 || texIndex >= mtrl.TextureOffsets.Length) return null;
+
+            int strOffset = mtrl.TextureOffsets[texIndex].Offset;
+            int end = strOffset;
+            while (end < mtrl.Strings.Length && mtrl.Strings[end] != 0) end++;
+            return System.Text.Encoding.UTF8.GetString(mtrl.Strings, strOffset, end - strOffset);
+        }
+        catch { return null; }
+    }
+
+    private static bool IsIrisMaterial(TargetGroup group) =>
+        !string.IsNullOrEmpty(group.MtrlGamePath) && group.MtrlGamePath!.Contains("_iri_");
+
     /// <summary>
     /// Diagnostic snapshot for HTTP /api/debug/pbr  -- returns one entry per managed group
     /// describing allocator state and ColorTable cache hit/miss.
@@ -1332,11 +1495,17 @@ public class PreviewService : IDisposable
     /// the patched <c>g_EmissiveColor</c> stops being applied each frame.
     /// Use this when a layer's emissive is toggled off.
     /// </summary>
-    public void InvalidateEmissiveForGroup(TargetGroup group)
+    public unsafe void InvalidateEmissiveForGroup(TargetGroup group)
     {
-        // Always clear hook targets  -- cheap, idempotent, and prevents the
-        // last-written color from continuing to glow after the user disables emissive.
-        emissiveHook?.ClearTargets();
+        if (emissiveHook != null && !string.IsNullOrEmpty(group.MtrlGamePath))
+        {
+            var charBase = GetCharacterBase();
+            if (charBase != null)
+            {
+                var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
+                emissiveHook.ClearTargetByPath(charBase, group.MtrlGamePath!, mtrlDisk);
+            }
+        }
 
         if (string.IsNullOrEmpty(group.MtrlGamePath)) return;
 
@@ -1348,6 +1517,8 @@ public class PreviewService : IDisposable
             previewDiskPaths.TryRemove(group.MtrlGamePath!, out _);
             previewMtrlDiskPaths.TryRemove(group.MtrlGamePath!, out _);
             emissiveOffsets.TryRemove(group.MtrlGamePath!, out _);
+            // Keep skinCtMaterials — it persists until ResetSwapState so inplace
+            // composite still routes through the CT path after re-init.
         }
         if (!string.IsNullOrEmpty(group.NormGamePath))
         {
@@ -1372,6 +1543,7 @@ public class PreviewService : IDisposable
         lastBuiltColorTables.Clear();
         indexMapGamePaths.Clear();
         lastAppliedEmissive.Clear();
+        skinCtMaterials.Clear();
         lastGameSwapUtc = DateTime.MinValue;
         pendingIdleFlush = false;
         activeProject = null;
@@ -1422,24 +1594,70 @@ public class PreviewService : IDisposable
 
         if (hasEmissive && !string.IsNullOrEmpty(group.MtrlGamePath))
         {
-            var emissiveColor = GetCombinedEmissiveColor(visibleLayers);
-            var mtrlSource = group.OrigMtrlDiskPath ?? group.MtrlDiskPath ?? group.MtrlGamePath!;
-            var mtrlOut = StagingPathFor(stagingDir, group.MtrlGamePath!);
-            Directory.CreateDirectory(Path.GetDirectoryName(mtrlOut)!);
-            if (TryBuildEmissiveMtrl(mtrlSource, mtrlOut, emissiveColor, out _))
-            {
-                redirects[group.MtrlGamePath!] = ToForwardSlash(group.MtrlGamePath!);
-            }
+            bool isSkinMtrl = IsSkinMaterial(group);
 
-            // Emissive normal map (alpha mask)
-            if (!string.IsNullOrEmpty(group.NormGamePath) && !string.IsNullOrEmpty(group.NormDiskPath))
+            if (isSkinMtrl && patchedSkinShpkPath != null && File.Exists(patchedSkinShpkPath))
             {
-                var normSource = group.OrigNormDiskPath ?? group.NormDiskPath!;
-                var normResult = CompositeEmissiveNorm(visibleLayers, normSource, w, h);
-                if (normResult != null)
+                // skin.shpk + ColorTable export: per-layer emissive via embedded CT
+                var alloc = new RowPairAllocator();
+                alloc.ScanVanillaOccupation(new byte[] { 0, 0, 0, 0 }, 1, 1);
+                alloc.TryAllocate(); // reserve row 0
+                foreach (var layer in visibleLayers)
                 {
-                    var normOut = WriteStagingTex(stagingDir, group.NormGamePath!, normResult, w, h);
-                    redirects[group.NormGamePath!] = normOut;
+                    if (layer.AffectsEmissive)
+                        alloc.TryAllocate(layer);
+                }
+
+                var ctBytes = MtrlFileWriter.BuildSkinColorTablePerLayer(visibleLayers);
+                var emissiveColor = GetCombinedEmissiveColor(visibleLayers);
+                var mtrlSource = group.OrigMtrlDiskPath ?? group.MtrlDiskPath ?? group.MtrlGamePath!;
+                var mtrlOut = StagingPathFor(stagingDir, group.MtrlGamePath!);
+                Directory.CreateDirectory(Path.GetDirectoryName(mtrlOut)!);
+                if (TryBuildEmissiveMtrlWithColorTable(mtrlSource, mtrlOut, emissiveColor, ctBytes, out _))
+                {
+                    redirects[group.MtrlGamePath!] = ToForwardSlash(group.MtrlGamePath!);
+                }
+
+                // Normal map: row pair index in alpha channel
+                if (!string.IsNullOrEmpty(group.NormGamePath) && !string.IsNullOrEmpty(group.NormDiskPath))
+                {
+                    var normSource = group.OrigNormDiskPath ?? group.NormDiskPath!;
+                    var normResult = CompositeRowIndexNorm(visibleLayers, normSource, w, h);
+                    if (normResult != null)
+                    {
+                        var normOut = WriteStagingTex(stagingDir, group.NormGamePath!, normResult, w, h);
+                        redirects[group.NormGamePath!] = normOut;
+                    }
+                }
+
+                // Patched skin.shpk: copy to staging and include in redirects
+                var shpkOut = StagingPathFor(stagingDir, SkinShpkGamePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(shpkOut)!);
+                File.Copy(patchedSkinShpkPath, shpkOut, overwrite: true);
+                redirects[SkinShpkGamePath] = ToForwardSlash(SkinShpkGamePath);
+            }
+            else
+            {
+                // Legacy emissive export: uniform CBuffer color
+                var emissiveColor = GetCombinedEmissiveColor(visibleLayers);
+                var mtrlSource = group.OrigMtrlDiskPath ?? group.MtrlDiskPath ?? group.MtrlGamePath!;
+                var mtrlOut = StagingPathFor(stagingDir, group.MtrlGamePath!);
+                Directory.CreateDirectory(Path.GetDirectoryName(mtrlOut)!);
+                if (TryBuildEmissiveMtrl(mtrlSource, mtrlOut, emissiveColor, out _))
+                {
+                    redirects[group.MtrlGamePath!] = ToForwardSlash(group.MtrlGamePath!);
+                }
+
+                // Emissive normal map (alpha mask)
+                if (!string.IsNullOrEmpty(group.NormGamePath) && !string.IsNullOrEmpty(group.NormDiskPath))
+                {
+                    var normSource = group.OrigNormDiskPath ?? group.NormDiskPath!;
+                    var normResult = CompositeEmissiveNorm(visibleLayers, normSource, w, h);
+                    if (normResult != null)
+                    {
+                        var normOut = WriteStagingTex(stagingDir, group.NormGamePath!, normResult, w, h);
+                        redirects[group.NormGamePath!] = normOut;
+                    }
                 }
             }
         }
@@ -1513,7 +1731,7 @@ public class PreviewService : IDisposable
                 if (!string.IsNullOrEmpty(group.MtrlGamePath)
                     && !previewDiskPaths.ContainsKey(group.MtrlGamePath))
                 {
-                    LogCanSwapDeny($"PBR/emissive needs mtrl init: {group.MtrlGamePath}");
+                    LogCanSwapDeny($"PBR/emissive needs mtrl init: {group.MtrlGamePath} (diskPaths={previewDiskPaths.Count} initRedir={initializedRedirects.Count})");
                     CanSwapInPlace = false;
                     return false;
                 }
@@ -1639,71 +1857,159 @@ public class PreviewService : IDisposable
             redirects[group.DiffuseGamePath!] = path;
         }
 
-        // Emissive / PBR: modify .mtrl, write emissive into norm.a (skin.shpk legacy path),
-        // and mount index map for ColorTable PBR (character.shpk path).
-        // Only treat HasPbrLayers as needing mtrl modification when the material actually
-        // supports PBR (has g_SamplerIndex / ColorTable). skin.shpk materials have no
-        // ColorTable, so diffuse-only layers should NOT trigger mtrl shader key changes.
+        // Emissive / PBR: modify .mtrl, write emissive into norm.a, and mount ColorTable.
         var hasEmissive = group.HasEmissiveLayers();
         var hasPbr = group.HasPbrLayers() && MaterialSupportsPbr(group);
+        bool isSkinMtrl = IsSkinMaterial(group);
+        bool useSkinColorTable = hasEmissive && patchedSkinShpkPath != null && isSkinMtrl;
 
-        // Skip emissive mtrl/norm for incompatible materials (skin.shpk with
-        // non-standard ColorTable, e.g. Eve "pores"). The emissive shader
-        // variant is fundamentally incompatible with these materials.
-        if (hasEmissive && IsSkinShpkWithColorTable(group))
-            hasEmissive = false;
+        if (hasEmissive)
+        {
+            DebugServer.AppendLog($"[Emissive] {group.Name}: isSkin={isSkinMtrl} patchedShpk={patchedSkinShpkPath != null}" +
+                $" norm={!string.IsNullOrEmpty(group.NormGamePath)}/{!string.IsNullOrEmpty(group.NormDiskPath)}" +
+                $" mtrl={group.MtrlGamePath}");
+        }
+
+        if (useSkinColorTable)
+        {
+            skinCtMaterials[group.MtrlGamePath!] = 1;
+            DebugServer.AppendLog($"[SkinCT] Using ColorTable path for {group.Name}");
+        }
 
         if ((hasEmissive || hasPbr) && !string.IsNullOrEmpty(group.MtrlGamePath))
         {
-            var emissiveColor = GetCombinedEmissiveColor(group.Layers);
             var safeName = MakeSafeFileName(group.DiffuseGamePath!);
             var mtrlOutPath = Path.Combine(outputDir, $"preview_{safeName}.mtrl");
             var mtrlDisk = group.OrigMtrlDiskPath ?? group.MtrlDiskPath;
 
-            if (TryBuildEmissiveMtrl(mtrlDisk ?? group.MtrlGamePath!, mtrlOutPath, emissiveColor, out var emOffset))
+            if (useSkinColorTable)
             {
-                redirects[group.MtrlGamePath!] = mtrlOutPath;
-                previewMtrlDiskPaths[group.MtrlGamePath!] = mtrlOutPath;
-                if (emOffset >= 0)
-                    emissiveOffsets[group.MtrlGamePath!] = emOffset;
-            }
-
-            // Legacy emissive path: write emissive into normal map alpha (skin.shpk fallback)
-            if (hasEmissive && !string.IsNullOrEmpty(group.NormGamePath) && !string.IsNullOrEmpty(group.NormDiskPath))
-            {
-                var normDisk = group.OrigNormDiskPath ?? group.NormDiskPath;
-                var normResult = CompositeEmissiveNorm(group.Layers, normDisk!, w, h);
-                if (normResult != null)
+                // skin.shpk + patched shader: per-layer emissive via ColorTable rows.
+                // 1) Allocate row pairs for each emissive layer.
+                // Reserve row pair 0 as "default no emissive" — non-decal areas
+                // have normal.alpha=0 which maps to row 0, so it must stay black.
+                var alloc = GetOrCreateAllocator(group);
+                if (!alloc.Scanned)
                 {
-                    var normPath = Path.Combine(outputDir, $"preview_{safeName}_n.tex");
-                    WriteBgraTexFile(normPath, normResult, w, h);
-                    redirects[group.NormGamePath!] = normPath;
+                    alloc.ScanVanillaOccupation(new byte[] { 0, 0, 0, 0 }, 1, 1);
+                    alloc.TryAllocate(); // consume slot 0
+                }
+                foreach (var layer in group.Layers)
+                {
+                    if (layer.IsVisible && layer.AffectsEmissive && layer.AllocatedRowPair < 0)
+                        alloc.TryAllocate(layer);
+                }
+
+                // 2) Build per-layer ColorTable
+                var ctBytes = MtrlFileWriter.BuildSkinColorTablePerLayer(group.Layers);
+
+                // Diagnostic: dump row pair allocations and CT emissive values
+                foreach (var layer in group.Layers)
+                {
+                    if (layer.IsVisible && layer.AffectsEmissive)
+                        DebugServer.AppendLog($"[SkinCT] Layer '{layer.Name}' rowPair={layer.AllocatedRowPair} em=({layer.EmissiveColor.X:F2},{layer.EmissiveColor.Y:F2},{layer.EmissiveColor.Z:F2})*{layer.EmissiveIntensity:F1}");
+                }
+
+                // 3) Build emissive mtrl with embedded ColorTable
+                var emissiveColor = GetCombinedEmissiveColor(group.Layers);
+                var mtrlSource = mtrlDisk ?? group.MtrlGamePath!;
+                if (TryBuildEmissiveMtrlWithColorTable(
+                        mtrlSource, mtrlOutPath, emissiveColor, ctBytes, out var emOffset))
+                {
+                    redirects[group.MtrlGamePath!] = mtrlOutPath;
+                    previewMtrlDiskPaths[group.MtrlGamePath!] = mtrlOutPath;
+                    if (emOffset >= 0)
+                        emissiveOffsets[group.MtrlGamePath!] = emOffset;
+                    // Verify mtrl header
+                    try
+                    {
+                        var hdr = File.ReadAllBytes(mtrlOutPath);
+                        int dsz = hdr[6] | (hdr[7] << 8);
+                        int addlSz = hdr[15];
+                        int colCnt = hdr[14];
+                        DebugServer.AppendLog($"[SkinCT] Built CT mtrl for {group.Name}: dataSetSize={dsz} addlDataSize={addlSz} colorSetCount={colCnt} fileLen={hdr.Length}");
+                    }
+                    catch { DebugServer.AppendLog($"[SkinCT] Built CT mtrl for {group.Name}"); }
+                }
+                else
+                {
+                    DebugServer.AppendLog($"[SkinCT] FAILED to build CT mtrl for {group.Name} src={mtrlSource}");
+                }
+
+                // 4) Write row pair INDEX to normal.alpha (not emissive mask)
+                if (!string.IsNullOrEmpty(group.NormGamePath))
+                {
+                    var normDisk = group.OrigNormDiskPath ?? group.NormDiskPath ?? group.NormGamePath;
+                    var normResult = CompositeRowIndexNorm(group.Layers, normDisk!, w, h);
+                    if (normResult != null)
+                    {
+                        var normPath = Path.Combine(outputDir, $"preview_{safeName}_n.tex");
+                        WriteBgraTexFile(normPath, normResult, w, h);
+                        redirects[group.NormGamePath!] = normPath;
+                    }
                 }
             }
-
-            // v1 PBR (character.shpk path): mount index map (g_SamplerIndex 0x565F8FD8).
-            // First Full Redraw writes a passthrough vanilla copy; subsequent inplace updates
-            // overwrite it via CompositeIndexMap with row pair + weight in R/G channels.
-            if (hasPbr)
+            else
             {
-                var indexGamePath = GetIndexMapGamePath(group);
-                if (!string.IsNullOrEmpty(indexGamePath))
+                // Original paths: legacy emissive (CBuffer) + character.shpk PBR
+                var emissiveColor = GetCombinedEmissiveColor(group.Layers);
+
+                if (TryBuildEmissiveMtrl(mtrlDisk ?? group.MtrlGamePath!, mtrlOutPath, emissiveColor, out var emOffset))
                 {
-                    var indexImg = LoadGameTexture(indexGamePath);
-                    if (indexImg != null)
+                    redirects[group.MtrlGamePath!] = mtrlOutPath;
+                    previewMtrlDiskPaths[group.MtrlGamePath!] = mtrlOutPath;
+                    if (emOffset >= 0)
+                        emissiveOffsets[group.MtrlGamePath!] = emOffset;
+                }
+
+                if (hasEmissive && !string.IsNullOrEmpty(group.NormGamePath))
+                {
+                    var normDisk = group.OrigNormDiskPath ?? group.NormDiskPath ?? group.NormGamePath;
+                    var normResult = CompositeEmissiveNorm(group.Layers, normDisk!, w, h);
+                    if (normResult != null)
                     {
-                        var (data, iw, ih) = indexImg.Value;
-                        var indexClone = (byte[])data.Clone();
-                        var indexPath = Path.Combine(outputDir, $"preview_{safeName}_id.tex");
-                        WriteBgraTexFile(indexPath, indexClone, iw, ih);
-                        redirects[indexGamePath] = indexPath;
-                        // Cache vanilla index bytes by the staged disk path so the background
-                        // composite can read them back as the baseline for CompositeIndexMap.
-                        baseTextureCache[indexPath] = (data, iw, ih);
+                        var normPath = Path.Combine(outputDir, $"preview_{safeName}_n.tex");
+                        WriteBgraTexFile(normPath, normResult, w, h);
+                        redirects[group.NormGamePath!] = normPath;
                     }
-                    else
+                }
+
+                if (hasEmissive && IsIrisMaterial(group))
+                {
+                    var irisMtrlDisk = group.OrigMtrlDiskPath ?? group.MtrlDiskPath;
+                    var maskGamePath = GetMaskGamePathFromMtrl(group.MtrlGamePath!, irisMtrlDisk);
+                    if (!string.IsNullOrEmpty(maskGamePath))
                     {
-                        DebugServer.AppendLog($"[PBR] Failed to load vanilla index map: {indexGamePath}");
+                        var maskTex = LoadGameTexture(maskGamePath);
+                        if (maskTex != null)
+                        {
+                            var (maskData, mw, mh) = maskTex.Value;
+                            var maskPatched = CompositeIrisMask(group.Layers, maskData, mw, mh);
+                            if (maskPatched != null)
+                            {
+                                var maskPath = Path.Combine(outputDir, $"preview_{safeName}_mask.tex");
+                                WriteBgraTexFile(maskPath, maskPatched, mw, mh);
+                                redirects[maskGamePath] = maskPath;
+                            }
+                        }
+                    }
+                }
+
+                if (hasPbr)
+                {
+                    var indexGamePath = GetIndexMapGamePath(group);
+                    if (!string.IsNullOrEmpty(indexGamePath))
+                    {
+                        var indexImg = LoadGameTexture(indexGamePath);
+                        if (indexImg != null)
+                        {
+                            var (data, iw, ih) = indexImg.Value;
+                            var indexClone = (byte[])data.Clone();
+                            var indexPath = Path.Combine(outputDir, $"preview_{safeName}_id.tex");
+                            WriteBgraTexFile(indexPath, indexClone, iw, ih);
+                            redirects[indexGamePath] = indexPath;
+                            baseTextureCache[indexPath] = (data, iw, ih);
+                        }
                     }
                 }
             }
@@ -1855,6 +2161,217 @@ public class PreviewService : IDisposable
     }
 
     /// <summary>
+    /// Write row pair index to normal.alpha for skin.shpk ColorTable mode.
+    /// Each emissive layer paints its allocated row pair index (0-15 → 0,17,...255)
+    /// into the normal map alpha channel. Non-covered pixels stay at 0 (row 0).
+    /// </summary>
+    private byte[]? CompositeRowIndexNorm(List<DecalLayer> layers, string normDiskPath, int w, int h,
+        byte[]? outputBuffer = null)
+    {
+        int needLen = w * h * 4;
+        var output = outputBuffer != null && outputBuffer.Length >= needLen
+            ? outputBuffer
+            : new byte[needLen];
+
+        byte[]? cachedBytes = null;
+        int cachedW = 0, cachedH = 0;
+        if (baseTextureCache.TryGetValue(normDiskPath, out var cachedNorm))
+            (cachedBytes, cachedW, cachedH) = cachedNorm;
+        else
+        {
+            var normImg = File.Exists(normDiskPath) ? imageLoader.LoadImage(normDiskPath) : LoadGameTexture(normDiskPath);
+            if (normImg != null)
+            {
+                baseTextureCache[normDiskPath] = normImg.Value;
+                (cachedBytes, cachedW, cachedH) = normImg.Value;
+            }
+        }
+
+        if (cachedBytes == null)
+            Array.Clear(output, 0, needLen);
+        else if (cachedW != w || cachedH != h)
+            Buffer.BlockCopy(ResizeBilinear(cachedBytes, cachedW, cachedH, w, h), 0, output, 0, needLen);
+        else
+            Buffer.BlockCopy(cachedBytes, 0, output, 0, needLen);
+
+        // Zero alpha everywhere first (row 0 = default, no emissive)
+        for (int i = 3; i < needLen; i += 4)
+            output[i] = 0;
+
+        bool anyPainted = false;
+        foreach (var layer in layers)
+        {
+            if (!layer.IsVisible || !layer.AffectsEmissive || layer.AllocatedRowPair < 0) continue;
+            if (string.IsNullOrEmpty(layer.ImagePath)) continue;
+
+            var decalImage = imageLoader.LoadImage(layer.ImagePath);
+            if (decalImage == null) continue;
+
+            byte rowByte = (byte)Math.Clamp(layer.AllocatedRowPair * 17, 0, 255);
+            var (decalData, decalW, decalH) = decalImage.Value;
+            var center = layer.UvCenter;
+            var scale = layer.UvScale;
+            var opacity = layer.Opacity;
+            var rotRad = layer.RotationDeg * (MathF.PI / 180f);
+            var cosR = MathF.Cos(rotRad);
+            var sinR = MathF.Sin(rotRad);
+
+            int pxMin = Math.Max(0, (int)((center.X - scale.X / 2f) * w));
+            int pxMax = Math.Min(w - 1, (int)((center.X + scale.X / 2f) * w));
+            int pyMin = Math.Max(0, (int)((center.Y - scale.Y / 2f) * h));
+            int pyMax = Math.Min(h - 1, (int)((center.Y + scale.Y / 2f) * h));
+
+            var layerLocal = layer;
+            var rowByteLocal = rowByte;
+            ParallelRows(pyMin, pyMax, py =>
+            {
+                for (int px = pxMin; px <= pxMax; px++)
+                {
+                    float u = (px + 0.5f) / w;
+                    float v = (py + 0.5f) / h;
+                    float lu = (u - center.X) / scale.X;
+                    float lv = (v - center.Y) / scale.Y;
+                    float ru = lu * cosR + lv * sinR;
+                    float rv = -lu * sinR + lv * cosR;
+                    if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
+                    switch (layerLocal.Clip)
+                    {
+                        case ClipMode.ClipLeft when ru < 0f: continue;
+                        case ClipMode.ClipRight when ru >= 0f: continue;
+                        case ClipMode.ClipTop when rv < 0f: continue;
+                        case ClipMode.ClipBottom when rv >= 0f: continue;
+                    }
+
+                    float du = (ru + 0.5f) * decalW - 0.5f;
+                    float dv = (rv + 0.5f) * decalH - 0.5f;
+                    SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
+                    da *= opacity;
+                    if (da < 0.001f) continue;
+
+                    // Fade mask controls emissive coverage boundary shape.
+                    // Row index is discrete so we can't do smooth alpha gradients,
+                    // but the fade mask determines WHERE the boundary falls.
+                    float maskValue;
+                    if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
+                        maskValue = ComputeDirectionalGradient(ru, rv, da,
+                            layerLocal.GradientAngleDeg, layerLocal.GradientScale, layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
+                    else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
+                    {
+                        float sum = 0; int cnt = 0;
+                        for (int dy = -1; dy <= 1; dy++)
+                            for (int dx = -1; dx <= 1; dx++)
+                            {
+                                if (dx == 0 && dy == 0) continue;
+                                float ndu = du + dx; float ndv = dv + dy;
+                                SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
+                                sum += na * opacity; cnt++;
+                            }
+                        maskValue = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
+                    }
+                    else
+                        maskValue = ComputeFadeMaskWeight(layerLocal.FadeMask, layerLocal.FadeMaskFalloff, ru, rv, da);
+
+                    if (maskValue < 0.5f) continue;
+
+                    output[(py * w + px) * 4 + 3] = rowByteLocal;
+                }
+            });
+            anyPainted = true;
+        }
+
+        // Diagnostic removed (was per-frame spam)
+        return anyPainted ? output : null;
+    }
+
+    private byte[]? CompositeIrisMask(List<DecalLayer> layers, byte[] maskData, int mw, int mh)
+    {
+        var output = (byte[])maskData.Clone();
+        int len = mw * mh * 4;
+
+        for (int i = 0; i < len; i += 4)
+            output[i] = 0;
+
+        bool any = false;
+        foreach (var layer in layers)
+        {
+            if (!layer.IsVisible || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
+
+            var decalImage = imageLoader.LoadImage(layer.ImagePath);
+            if (decalImage == null) continue;
+
+            var (decalData, decalW, decalH) = decalImage.Value;
+            var center = layer.UvCenter;
+            var scale = layer.UvScale;
+            var opacity = layer.Opacity;
+            var rotRad = layer.RotationDeg * (MathF.PI / 180f);
+            var cosR = MathF.Cos(rotRad);
+            var sinR = MathF.Sin(rotRad);
+
+            int pxMin = Math.Max(0, (int)((center.X - scale.X / 2f) * mw));
+            int pxMax = Math.Min(mw - 1, (int)((center.X + scale.X / 2f) * mw));
+            int pyMin = Math.Max(0, (int)((center.Y - scale.Y / 2f) * mh));
+            int pyMax = Math.Min(mh - 1, (int)((center.Y + scale.Y / 2f) * mh));
+
+            var layerLocal = layer;
+            ParallelRows(pyMin, pyMax, py =>
+            {
+                for (int px = pxMin; px <= pxMax; px++)
+                {
+                    float u = (px + 0.5f) / mw;
+                    float v = (py + 0.5f) / mh;
+                    float lu = (u - center.X) / scale.X;
+                    float lv = (v - center.Y) / scale.Y;
+                    float ru = lu * cosR + lv * sinR;
+                    float rv = -lu * sinR + lv * cosR;
+                    if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
+                    switch (layerLocal.Clip)
+                    {
+                        case ClipMode.ClipLeft when ru < 0f: continue;
+                        case ClipMode.ClipRight when ru >= 0f: continue;
+                        case ClipMode.ClipTop when rv < 0f: continue;
+                        case ClipMode.ClipBottom when rv >= 0f: continue;
+                    }
+
+                    float du = (ru + 0.5f) * decalW - 0.5f;
+                    float dv = (rv + 0.5f) * decalH - 0.5f;
+                    SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
+                    da *= opacity;
+                    if (da < 0.001f) continue;
+
+                    float maskValue;
+                    if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
+                        maskValue = ComputeDirectionalGradient(ru, rv, da,
+                            layerLocal.GradientAngleDeg, layerLocal.GradientScale, layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
+                    else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
+                    {
+                        float sum = 0; int cnt = 0;
+                        for (int dy = -1; dy <= 1; dy++)
+                            for (int dx = -1; dx <= 1; dx++)
+                            {
+                                if (dx == 0 && dy == 0) continue;
+                                float ndu = du + dx; float ndv = dv + dy;
+                                SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
+                                sum += na * opacity; cnt++;
+                            }
+                        maskValue = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
+                    }
+                    else
+                        maskValue = ComputeFadeMaskWeight(layerLocal.FadeMask, layerLocal.FadeMaskFalloff, ru, rv, da);
+
+                    int oIdx = (py * mw + px) * 4;
+                    byte irisBlue = output[oIdx + 2];
+                    byte emByte = (byte)Math.Clamp((int)(maskValue * (irisBlue / 255f) * 255), 0, 255);
+                    output[oIdx] = (byte)Math.Max(output[oIdx], emByte);
+                }
+            });
+
+            any = true;
+        }
+
+        return any ? output : null;
+    }
+
+    /// <summary>
     /// v1 PBR index map rewrite: per Penumbra MaterialExporter:136-137, character.shpk
     /// shaders read `tablePair = round(g_SamplerIndex.r / 17)` and `rowBlend = 1 - g/255`,
     /// then `lerp(table[tablePair*2], table[tablePair*2+1], rowBlend)`. We write:
@@ -2001,6 +2518,44 @@ public class PreviewService : IDisposable
         return color;
     }
 
+    /// <summary>Get combined emissive color for all visible emissive layers in a group.</summary>
+    public Vector3 GetCombinedEmissiveColorForGroup(TargetGroup group) =>
+        GetCombinedEmissiveColor(group.Layers);
+
+    private bool TryBuildEmissiveMtrlWithColorTable(string mtrlPath, string outputPath,
+        Vector3 emissiveColor, byte[] colorTableBytes, out int emissiveByteOffset)
+    {
+        emissiveByteOffset = -1;
+        try
+        {
+            byte[] mtrlBytes;
+            if (File.Exists(mtrlPath))
+                mtrlBytes = File.ReadAllBytes(mtrlPath);
+            else
+            {
+                var pack = meshExtractor.GetSqPackInstance();
+                if (pack == null) return false;
+                var sqResult = pack.GetFile(mtrlPath);
+                if (sqResult == null) return false;
+                mtrlBytes = sqResult.Value.file.RawData.ToArray();
+            }
+
+            var tempPath = Path.Combine(outputDir, $"temp_{Guid.NewGuid():N}.mtrl");
+            File.WriteAllBytes(tempPath, mtrlBytes);
+            var lumina = meshExtractor.GetLuminaForDisk();
+            var mtrl = lumina!.GetFileFromDisk<MtrlFile>(tempPath);
+            try { File.Delete(tempPath); } catch { }
+
+            return MtrlFileWriter.WriteEmissiveMtrlWithColorTable(
+                mtrl, mtrlBytes, outputPath, emissiveColor, colorTableBytes, out emissiveByteOffset);
+        }
+        catch (Exception ex)
+        {
+            DebugServer.AppendLog($"[PreviewService] EmissiveMtrl+CT error: {ex.Message}");
+            return false;
+        }
+    }
+
     private bool TryBuildEmissiveMtrl(string mtrlPath, string outputPath, Vector3 emissiveColor, out int emissiveByteOffset)
     {
         emissiveByteOffset = -1;
@@ -2036,6 +2591,148 @@ public class PreviewService : IDisposable
             DebugServer.AppendLog($"[PreviewService] Emissive mtrl build failed: {ex.Message}");
             return false;
         }
+    }
+
+    private bool IsSkinMaterial(TargetGroup group)
+    {
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return false;
+        var disk = group.OrigMtrlDiskPath ?? group.MtrlDiskPath;
+
+        byte[]? bytes = null;
+        if (!string.IsNullOrEmpty(disk) && File.Exists(disk))
+        {
+            try { bytes = File.ReadAllBytes(disk); } catch { }
+        }
+        if (bytes == null)
+        {
+            try
+            {
+                var pack = meshExtractor.GetSqPackInstance();
+                var sqResult = pack?.GetFile(group.MtrlGamePath!);
+                if (sqResult != null)
+                    bytes = sqResult.Value.file.RawData.ToArray();
+            }
+            catch { }
+        }
+        if (bytes == null || bytes.Length < 16) return false;
+
+        try
+        {
+            int shpkOff = bytes[10] | (bytes[11] << 8);
+            int texC = bytes[12]; int uvC = bytes[13]; int colC = bytes[14];
+            int strStart = 16 + texC * 4 + uvC * 4 + colC * 4;
+            int nameStart = strStart + shpkOff;
+            if (nameStart >= bytes.Length) return false;
+            int end = nameStart;
+            while (end < bytes.Length && bytes[end] != 0) end++;
+            return System.Text.Encoding.UTF8.GetString(bytes, nameStart, end - nameStart) == "skin.shpk";
+        }
+        catch { return false; }
+    }
+
+    // Rename approach: the patched shpk is deployed under a NEW game path so the engine
+    // sees a cache miss on first load and routes through Penumbra's redirect. The vanilla
+    // skin.shpk stays put (other non-emissive skin mtrls still reference it unchanged).
+    private const string SkinShpkGamePath = "shader/sm5/shpk/skin_ct.shpk";
+    private const string VanillaSkinShpkGamePath = "shader/sm5/shpk/skin.shpk";
+    private string? patchedSkinShpkPath;
+    private bool skinShpkConflictChecked;
+    private bool shpkNodeDumped;
+
+    /// <summary>
+    /// Non-null when another Penumbra mod redirects skin.shpk before our temp mod.
+    /// UI should display this as a warning to the user.
+    /// </summary>
+    public string? SkinShpkModConflict { get; private set; }
+
+    /// <summary>
+    /// If any group uses emissive, deploy the patched skin.shpk that supports ColorTable sampling.
+    /// The patched shader replaces the emissive calculation: instead of a uniform CBuffer color,
+    /// it reads per-row emissive RGB from g_SamplerTable (t10) bound to the ColorTable texture.
+    /// </summary>
+    private void TryDeployPatchedSkinShpk(DecalProject project, Dictionary<string, string> redirects)
+    {
+        bool hasEmissive = false;
+        foreach (var group in project.Groups)
+        {
+            if (group.HasEmissiveLayers()) { hasEmissive = true; break; }
+        }
+        if (!hasEmissive) return;
+
+        // One-shot conflict check: before our first redirect, see if another mod
+        // already replaces skin.shpk. Our temp mod (priority 99) will override it,
+        // but warn the user that the other mod's skin.shpk changes are being replaced.
+        if (!skinShpkConflictChecked)
+        {
+            skinShpkConflictChecked = true;
+            try
+            {
+                var resolved = penumbra.ResolvePlayer(VanillaSkinShpkGamePath);
+                if (!string.IsNullOrEmpty(resolved)
+                    && !resolved.Equals(VanillaSkinShpkGamePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    SkinShpkModConflict = resolved;
+                    DebugServer.AppendLog($"[ShpkPatch] Conflict: vanilla skin.shpk redirected by another mod -> {resolved}");
+                }
+            }
+            catch { }
+        }
+
+        if (patchedSkinShpkPath == null || !File.Exists(patchedSkinShpkPath))
+        {
+            var candidate = Path.Combine(outputDir, "skin_ct.shpk");
+            if (!File.Exists(candidate))
+            {
+                // Runtime patch: read vanilla skin.shpk from SqPack and patch in memory
+                try
+                {
+                    var pack = meshExtractor.GetSqPackInstance();
+                    var sqResult = pack?.GetFile(VanillaSkinShpkGamePath);
+                    if (sqResult == null)
+                    {
+                        DebugServer.AppendLog("[ShpkPatch] Cannot read vanilla skin.shpk from SqPack");
+                        return;
+                    }
+                    var vanillaBytes = sqResult.Value.file.RawData.ToArray();
+                    var patched = SkinShpkPatcher.Patch(vanillaBytes);
+                    if (patched == null)
+                    {
+                        DebugServer.AppendLog("[ShpkPatch] Runtime patching failed");
+                        return;
+                    }
+                    File.WriteAllBytes(candidate, patched);
+                    DebugServer.AppendLog($"[ShpkPatch] Runtime-patched skin.shpk ({vanillaBytes.Length} -> {patched.Length} bytes)");
+                }
+                catch (Exception ex)
+                {
+                    DebugServer.AppendLog($"[ShpkPatch] Runtime patch failed: {ex.Message}");
+                    return;
+                }
+            }
+            patchedSkinShpkPath = candidate;
+        }
+
+        redirects[SkinShpkGamePath] = patchedSkinShpkPath;
+        DebugServer.AppendLog("[ShpkPatch] Deployed patched skin.shpk for ColorTable emissive");
+
+        // One-shot NodeSelector dump: parse the patched skin.shpk so we can see if
+        // (ValueEmissive, ValueDecalEmissive, ValueVertexColorEmissive) routes to PS[19].
+        // Runs even if the file was cached from a prior session.
+        if (!shpkNodeDumped)
+        {
+            shpkNodeDumped = true;
+            try
+            {
+                var bytes = File.ReadAllBytes(patchedSkinShpkPath);
+                SkinShpkPatcher.DumpFromBytes(bytes);
+            }
+            catch (Exception ex) { DebugServer.AppendLog($"[ShpkPatch] Dump failed: {ex.Message}"); }
+        }
+
+        // Ensure EmissiveCBufferHook is enabled so skin-family materials flow through
+        // the detour for one-shot ShaderPackage diagnostics (even if no CBuffer target
+        // is registered — skin CT materials skip SetTargetByPath entirely).
+        emissiveHook?.EnableForDiagnostics();
     }
 
     /// <summary>
@@ -2214,6 +2911,40 @@ public class PreviewService : IDisposable
                     da *= opacity;
 
                     if (da < 0.001f) continue;
+
+                    // Emissive layers: cut the diffuse at the same maskValue >= 0.5 boundary
+                    // that the normal.a row-index composite uses. Without this, the decal's
+                    // soft diffuse fade extends beyond where emissive reaches and the raw
+                    // decal color becomes a visible outline — especially on low-resolution
+                    // face textures (512x512) where the fade spans multiple screen pixels.
+                    if (layerLocal.AffectsEmissive && layerLocal.AllocatedRowPair >= 0)
+                    {
+                        float mv;
+                        if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
+                        {
+                            mv = ComputeDirectionalGradient(ru, rv, da,
+                                layerLocal.GradientAngleDeg, layerLocal.GradientScale,
+                                layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
+                        }
+                        else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
+                        {
+                            float sum = 0; int cnt = 0;
+                            for (int dy = -1; dy <= 1; dy++)
+                                for (int dx = -1; dx <= 1; dx++)
+                                {
+                                    if (dx == 0 && dy == 0) continue;
+                                    float ndu = du + dx; float ndv = dv + dy;
+                                    SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
+                                    sum += na * opacity; cnt++;
+                                }
+                            mv = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
+                        }
+                        else
+                        {
+                            mv = ComputeFadeMaskWeight(layerLocal.FadeMask, layerLocal.FadeMaskFalloff, ru, rv, da);
+                        }
+                        if (mv < 0.5f) continue;
+                    }
 
                     int oIdx = (py * w + px) * 4;
                     float br = output[oIdx] / 255f;

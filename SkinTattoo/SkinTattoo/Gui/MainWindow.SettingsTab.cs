@@ -42,6 +42,20 @@ public partial class MainWindow
             ImGui.SetTooltip("全局启用或禁用插件的贴花效果。\n关闭后会还原所有贴图到原始状态。");
 
         ImGui.Spacing();
+
+        // skin.shpk mod conflict warning
+        var shpkConflict = previewService.SkinShpkModConflict;
+        if (!string.IsNullOrEmpty(shpkConflict))
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
+            ImGui.TextWrapped("检测到其他 Mod 修改了 skin.shpk：");
+            ImGui.PopStyleColor();
+            ImGui.TextWrapped(shpkConflict);
+            ImGui.TextWrapped("启用发光时，本插件的 skin.shpk 会覆盖该 Mod 的着色器。" +
+                "如果出现渲染异常，请在 Penumbra 中禁用冲突 Mod。");
+            ImGui.Spacing();
+        }
+
         ImGui.Separator();
         ImGui.Spacing();
 

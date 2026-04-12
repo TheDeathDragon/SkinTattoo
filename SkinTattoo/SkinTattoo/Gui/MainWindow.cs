@@ -81,9 +81,6 @@ public partial class MainWindow : Window, IDisposable
     private const double PreviewMaxWaitFullSec = 1.5;
     private const double GpuPreviewMinIntervalMs = 33;
 
-    // v1 PBR: row pair exhaustion toast
-    private string? rowPairToast;
-    private DateTime rowPairToastUntil;
 
     private static readonly string[] BlendModeNames = ["正常", "正片叠底", "滤色", "叠加", "柔光", "强光", "变暗", "变亮", "颜色减淡", "颜色加深", "差值", "排除"];
     private static readonly BlendMode[] BlendModeValues = [BlendMode.Normal, BlendMode.Multiply, BlendMode.Screen, BlendMode.Overlay, BlendMode.SoftLight, BlendMode.HardLight, BlendMode.Darken, BlendMode.Lighten, BlendMode.ColorDodge, BlendMode.ColorBurn, BlendMode.Difference, BlendMode.Exclusion];
@@ -93,7 +90,6 @@ public partial class MainWindow : Window, IDisposable
     public DebugWindow? DebugWindowRef { get; set; }
     public ModelEditorWindow? ModelEditorWindowRef { get; set; }
     public ModExportWindow? ModExportWindowRef { get; set; }
-    public PbrInspectorWindow? PbrInspectorWindowRef { get; set; }
 
     public Func<Task>? InitializeRequested { get; set; }
 
@@ -221,29 +217,6 @@ public partial class MainWindow : Window, IDisposable
             ImGui.EndTabBar();
         }
 
-        // v1 PBR: row pair toast
-        if (rowPairToast != null)
-        {
-            if (DateTime.UtcNow < rowPairToastUntil)
-            {
-                var vp = ImGui.GetMainViewport();
-                ImGui.SetNextWindowPos(
-                    vp.WorkPos + new Vector2(vp.WorkSize.X * 0.5f, 80),
-                    ImGuiCond.Always, new Vector2(0.5f, 0f));
-                if (ImGui.Begin("##rowPairToast",
-                    ImGuiWindowFlags.NoDecoration | ImGuiWindowFlags.AlwaysAutoResize
-                    | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoNav
-                    | ImGuiWindowFlags.NoSavedSettings))
-                {
-                    ImGui.TextColored(new Vector4(1f, 0.7f, 0.2f, 1f), rowPairToast);
-                }
-                ImGui.End();
-            }
-            else
-            {
-                rowPairToast = null;
-            }
-        }
     }
 
     // ── Highlight ──────────────────────────────────────────────────────────
@@ -263,28 +236,31 @@ public partial class MainWindow : Window, IDisposable
         var hue = (t % HighlightCycleSteps) / (float)HighlightCycleSteps;
         var intensity = 1.0f + 1.0f * MathF.Sin(t * 0.03f);
         var color = TextureSwapService.HsvToRgb(hue, 1f, 1f) * intensity;
-        HighlightEmissive(color, group);
+        HighlightEmissive(color, group, highlightLayerIndex);
     }
 
-    private unsafe void HighlightEmissive(Vector3 color, TargetGroup? targetGroup = null)
+    private unsafe void HighlightEmissive(Vector3 color, TargetGroup? targetGroup = null, int layerIndex = -1)
     {
         var group = targetGroup ?? project.SelectedGroup;
         if (group == null || string.IsNullOrEmpty(group.MtrlGamePath)) return;
         var charBase = previewService.GetCharacterBase();
         if (charBase == null) return;
-        previewService.HighlightEmissiveColor(charBase, group, color);
+        previewService.HighlightEmissiveColor(charBase, group, color, layerIndex);
     }
 
     private unsafe void RestoreEmissiveAfterHighlight(TargetGroup group)
     {
+        var charBase = previewService.GetCharacterBase();
+        if (charBase == null) return;
+
         if (!group.HasEmissiveLayers())
         {
-            var charBase = previewService.GetCharacterBase();
-            if (charBase != null)
-                previewService.HighlightEmissiveColor(charBase, group, Vector3.Zero);
+            previewService.HighlightEmissiveColor(charBase, group, Vector3.Zero);
             return;
         }
-        TryDirectEmissiveUpdate(group, group.Layers.Find(l => l.IsVisible && l.AffectsEmissive)!);
+
+        // skin CT: rebuild per-layer CT; legacy: set CBuffer color
+        TryDirectEmissiveUpdate(group);
     }
 
     // ── Loading overlay ──────────────────────────────────────────────────────
@@ -388,14 +364,6 @@ public partial class MainWindow : Window, IDisposable
                 ModelEditorWindowRef.IsOpen = !ModelEditorWindowRef.IsOpen;
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("3D 贴花编辑器");
-
-        ImGui.SameLine();
-        if (ImGuiComponents.IconButton(11, FontAwesomeIcon.LayerGroup))
-        {
-            if (PbrInspectorWindowRef != null)
-                PbrInspectorWindowRef.IsOpen = !PbrInspectorWindowRef.IsOpen;
-        }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("PBR 通道查看器");
 
         ImGui.SameLine();
         using (ImRaii.Disabled(project.SelectedLayer == null))
@@ -738,13 +706,21 @@ public partial class MainWindow : Window, IDisposable
             forceImmediatePreview = true;
     }
 
-    private unsafe void TryDirectEmissiveUpdate(TargetGroup group, DecalLayer layer)
+    private unsafe void TryDirectEmissiveUpdate(TargetGroup group)
     {
         if (string.IsNullOrEmpty(group.DiffuseGamePath))
             return;
         var charBase = previewService.GetCharacterBase();
         if (charBase == null) return;
-        var color = layer.EmissiveColor * layer.EmissiveIntensity;
+
+        // skin CT: rebuild per-layer CT from current layer state.
+        // Do NOT fall through to HighlightEmissiveColor — it would overwrite
+        // per-layer colors with a single combined color.
+        if (previewService.RestoreSkinCtAfterHighlight(charBase, group))
+            return;
+
+        // Legacy path: set combined emissive via CBuffer
+        var color = previewService.GetCombinedEmissiveColorForGroup(group);
         previewService.HighlightEmissiveColor(charBase, group, color);
     }
 

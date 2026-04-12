@@ -42,7 +42,6 @@ public sealed class Plugin : IDalamudPlugin
     private readonly DebugWindow debugWindow;
     private readonly ModelEditorWindow modelEditorWindow;
     private readonly ModExportWindow modExportWindow;
-    private readonly PbrInspectorWindow pbrInspectorWindow;
 
     private DateTime lastAutoSave = DateTime.MinValue;
     private const double AutoSaveIntervalSec = 30.0;
@@ -86,12 +85,10 @@ public sealed class Plugin : IDalamudPlugin
         modelEditorWindow = new ModelEditorWindow(project, previewService, penumbra, skinMeshResolver, pluginInterface.UiBuilder.DeviceHandle);
 
         modExportWindow = new ModExportWindow(project, modExportService, config);
-        pbrInspectorWindow = new PbrInspectorWindow(project, previewService, textureProvider);
 
         mainWindow.DebugWindowRef = debugWindow;
         mainWindow.ModelEditorWindowRef = modelEditorWindow;
         mainWindow.ModExportWindowRef = modExportWindow;
-        mainWindow.PbrInspectorWindowRef = pbrInspectorWindow;
         mainWindow.InitializeRequested = InitializeProjectPreview;
 
         debugServer = new DebugServer(config, project, penumbra, previewService, dataManager, modExportService, skinMeshResolver, textureSwap);
@@ -103,7 +100,6 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem.AddWindow(debugWindow);
         windowSystem.AddWindow(modelEditorWindow);
         windowSystem.AddWindow(modExportWindow);
-        windowSystem.AddWindow(pbrInspectorWindow);
 
         pluginInterface.UiBuilder.Draw += DrawUi;
         pluginInterface.UiBuilder.OpenConfigUi += OpenConfigUi;

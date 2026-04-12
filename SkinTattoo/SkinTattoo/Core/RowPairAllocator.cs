@@ -58,6 +58,15 @@ public class RowPairAllocator
         return null;
     }
 
+    public bool TryAllocate(DecalLayer layer)
+    {
+        if (layer.AllocatedRowPair >= 0) return true;
+        var slot = TryAllocate();
+        if (slot == null) return false;
+        layer.AllocatedRowPair = slot.Value;
+        return true;
+    }
+
     public void Release(int rowPair)
     {
         if (rowPair >= 0 && rowPair < 16)

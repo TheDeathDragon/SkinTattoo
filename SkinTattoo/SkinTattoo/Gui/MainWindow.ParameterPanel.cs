@@ -5,7 +5,6 @@ using Dalamud.Interface;
 using Dalamud.Interface.Components;
 using Dalamud.Interface.Utility.Raii;
 using SkinTattoo.Core;
-using SkinTattoo.Http;
 using SkinTattoo.Services;
 
 namespace SkinTattoo.Gui;
@@ -191,76 +190,44 @@ public partial class MainWindow
 
     private void DrawPbrSection(TargetGroup group, DecalLayer layer)
     {
-        if (!ImGui.CollapsingHeader("PBR 属性", ImGuiTreeNodeFlags.DefaultOpen)) return;
-
-        var alloc = previewService.GetOrCreateAllocator(group);
-        bool exhausted = alloc.AvailableSlots == 0 && layer.AllocatedRowPair < 0;
-        bool pbrSupported = previewService.MaterialSupportsPbr(group);
-        bool skinShpkColorTableDetected = previewService.IsSkinShpkWithColorTable(group);
-
-        if (!pbrSupported && !string.IsNullOrEmpty(group.MtrlGamePath))
-        {
-            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.7f, 0.3f, 1f));
-            ImGui.TextWrapped("当前材质 (skin.shpk) 无 ColorTable");
-            ImGui.PopStyleColor();
-            ImGui.TextDisabled("仅「贴花」与「发光」可用");
-        }
-        else if (exhausted)
-        {
-            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.6f, 0.2f, 1f));
-            ImGui.TextWrapped($"PBR 行号已满 (vanilla 占 {alloc.VanillaOccupiedCount})");
-            ImGui.PopStyleColor();
-            ImGui.TextDisabled("请关闭其他图层的 PBR 字段后再试");
-        }
+        if (!ImGui.CollapsingHeader("贴花属性", ImGuiTreeNodeFlags.DefaultOpen)) return;
 
         ImGui.Spacing();
 
-        // ── Diffuse ──
-        DrawPbrField(group, layer, "贴花/漫反射",
-            () => layer.AffectsDiffuse, v => layer.AffectsDiffuse = v,
-            supported: true, requiresRowPair: pbrSupported, exhausted: exhausted,
-            drawValue: () =>
+        {
+            var was = layer.AffectsDiffuse;
+            var v = was;
+            if (ImGui.Checkbox("显示贴花", ref v))
             {
-                using (ImRaii.Disabled(!pbrSupported))
-                {
-                    var d = layer.DiffuseColor;
-                    if (ImGui.ColorEdit3("##diffColor", ref d,
-                        ImGuiColorEditFlags.NoLabel | ImGuiColorEditFlags.NoInputs))
-                    { layer.DiffuseColor = d; MarkPreviewDirty(); }
-                    if (ImGui.IsItemHovered() && !pbrSupported)
-                        ImGui.SetTooltip("skin.shpk 不支持漫反射颜色调制 (贴花仍会显示)");
-                }
-            });
+                layer.AffectsDiffuse = v;
+                MarkPreviewDirty(immediate: true);
+            }
+        }
 
-        // ── Specular ──
-        DrawPbrField(group, layer, "镜面反射",
-            () => layer.AffectsSpecular, v => layer.AffectsSpecular = v,
-            supported: pbrSupported, requiresRowPair: true, exhausted: exhausted,
-            drawValue: () =>
+        {
+            var was = layer.AffectsEmissive;
+            var v = was;
+            if (ImGui.Checkbox("发光", ref v))
             {
-                using (ImRaii.Disabled(!pbrSupported))
+                if (v && !was)
                 {
-                    var sc = layer.SpecularColor;
-                    if (ImGui.ColorEdit3("##specColor", ref sc,
-                        ImGuiColorEditFlags.NoLabel | ImGuiColorEditFlags.NoInputs))
-                    { layer.SpecularColor = sc; MarkPreviewDirty(); }
+                    layer.AffectsEmissive = true;
+                    previewService.InvalidateEmissiveForGroup(group);
+                    MarkPreviewDirty(immediate: true);
                 }
-            });
-
-        // ── Emissive ──
-        DrawPbrField(group, layer, "发光",
-            () => layer.AffectsEmissive, v => layer.AffectsEmissive = v,
-            supported: true, requiresRowPair: pbrSupported, exhausted: exhausted,
-            onDisabled: () => previewService.InvalidateEmissiveForGroup(group),
-            onEnabled: () => previewService.InvalidateEmissiveForGroup(group),
-            drawValue: () =>
+                else if (!v && was)
+                {
+                    layer.AffectsEmissive = false;
+                    previewService.InvalidateEmissiveForGroup(group);
+                    MarkPreviewDirty(immediate: true);
+                }
+            }
+            if (layer.AffectsEmissive)
             {
-                if (skinShpkColorTableDetected)
-                    ImGui.TextColored(new Vector4(1f, 0.5f, 0.3f, 1f), "当前 mod 修改了 skin.shpk + ColorTable，无法使用发光");
                 var emColor = layer.EmissiveColor;
                 if (ImGui.ColorEdit3("##emColor", ref emColor,
                     ImGuiColorEditFlags.NoLabel | ImGuiColorEditFlags.NoInputs))
-                { layer.EmissiveColor = emColor; MarkPreviewDirty(); TryDirectEmissiveUpdate(group, layer); }
+                { layer.EmissiveColor = emColor; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
                 ImGui.SameLine();
                 ImGui.AlignTextToFramePadding();
                 ImGui.TextDisabled("强度");
@@ -268,65 +235,9 @@ public partial class MainWindow
                 ImGui.SetNextItemWidth(-1);
                 var emI = layer.EmissiveIntensity;
                 if (ImGui.DragFloat("##emI", ref emI, 0.05f, 0.1f, 10f, "%.2f"))
-                { layer.EmissiveIntensity = emI; MarkPreviewDirty(); TryDirectEmissiveUpdate(group, layer); }
-            });
-
-        // ── Roughness ──
-        DrawPbrField(group, layer, "粗糙度",
-            () => layer.AffectsRoughness, v => layer.AffectsRoughness = v,
-            supported: pbrSupported, requiresRowPair: true, exhausted: exhausted,
-            drawValue: () =>
-            {
-                using (ImRaii.Disabled(!pbrSupported))
-                {
-                    ImGui.SetNextItemWidth(-1);
-                    var r = layer.Roughness;
-                    if (ImGui.SliderFloat("##rough", ref r, 0f, 1f, "%.2f"))
-                    { layer.Roughness = r; MarkPreviewDirty(); }
-                }
-            });
-
-        // ── Metalness ──
-        DrawPbrField(group, layer, "金属度",
-            () => layer.AffectsMetalness, v => layer.AffectsMetalness = v,
-            supported: pbrSupported, requiresRowPair: true, exhausted: exhausted,
-            drawValue: () =>
-            {
-                using (ImRaii.Disabled(!pbrSupported))
-                {
-                    ImGui.SetNextItemWidth(-1);
-                    var mt = layer.Metalness;
-                    if (ImGui.SliderFloat("##metal", ref mt, 0f, 1f, "%.2f"))
-                    { layer.Metalness = mt; MarkPreviewDirty(); }
-                }
-            });
-
-        // ── Sheen ──
-        DrawPbrField(group, layer, "光泽",
-            () => layer.AffectsSheen, v => layer.AffectsSheen = v,
-            supported: pbrSupported, requiresRowPair: true, exhausted: exhausted,
-            drawValue: () =>
-            {
-                using (ImRaii.Disabled(!pbrSupported))
-                {
-                    var avail = ImGui.GetContentRegionAvail().X;
-                    var third = (avail - ImGui.GetStyle().ItemSpacing.X * 2) / 3f;
-                    ImGui.SetNextItemWidth(third);
-                    var sr = layer.SheenRate;
-                    if (ImGui.SliderFloat("##sheenRate", ref sr, 0f, 1f, "R %.2f"))
-                    { layer.SheenRate = sr; MarkPreviewDirty(); }
-                    ImGui.SameLine();
-                    ImGui.SetNextItemWidth(third);
-                    var st = layer.SheenTint;
-                    if (ImGui.SliderFloat("##sheenTint", ref st, 0f, 1f, "T %.2f"))
-                    { layer.SheenTint = st; MarkPreviewDirty(); }
-                    ImGui.SameLine();
-                    ImGui.SetNextItemWidth(-1);
-                    var sa = layer.SheenAperture;
-                    if (ImGui.SliderFloat("##sheenAp", ref sa, 0f, 20f, "A %.1f"))
-                    { layer.SheenAperture = sa; MarkPreviewDirty(); }
-                }
-            });
+                { layer.EmissiveIntensity = emI; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
+            }
+        }
 
         // ── Layer fade mask ──
         ImGui.Spacing();
@@ -377,59 +288,6 @@ public partial class MainWindow
             ImGui.TextColored(new Vector4(1, 0.5f, 0.3f, 1), "需要选择材质(.mtrl)");
     }
 
-    /// <summary>Draw a single PBR field row with unified layout: checkbox + label + value widget.</summary>
-    private void DrawPbrField(TargetGroup group, DecalLayer layer, string label,
-        Func<bool> get, Action<bool> set,
-        bool supported, bool requiresRowPair, bool exhausted,
-        Action drawValue, Action? onDisabled = null, Action? onEnabled = null)
-    {
-        var was = get();
-        var v = was;
-        var disableCheckbox = (!supported || exhausted) && !was;
-
-        if (disableCheckbox) ImGui.BeginDisabled();
-        if (ImGui.Checkbox(label, ref v))
-        {
-            if (v && !was)
-            {
-                bool needsAlloc = requiresRowPair && layer.AllocatedRowPair < 0;
-                set(true);
-                onEnabled?.Invoke();
-                if (needsAlloc)
-                {
-                    if (!previewService.TryAllocateRowPairForLayer(group, layer, out var failure))
-                    {
-                        set(false);
-                        rowPairToast = failure switch
-                        {
-                            PreviewService.RowPairAllocFailure.Unsupported =>
-                                $"无法启用 {label}：当前材质不支持该 PBR 字段。",
-                            _ => $"无法启用 {label}：PBR 行号已满。请关闭其他图层后再试。",
-                        };
-                        rowPairToastUntil = DateTime.UtcNow.AddSeconds(4);
-                    }
-                    else
-                    {
-                        MarkPreviewDirty(immediate: true);
-                    }
-                }
-                else
-                {
-                    MarkPreviewDirty(immediate: true);
-                }
-            }
-            else if (!v && was)
-            {
-                set(false);
-                previewService.ReleaseRowPairIfUnused(group, layer);
-                onDisabled?.Invoke();
-                MarkPreviewDirty(immediate: true);
-            }
-        }
-        if (disableCheckbox) ImGui.EndDisabled();
-
-        if (was) drawValue();
-    }
 
     private static void DrawSectionLabel(string text)
     {

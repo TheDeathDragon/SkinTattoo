@@ -274,25 +274,28 @@ public partial class MainWindow
                 ImGuiComponents.IconButton(200 + li, FontAwesomeIcon.Crosshairs);
                 if (isThisHighlighted) ImGui.PopStyleColor();
                 if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(isThisHighlighted ? "关闭高亮" : "高亮显示贴花");
+                if (ImGui.IsItemClicked())
                 {
-                    ImGui.SetTooltip("高亮显示贴花");
-                    if (!highlightActive || highlightGroupIndex != gi || highlightLayerIndex != li)
+                    if (isThisHighlighted)
                     {
+                        highlightActive = false;
+                        highlightGroupIndex = -1;
+                        highlightLayerIndex = -1;
+                        highlightFrameCounter = 0;
+                        RestoreEmissiveAfterHighlight(group);
+                    }
+                    else
+                    {
+                        if (highlightActive && highlightGroupIndex >= 0 && highlightGroupIndex < project.Groups.Count)
+                            RestoreEmissiveAfterHighlight(project.Groups[highlightGroupIndex]);
                         if (!previewService.HasEmissiveOffset(group.MtrlGamePath))
                             previewService.EnsureEmissiveInitialized(group);
+                        highlightActive = true;
+                        highlightGroupIndex = gi;
+                        highlightLayerIndex = li;
                         highlightFrameCounter = 0;
                     }
-                    highlightActive = true;
-                    highlightGroupIndex = gi;
-                    highlightLayerIndex = li;
-                }
-                else if (isThisHighlighted)
-                {
-                    highlightActive = false;
-                    highlightGroupIndex = -1;
-                    highlightLayerIndex = -1;
-                    highlightFrameCounter = 0;
-                    RestoreEmissiveAfterHighlight(group);
                 }
             }
 
