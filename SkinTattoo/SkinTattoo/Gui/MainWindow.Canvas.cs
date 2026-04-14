@@ -6,6 +6,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Plugin.Services;
 using SkinTattoo.Core;
 using SkinTattoo.Services;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Gui;
 
@@ -31,11 +32,11 @@ public partial class MainWindow
     {
         var btnH = ImGui.GetFrameHeight();
         ImGui.AlignTextToFramePadding();
-        ImGui.Text("UV 缩放");
+        ImGui.Text(Strings.T("label.uv_scale"));
         ImGui.SameLine();
 
         var fitBtnW = 44f;
-        var uvMeshBtnW = ImGui.CalcTextSize("UV网格").X + ImGui.GetStyle().FramePadding.X * 2;
+        var uvMeshBtnW = ImGui.CalcTextSize(Strings.T("button.uv_mesh")).X + ImGui.GetStyle().FramePadding.X * 2;
         var colorBtnW = ImGui.GetFrameHeight();
         var spacing = ImGui.GetStyle().ItemSpacing.X;
         var hasMesh = previewService.CurrentMesh != null;
@@ -46,10 +47,10 @@ public partial class MainWindow
         var sliderW = ImGui.GetContentRegionAvail().X - rightBtns;
         ImGui.SetNextItemWidth(sliderW);
         ImGui.SliderFloat("##zoom", ref canvasZoom, 0.1f, 5.0f, $"{canvasZoom * 100:F0}%%");
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("画布缩放 (滚轮)");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.canvas_zoom"));
 
         ImGui.SameLine();
-        if (ImGui.Button("适应", new Vector2(fitBtnW, btnH)))
+        if (ImGui.Button(Strings.T("button.fit"), new Vector2(fitBtnW, btnH)))
         {
             canvasZoom = 1.0f;
             canvasPan = Vector2.Zero;
@@ -60,15 +61,15 @@ public partial class MainWindow
             ? new Vector4(0.4f, 0.8f, 1f, 1f)
             : new Vector4(0.5f, 0.5f, 0.5f, 1f);
         ImGui.PushStyleColor(ImGuiCol.Text, activeColor);
-        if (ImGui.Button("UV网格", new Vector2(uvMeshBtnW, btnH)))
+        if (ImGui.Button(Strings.T("button.uv_mesh"), new Vector2(uvMeshBtnW, btnH)))
             showUvWireframe = !showUvWireframe;
         ImGui.PopStyleColor();
         if (ImGui.IsItemHovered())
         {
             if (!hasMesh)
-                ImGui.SetTooltip("需要先导入模型才能显示 UV 网格");
+                ImGui.SetTooltip(Strings.T("tooltip.uv_mesh_no_model"));
             else
-                ImGui.SetTooltip(showUvWireframe ? "隐藏 UV 网格" : "显示 UV 网格");
+                ImGui.SetTooltip(showUvWireframe ? Strings.T("tooltip.uv_mesh_hide") : Strings.T("tooltip.uv_mesh_show"));
         }
 
         if (showUvWireframe)
@@ -78,7 +79,7 @@ public partial class MainWindow
                 config.UvWireframeColorB, config.UvWireframeColorA);
             if (ImGui.ColorButton("##wireColor", wc, ImGuiColorEditFlags.AlphaPreview, new Vector2(colorBtnW, btnH)))
                 ImGui.OpenPopup("##wireColorPicker");
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("网格颜色");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.wire_color"));
             if (ImGui.BeginPopup("##wireColorPicker"))
             {
                 if (ImGui.ColorPicker4("##wcPick", ref wc, ImGuiColorEditFlags.AlphaBar))
@@ -595,8 +596,8 @@ public partial class MainWindow
 
         // Bottom-right: operation hints
         {
-            var hint1 = "左键:移动贴花  右键:缩放贴花  中键:平移画布  滚轮:缩放画布";
-            var hint2 = "Shift:锁定X移动  Ctrl:锁定Y移动  Alt:右键变旋转";
+            var hint1 = Strings.T("hint.canvas_ops");
+            var hint2 = Strings.T("hint.canvas_mods");
             var hint1Size = ImGui.CalcTextSize(hint1);
             var hint2Size = ImGui.CalcTextSize(hint2);
             var pos2 = canvasPos + new Vector2(canvasSize.X - hint2Size.X - 6, canvasSize.Y - 20);

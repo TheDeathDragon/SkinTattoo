@@ -1,0 +1,313 @@
+{
+  "command": {
+    "help": "打开 SkinTattoo 纹身编辑器窗口"
+  },
+  "window": {
+    "main": {
+      "title": "SkinTattoo 纹身编辑器",
+      "title_connected": "SkinTattoo 纹身编辑器 [Penumbra 已连接]",
+      "title_disconnected": "SkinTattoo 纹身编辑器 [Penumbra 未运行]"
+    },
+    "export": {
+      "title": "导出 Mod",
+      "title_local": "导出 Mod 到本地",
+      "title_penumbra": "安装 Mod 到 Penumbra"
+    },
+    "debug": {
+      "title": "SkinTattoo 调试"
+    },
+    "resource": {
+      "title": "添加目标材质"
+    },
+    "editor3d": {
+      "title": "3D 编辑器"
+    }
+  },
+  "tab": {
+    "settings": "设置",
+    "editor": "编辑器",
+    "help": "操作说明"
+  },
+  "button": {
+    "add": "添加",
+    "export_local": "导出到本地",
+    "export_penumbra": "安装到 Penumbra",
+    "exporting": "导出中…",
+    "close": "关闭",
+    "browse": "浏览...",
+    "refresh": "刷新",
+    "refresh_resources": "刷新资源",
+    "export_diagnostics": "导出全部诊断",
+    "fit": "适应",
+    "uv_mesh": "UV网格",
+    "default": "默认",
+    "reset_camera": "重置相机",
+    "add_model": "添加模型",
+    "re_resolve": "重新解析",
+    "manage_models": "管理模型",
+    "open_debug": "打开调试日志窗口",
+    "clear": "清空",
+    "copy_all": "复制全部",
+    "copy": "复制",
+    "path": "路径",
+    "remove": "移除",
+    "save_mod": "保存 Mod",
+    "browse_output": "浏览…"
+  },
+  "tooltip": {
+    "editor3d": "3D 贴花编辑器",
+    "reset_layer": "重置当前图层参数",
+    "clear_redirect": "还原贴图  -- 清除 Penumbra 重定向",
+    "export_base_tex": "导出底图 PNG（用于 PS 编辑）",
+    "export_uv_wireframe": "导出 UV 网格 PNG（用于 PS 叠加参考）",
+    "export_local": "导出 Mod 到本地 (.pmp)",
+    "install_penumbra": "安装 Mod 到 Penumbra",
+    "penumbra_not_running": "Penumbra 未运行",
+    "load_mesh": "加载模型",
+    "reload_mesh": "重新加载模型",
+    "auto_preview": "参数变化时自动更新游戏内预览",
+    "update_preview": "更新预览",
+    "add_group": "添加目标材质",
+    "delete_group": "按住 Ctrl+Shift 删除贴花组",
+    "add_layer": "添加贴花图层",
+    "delete_layer": "按住 Ctrl+Shift 删除图层",
+    "highlight_on": "高亮显示贴花",
+    "highlight_off": "关闭高亮",
+    "canvas_zoom": "画布缩放 (滚轮)",
+    "uv_mesh_no_model": "需要先导入模型才能显示 UV 网格",
+    "uv_mesh_show": "显示 UV 网格",
+    "uv_mesh_hide": "隐藏 UV 网格",
+    "wire_color": "网格颜色",
+    "scale_locked": "大小（像素等比）",
+    "scale_unlocked": "大小（UV 独立）",
+    "lock_ratio": "比例锁定",
+    "unlock_ratio": "比例解锁",
+    "global_enable": "全局启用或禁用插件的贴花效果。\n关闭后会还原所有贴图到原始状态。",
+    "swap_interval": "拖拽调整参数时，将修改同步到游戏贴图的最小间隔（毫秒）。\n数值越小越实时，但在大分辨率下会占用更多主线程时间。\n3D 编辑器预览不受此限制，松手时总会立即同步。",
+    "restore_default": "恢复默认值 ({0}ms)",
+    "uv_aa": "开启后 UV 网格线框使用抗锯齿渲染，线条更平滑。\n关闭可显著提升线框渲染性能，适用于高面数模型。",
+    "uv_cull": "跳过完全在画布可见区域之外的三角形。\n开启可减少画布滚动/缩放时的 CPU 绘制开销。",
+    "uv_dedup": "相邻三角形的共享边只绘制一次，减少约 50%% 绘制量。\n会增加少量 CPU 预处理开销，网格面数极高时效益最明显。",
+    "http_enable": "开启后在本地端口提供 REST API，\n可用于外部工具自动化操作。\n修改后需重启插件生效。",
+    "port": "本地 HTTP 调试服务器监听端口。\n修改后需重启插件生效。\n默认: 12580",
+    "port_range": "有效范围: 1024 - 65535",
+    "open_repo": "在浏览器中打开项目仓库",
+    "open_discord": "在浏览器中加入 Discord 服务器",
+    "copy_row": "右键复制此行",
+    "show_hide_model": "显示/隐藏",
+    "re_resolve_tip": "重新检测角色当前装备/mod 状态并刷新网格",
+    "browse_image": "浏览..."
+  },
+  "label": {
+    "diffuse": "贴图",
+    "normal": "法线",
+    "material": "材质",
+    "language": "界面语言",
+    "refresh_settings": "刷新设置",
+    "swap_interval": "刷新间隔",
+    "uv_wireframe": "UV 网格线框",
+    "aa": "抗锯齿",
+    "viewport_cull": "视口外剔除",
+    "dedup": "共享边去重",
+    "http_server": "HTTP 调试服务器",
+    "http_server_desc": "在本地开启一个 REST API，允许外部工具（AI agent、脚本）通过编程方式驱动插件：查询状态、增删改图层、触发预览、导出 Mod。主要用于 AI 辅助调试和自动化。不需要可以保持关闭。",
+    "http_enable": "启用 HTTP 服务器",
+    "port": "端口号",
+    "debug_section": "调试",
+    "about": "关于",
+    "repo": "仓库",
+    "discord": "Discord",
+    "http_restart_notice": "修改 HTTP 开关或端口后需重启插件生效。",
+    "penumbra_connected": "Penumbra 已连接",
+    "penumbra_disconnected": "Penumbra 未连接",
+    "center_x": "中心 X",
+    "center_y": "中心 Y",
+    "size": "大小",
+    "rotation": "旋转",
+    "opacity": "透明度",
+    "blend": "混合",
+    "clip": "裁剪",
+    "shape": "形状",
+    "falloff": "羽化",
+    "angle": "角度",
+    "range": "范围",
+    "offset": "偏移",
+    "intensity": "强度",
+    "mask_preview": "遮罩预览:",
+    "mask_label": "遮罩",
+    "effect_label": "效果",
+    "mod_name": "Mod 名称",
+    "author": "作者",
+    "version": "版本",
+    "description": "描述",
+    "export_path": "导出位置",
+    "included_groups": "包含的图层组",
+    "auto_scroll": "自动滚动",
+    "filter_hint": "过滤...",
+    "model_info": "模型: {0}  三角面: {1}",
+    "uv_scale": "UV 缩放",
+    "size_rotation_fmt": "大小: {0}  旋转: {1}",
+    "game_path": "游戏路径",
+    "actual_path": "实际路径",
+    "tex_diffuse_header": "贴图 (Diffuse)",
+    "tex_normal_header": "贴图 (Normal)",
+    "copy_clipboard": "一键复制全部 (markdown)"
+  },
+  "section": {
+    "image": "贴花图片",
+    "transform": "UV 位置",
+    "render": "渲染",
+    "pbr": "贴花属性",
+    "fade": "图层羽化"
+  },
+  "checkbox": {
+    "enable_plugin": "启用 SkinTattoo",
+    "show_decal": "显示贴花",
+    "emissive": "发光",
+    "auto_preview": "自动预览",
+    "uv_aa": "抗锯齿##uvAA",
+    "uv_cull": "视口外剔除##uvCull",
+    "uv_dedup": "共享边去重##uvDedup",
+    "http_enable": "启用 HTTP 服务器##httpEn"
+  },
+  "menu": {
+    "copy_diffuse_path": "复制贴图路径",
+    "copy_normal_path": "复制法线路径",
+    "copy_material_path": "复制材质路径",
+    "copy_game_path": "复制游戏路径",
+    "copy_actual_path": "复制实际路径"
+  },
+  "enum": {
+    "blendmode": {
+      "normal": "正常",
+      "multiply": "正片叠底",
+      "screen": "滤色",
+      "overlay": "叠加",
+      "softlight": "柔光",
+      "hardlight": "强光",
+      "darken": "变暗",
+      "lighten": "变亮",
+      "colordodge": "颜色减淡",
+      "colorburn": "颜色加深",
+      "difference": "差值",
+      "exclusion": "排除"
+    },
+    "fademask": {
+      "uniform": "均匀",
+      "radial": "中心扩散",
+      "ring": "边缘光环",
+      "outline": "边缘描边",
+      "gradient": "方向渐变",
+      "gaussian": "高斯羽化",
+      "shape_outline": "形状描边"
+    },
+    "clip": {
+      "none": "无裁剪",
+      "left": "切左半",
+      "right": "切右半",
+      "top": "切上半",
+      "bottom": "切下半"
+    }
+  },
+  "notify": {
+    "export": {
+      "success_local": "导出成功",
+      "success_penumbra": "已安装到 Penumbra",
+      "failed": "导出失败"
+    },
+    "base_tex_exported": "底图已保存到 {0}",
+    "wireframe_exported": "UV 线框已保存到 {0}",
+    "export_success": "导出成功",
+    "export_failed": "导出失败"
+  },
+  "error": {
+    "no_mod_name": "请输入 Mod 名称",
+    "no_group_hint": "先添加一个贴花组",
+    "no_layer_selected": "选择或添加一个图层",
+    "no_group_selected": "请至少选择一个图层组",
+    "no_visible_layer": "选中的图层组没有可见图层",
+    "penumbra_unavailable": "Penumbra 未运行",
+    "no_output_path": "请选择导出文件路径",
+    "all_groups_skipped": "{0} 个 group 全部跳过",
+    "penumbra_install_failed": "Penumbra 安装失败：{0}",
+    "export_exception": "导出异常：{0}",
+    "need_mtrl": "需要选择材质(.mtrl)",
+    "no_mesh_loaded": "未加载网格"
+  },
+  "help": {
+    "uv_editor_canvas": "UV 编辑器  -- 画布操作",
+    "uv_editor_modifiers": "UV 编辑器  -- 修饰键",
+    "layer_target": "图层与目标",
+    "editor3d_camera": "3D 编辑器  -- 相机",
+    "editor3d_decal": "3D 编辑器  -- 贴花",
+    "editor3d_models": "3D 编辑器  -- 模型管理",
+    "canvas_scroll": "滚轮: 缩放画布",
+    "canvas_pan": "中键拖动: 平移画布",
+    "canvas_move_decal": "左键拖动: 移动贴花位置",
+    "canvas_select": "左键点空白: 选择贴花图层",
+    "canvas_scale": "右键拖动: 缩放贴花",
+    "mod_shift": "Shift + 左键拖动: 锁定 X 轴",
+    "mod_ctrl": "Ctrl + 左键拖动: 锁定 Y 轴",
+    "mod_alt": "Alt + 右键拖动: 旋转贴花",
+    "delete_hint": "Ctrl+Shift + 删除按钮: 删除图层/目标",
+    "context_menu": "右键贴花组标题: 复制贴图 / 法线 / 材质路径",
+    "cam_rotate": "右键拖动: 旋转相机",
+    "cam_pan": "中键拖动: 平移相机",
+    "cam_zoom": "Ctrl + 滚轮: 相机缩放",
+    "cam_reset": "重置相机按钮: 回到默认视角",
+    "decal_place": "左键点击模型: 将选中图层的贴花放到该位置",
+    "decal_scale": "滚轮: 缩放选中贴花 (非 Ctrl)",
+    "model_add": "添加模型: 从玩家资源树追加额外模型",
+    "model_manage": "管理模型: 勾选显隐 / 移除已添加模型"
+  },
+  "hint": {
+    "canvas_ops": "左键:移动贴花  右键:缩放贴花  中键:平移画布  滚轮:缩放画布",
+    "canvas_mods": "Shift:锁定X移动  Ctrl:锁定Y移动  Alt:右键变旋转",
+    "viewport_ops": "左键:放置贴花  右键:旋转相机  中键:平移相机",
+    "viewport_scroll": "滚轮:缩放贴花  Ctrl+滚轮:缩放相机",
+    "loading": "加载中…",
+    "loading_sub": "正在加载模型与贴花，请稍候",
+    "no_resources": "点击「刷新资源」查询玩家资源",
+    "no_model_detected": "未检测到角色模型",
+    "select_model": "选择要添加的模型:",
+    "model_list": "模型列表:",
+    "empty_group_list": "点击 + 添加目标材质",
+    "no_layer_groups": "（项目中没有图层组）",
+    "layer_group_fmt": "{0} ({1} 图层)"
+  },
+  "dialog": {
+    "select_image": "选择贴花图片",
+    "export_base_tex": "导出底图",
+    "export_wireframe": "导出 UV 线框",
+    "save_mod": "保存 Mod"
+  },
+  "layer": {
+    "default": {
+      "name": "贴花 {0}"
+    }
+  },
+  "tooltip_group": {
+    "diffuse": "贴图: {0}",
+    "normal": "法线: {0}",
+    "material": "材质: {0}",
+    "copy_hint": "(右键菜单可复制路径)"
+  },
+  "diag": {
+    "mtrl_count": "材质 ({0})",
+    "live_mdl_count": "模型 (资源树当前挂载: {0})",
+    "no_live_mdl": "(资源树里没有 mdl  -- -- 装备覆盖或未加载)",
+    "resolver_header": "模型 (SkinMeshResolver 解析)",
+    "resolver_failed": "解析失败",
+    "shared_iris": "共享 iris 贴图：需要从 mtrl 路径解析",
+    "non_standard_path": "(贴图/材质路径不是标准 chara/human/... 形式)",
+    "derived_info": "race={0} slot={1}/{2}{3}{4}",
+    "body_id_rewritten": " (b id 已被引擎改写，资源树重新解析)",
+    "slot_count": "{0} mesh slot(s):",
+    "add_already": "已添加: {0}",
+    "merged_mtrl": "[{0}材质合并]"
+  },
+  "export_summary": {
+    "success_skip": "{0} 成功 / {1} 跳过",
+    "success_only": "{0} 个图层组"
+  }
+}

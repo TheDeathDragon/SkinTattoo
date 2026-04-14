@@ -15,6 +15,7 @@ using SkinTattoo.Core;
 using SkinTattoo.Http;
 using SkinTattoo.Interop;
 using SkinTattoo.Services;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Gui;
 
@@ -82,10 +83,25 @@ public partial class MainWindow : Window, IDisposable
     private const double GpuPreviewMinIntervalMs = 33;
 
 
-    private static readonly string[] BlendModeNames = ["正常", "正片叠底", "滤色", "叠加", "柔光", "强光", "变暗", "变亮", "颜色减淡", "颜色加深", "差值", "排除"];
     private static readonly BlendMode[] BlendModeValues = [BlendMode.Normal, BlendMode.Multiply, BlendMode.Screen, BlendMode.Overlay, BlendMode.SoftLight, BlendMode.HardLight, BlendMode.Darken, BlendMode.Lighten, BlendMode.ColorDodge, BlendMode.ColorBurn, BlendMode.Difference, BlendMode.Exclusion];
-    private static readonly string[] LayerFadeMaskNames = ["均匀", "中心扩散", "边缘光环", "边缘描边", "方向渐变", "高斯羽化", "形状描边"];
-    private static readonly string[] ClipModeNames = ["无裁剪", "切左半", "切右半", "切上半", "切下半"];
+
+    private static string[] GetBlendModeNames() => [
+        Strings.T("enum.blendmode.normal"), Strings.T("enum.blendmode.multiply"), Strings.T("enum.blendmode.screen"),
+        Strings.T("enum.blendmode.overlay"), Strings.T("enum.blendmode.softlight"), Strings.T("enum.blendmode.hardlight"),
+        Strings.T("enum.blendmode.darken"), Strings.T("enum.blendmode.lighten"), Strings.T("enum.blendmode.colordodge"),
+        Strings.T("enum.blendmode.colorburn"), Strings.T("enum.blendmode.difference"), Strings.T("enum.blendmode.exclusion")
+    ];
+
+    private static string[] GetFadeMaskNames() => [
+        Strings.T("enum.fademask.uniform"), Strings.T("enum.fademask.radial"), Strings.T("enum.fademask.ring"),
+        Strings.T("enum.fademask.outline"), Strings.T("enum.fademask.gradient"), Strings.T("enum.fademask.gaussian"),
+        Strings.T("enum.fademask.shape_outline")
+    ];
+
+    private static string[] GetClipModeNames() => [
+        Strings.T("enum.clip.none"), Strings.T("enum.clip.left"), Strings.T("enum.clip.right"),
+        Strings.T("enum.clip.top"), Strings.T("enum.clip.bottom")
+    ];
 
     public DebugWindow? DebugWindowRef { get; set; }
     public ModelEditorWindow? ModelEditorWindowRef { get; set; }
@@ -101,7 +117,7 @@ public partial class MainWindow : Window, IDisposable
         ITextureProvider textureProvider,
         IDataManager dataManager,
         Mesh.SkinMeshResolver skinMeshResolver)
-        : base("SkinTattoo 纹身编辑器###SkinTattooMain",
+        : base(Strings.T("window.main.title") + "###SkinTattooMain",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         this.project = project;
@@ -132,8 +148,8 @@ public partial class MainWindow : Window, IDisposable
     public override void Draw()
     {
         WindowName = penumbra.IsAvailable
-            ? "SkinTattoo 纹身编辑器 [Penumbra 已连接]###SkinTattooMain"
-            : "SkinTattoo 纹身编辑器 [Penumbra 未运行]###SkinTattooMain";
+            ? Strings.T("window.main.title_connected") + "###SkinTattooMain"
+            : Strings.T("window.main.title_disconnected") + "###SkinTattooMain";
 
         if (initPhase == InitPhase.Pending)
         {
@@ -176,14 +192,14 @@ public partial class MainWindow : Window, IDisposable
                 : ImGuiTabItemFlags.None;
             if (requestSwitchToSettings) requestSwitchToSettings = false;
 
-            if (ImGui.BeginTabItem("设置##mainTab0", settingsFlags))
+            if (ImGui.BeginTabItem(Strings.T("tab.settings") + "##mainTab0", settingsFlags))
             {
                 DrawSettingsTab();
                 ImGui.EndTabItem();
             }
 
             // Tab 1: Editor
-            if (ImGui.BeginTabItem("编辑器##mainTab1"))
+            if (ImGui.BeginTabItem(Strings.T("tab.editor") + "##mainTab1"))
             {
                 if (loading) ImGui.BeginDisabled();
 
@@ -208,7 +224,7 @@ public partial class MainWindow : Window, IDisposable
             }
 
             // Tab 2: Help
-            if (ImGui.BeginTabItem("操作说明##mainTab2"))
+            if (ImGui.BeginTabItem(Strings.T("tab.help") + "##mainTab2"))
             {
                 DrawHelpTab();
                 ImGui.EndTabItem();
@@ -292,12 +308,12 @@ public partial class MainWindow : Window, IDisposable
             fg.AddCircleFilled(p, dotRadius, color);
         }
 
-        const string label = "加载中…";
+        var label = Strings.T("hint.loading");
         var labelSize = ImGui.CalcTextSize(label);
         var labelPos = center + new Vector2(-labelSize.X * 0.5f, radius + 14f);
         fg.AddText(labelPos, ImGui.GetColorU32(new Vector4(0.95f, 0.95f, 0.95f, 1f)), label);
 
-        const string sub = "正在加载模型与贴花，请稍候";
+        var sub = Strings.T("hint.loading_sub");
         var subSize = ImGui.CalcTextSize(sub);
         var subPos = new Vector2(center.X - subSize.X * 0.5f, labelPos.Y + labelSize.Y + 4f);
         fg.AddText(subPos, ImGui.GetColorU32(new Vector4(0.75f, 0.75f, 0.8f, 1f)), sub);
@@ -312,46 +328,46 @@ public partial class MainWindow : Window, IDisposable
 
         var header = new Vector4(1f, 0.8f, 0.3f, 1f);
 
-        ImGui.TextColored(header, "UV 编辑器  -- 画布操作");
+        ImGui.TextColored(header, Strings.T("help.uv_editor_canvas"));
         ImGui.Separator();
-        ImGui.BulletText("滚轮: 缩放画布");
-        ImGui.BulletText("中键拖动: 平移画布");
-        ImGui.BulletText("左键拖动: 移动贴花位置");
-        ImGui.BulletText("左键点空白: 选择贴花图层");
-        ImGui.BulletText("右键拖动: 缩放贴花");
+        ImGui.BulletText(Strings.T("help.canvas_scroll"));
+        ImGui.BulletText(Strings.T("help.canvas_pan"));
+        ImGui.BulletText(Strings.T("help.canvas_move_decal"));
+        ImGui.BulletText(Strings.T("help.canvas_select"));
+        ImGui.BulletText(Strings.T("help.canvas_scale"));
 
         ImGui.Spacing();
-        ImGui.TextColored(header, "UV 编辑器  -- 修饰键");
+        ImGui.TextColored(header, Strings.T("help.uv_editor_modifiers"));
         ImGui.Separator();
-        ImGui.BulletText("Shift + 左键拖动: 锁定 X 轴");
-        ImGui.BulletText("Ctrl + 左键拖动: 锁定 Y 轴");
-        ImGui.BulletText("Alt + 右键拖动: 旋转贴花");
+        ImGui.BulletText(Strings.T("help.mod_shift"));
+        ImGui.BulletText(Strings.T("help.mod_ctrl"));
+        ImGui.BulletText(Strings.T("help.mod_alt"));
 
         ImGui.Spacing();
-        ImGui.TextColored(header, "图层与目标");
+        ImGui.TextColored(header, Strings.T("help.layer_target"));
         ImGui.Separator();
-        ImGui.BulletText("Ctrl+Shift + 删除按钮: 删除图层/目标");
-        ImGui.BulletText("右键贴花组标题: 复制贴图 / 法线 / 材质路径");
+        ImGui.BulletText(Strings.T("help.delete_hint"));
+        ImGui.BulletText(Strings.T("help.context_menu"));
 
         ImGui.Spacing();
-        ImGui.TextColored(header, "3D 编辑器  -- 相机");
+        ImGui.TextColored(header, Strings.T("help.editor3d_camera"));
         ImGui.Separator();
-        ImGui.BulletText("右键拖动: 旋转相机");
-        ImGui.BulletText("中键拖动: 平移相机");
-        ImGui.BulletText("Ctrl + 滚轮: 相机缩放");
-        ImGui.BulletText("重置相机按钮: 回到默认视角");
+        ImGui.BulletText(Strings.T("help.cam_rotate"));
+        ImGui.BulletText(Strings.T("help.cam_pan"));
+        ImGui.BulletText(Strings.T("help.cam_zoom"));
+        ImGui.BulletText(Strings.T("help.cam_reset"));
 
         ImGui.Spacing();
-        ImGui.TextColored(header, "3D 编辑器  -- 贴花");
+        ImGui.TextColored(header, Strings.T("help.editor3d_decal"));
         ImGui.Separator();
-        ImGui.BulletText("左键点击模型: 将选中图层的贴花放到该位置");
-        ImGui.BulletText("滚轮: 缩放选中贴花 (非 Ctrl)");
+        ImGui.BulletText(Strings.T("help.decal_place"));
+        ImGui.BulletText(Strings.T("help.decal_scale"));
 
         ImGui.Spacing();
-        ImGui.TextColored(header, "3D 编辑器  -- 模型管理");
+        ImGui.TextColored(header, Strings.T("help.editor3d_models"));
         ImGui.Separator();
-        ImGui.BulletText("添加模型: 从玩家资源树追加额外模型");
-        ImGui.BulletText("管理模型: 勾选显隐 / 移除已添加模型");
+        ImGui.BulletText(Strings.T("help.model_add"));
+        ImGui.BulletText(Strings.T("help.model_manage"));
     }
 
     // ── Toolbar ──────────────────────────────────────────────────────────────
@@ -363,7 +379,7 @@ public partial class MainWindow : Window, IDisposable
             if (ModelEditorWindowRef != null)
                 ModelEditorWindowRef.IsOpen = !ModelEditorWindowRef.IsOpen;
         }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("3D 贴花编辑器");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.editor3d"));
 
         ImGui.SameLine();
         using (ImRaii.Disabled(project.SelectedLayer == null))
@@ -371,7 +387,7 @@ public partial class MainWindow : Window, IDisposable
             if (ImGuiComponents.IconButton(2, FontAwesomeIcon.Undo))
                 ResetSelectedLayer();
         }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("重置当前图层参数");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.reset_layer"));
 
         ImGui.SameLine();
         if (ImGuiComponents.IconButton(3, FontAwesomeIcon.Eraser))
@@ -381,7 +397,7 @@ public partial class MainWindow : Window, IDisposable
             previewService.ClearTextureCache();
             previewService.ResetSwapState();
         }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("还原贴图  -- 清除 Penumbra 重定向");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.clear_redirect"));
 
         // External edit: export base texture + wireframe
         ImGui.SameLine();
@@ -392,7 +408,7 @@ public partial class MainWindow : Window, IDisposable
                 if (ImGuiComponents.IconButton(40, FontAwesomeIcon.Image))
                     ExportBaseTexture(grp!);
             }
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("导出底图 PNG（用于 PS 编辑）");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.export_base_tex"));
 
             ImGui.SameLine();
             using (ImRaii.Disabled(grp == null || previewService.CurrentMesh == null))
@@ -400,7 +416,7 @@ public partial class MainWindow : Window, IDisposable
                 if (ImGuiComponents.IconButton(41, FontAwesomeIcon.BorderAll))
                     ExportUvWireframe(grp!);
             }
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("导出 UV 网格 PNG（用于 PS 叠加参考）");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.export_uv_wireframe"));
         }
 
         ImGui.SameLine();
@@ -409,7 +425,7 @@ public partial class MainWindow : Window, IDisposable
             if (ImGuiComponents.IconButton(7, FontAwesomeIcon.FileExport))
                 ModExportWindowRef?.OpenAs(Core.ExportTarget.LocalPmp);
         }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("导出 Mod 到本地 (.pmp)");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.export_local"));
 
         ImGui.SameLine();
         using (ImRaii.Disabled(project.Groups.Count == 0 || !penumbra.IsAvailable))
@@ -418,7 +434,7 @@ public partial class MainWindow : Window, IDisposable
                 ModExportWindowRef?.OpenAs(Core.ExportTarget.InstallToPenumbra);
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(penumbra.IsAvailable ? "安装 Mod 到 Penumbra" : "Penumbra 未运行");
+            ImGui.SetTooltip(penumbra.IsAvailable ? Strings.T("tooltip.install_penumbra") : Strings.T("tooltip.penumbra_not_running"));
 
         ImGui.SameLine();
 
@@ -432,17 +448,17 @@ public partial class MainWindow : Window, IDisposable
                 previewService.NotifyMeshChanged();
             }
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(previewService.CurrentMesh == null ? "加载模型" : "重新加载模型");
+                ImGui.SetTooltip(previewService.CurrentMesh == null ? Strings.T("tooltip.load_mesh") : Strings.T("tooltip.reload_mesh"));
             ImGui.SameLine();
         }
 
         var autoPreview = config.AutoPreview;
-        if (ImGui.Checkbox("自动预览", ref autoPreview))
+        if (ImGui.Checkbox(Strings.T("checkbox.auto_preview"), ref autoPreview))
         {
             config.AutoPreview = autoPreview;
             config.Save();
         }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("参数变化时自动更新游戏内预览");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.auto_preview"));
 
         if (!config.AutoPreview)
         {
@@ -453,7 +469,7 @@ public partial class MainWindow : Window, IDisposable
                 if (ImGuiComponents.IconButton(5, FontAwesomeIcon.SyncAlt))
                     TriggerPreview();
             }
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("更新预览");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.update_preview"));
         }
 
     }

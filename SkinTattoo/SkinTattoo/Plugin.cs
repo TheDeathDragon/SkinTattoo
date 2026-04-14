@@ -6,12 +6,15 @@ using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using System.Collections.Frozen;
+using System.Reflection;
 using SkinTattoo.Core;
 using SkinTattoo.Gui;
 using SkinTattoo.Http;
 using SkinTattoo.Interop;
 using SkinTattoo.Mesh;
 using SkinTattoo.Services;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo;
 
@@ -27,6 +30,7 @@ public sealed class Plugin : IDalamudPlugin
     private const string CommandName = "/skintattoo";
 
     private readonly Configuration config;
+    private readonly LocalizationManager localization;
     private readonly PenumbraBridge penumbra;
     private readonly TextureSwapService textureSwap;
     private readonly EmissiveCBufferHook emissiveHook;
@@ -60,6 +64,8 @@ public sealed class Plugin : IDalamudPlugin
     {
         config = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         config.Initialize(pluginInterface);
+
+        localization = InitializeLocalization(pluginInterface, config, log);
 
         penumbra = new PenumbraBridge(pluginInterface, log);
         textureSwap = new TextureSwapService(objectTable, log);
@@ -107,7 +113,7 @@ public sealed class Plugin : IDalamudPlugin
 
         commandManager.AddHandler(CommandName, new Dalamud.Game.Command.CommandInfo(OnCommand)
         {
-            HelpMessage = "打开 SkinTattoo 纹身编辑器窗口",
+            HelpMessage = Strings.T("command.help"),
         });
 
         this.framework = framework;
@@ -248,5 +254,47 @@ public sealed class Plugin : IDalamudPlugin
         meshExtractor.Dispose();
 
         penumbra.Dispose();
+        localization.Dispose();
+    }
+
+    private static LocalizationManager InitializeLocalization(IDalamudPluginInterface pi, Configuration cfg, IPluginLog log)
+    {
+        var manager = new LocalizationManager();
+        Strings.Attach(manager);
+
+        var supported = new Dictionary<string, string>(System.StringComparer.Ordinal)
+        {
+            ["en"] = "English",
+            ["zh-CN"] = "简体中文",
+        }.ToFrozenDictionary(System.StringComparer.Ordinal);
+
+        var embedded = new EmbeddedLocalizationSource(Assembly.GetExecutingAssembly(), "SkinTattoo.Localization");
+        var overlayDir = Path.Combine(pi.GetPluginConfigDirectory(), "Localization");
+        var overlay = new FileLocalizationSource(overlayDir);
+        var source = new LayeredLocalizationSource(overlay, embedded);
+
+        var options = new LocalizationOptions
+        {
+            SupportedLanguages = supported,
+            DefaultLanguage = "en",
+            FileNameResolver = lang => $"{lang}.json",
+            Source = source,
+            Parser = new KeyValueJsonLocalizationParser(),
+            FallbackResolver = _ => ["en"],
+            EnableHotReload = true,
+            LoggerTag = "SkinTattoo.I18n",
+        };
+
+        try
+        {
+            manager.Configure(options, cfg.Language);
+            log.Information("Localization: current={0}", manager.CurrentLanguage);
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex, "Localization init failed");
+        }
+
+        return manager;
     }
 }

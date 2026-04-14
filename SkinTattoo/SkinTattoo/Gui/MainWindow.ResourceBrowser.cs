@@ -10,6 +10,7 @@ using Penumbra.Api.Enums;
 using Penumbra.Api.Helpers;
 using SkinTattoo.Core;
 using SkinTattoo.Http;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Gui;
 
@@ -47,32 +48,32 @@ public partial class MainWindow
     private void DrawResourceWindow()
     {
         ImGui.SetNextWindowSize(new Vector2(680, 600), ImGuiCond.FirstUseEver);
-        if (!ImGui.Begin("添加目标材质###SkinTattooResources", ref resourceWindowOpen))
+        if (!ImGui.Begin(Strings.T("window.resource.title") + "###SkinTattooResources", ref resourceWindowOpen))
         {
             ImGui.End();
             return;
         }
 
-        if (ImGui.Button("刷新资源"))
+        if (ImGui.Button(Strings.T("button.refresh_resources")))
             RefreshResources();
         ImGui.SameLine();
-        if (ImGui.Button("导出全部诊断"))
+        if (ImGui.Button(Strings.T("button.export_diagnostics")))
             ExportAllDiagnostics();
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("把所有皮肤/iris 卡片的完整诊断 (含 SqPack 存在性 / Penumbra 重定向) dump 成 markdown 到剪贴板");
+            ImGui.SetTooltip("Dump complete diagnostics for all skin/iris cards (SqPack existence / Penumbra redirect) as markdown to clipboard");
         ImGui.SameLine();
-        ImGui.TextDisabled(penumbra.IsAvailable ? "Penumbra 已连接" : "Penumbra 未连接");
+        ImGui.TextDisabled(penumbra.IsAvailable ? Strings.T("label.penumbra_connected") : Strings.T("label.penumbra_disconnected"));
 
         if (!penumbra.IsAvailable)
         {
-            ImGui.TextColored(new Vector4(1, 0.4f, 0.4f, 1), "Penumbra 未连接");
+            ImGui.TextColored(new Vector4(1, 0.4f, 0.4f, 1), Strings.T("label.penumbra_disconnected"));
             ImGui.End();
             return;
         }
 
         if (cachedTrees == null || cachedTrees.Count == 0)
         {
-            ImGui.TextDisabled("点击「刷新资源」查询玩家资源");
+            ImGui.TextDisabled(Strings.T("hint.no_resources"));
             ImGui.End();
             return;
         }
@@ -203,12 +204,12 @@ public partial class MainWindow
             ImGui.Text(FontAwesomeIcon.Check.ToIconString());
             ImGui.PopFont();
             ImGui.SameLine();
-            ImGui.Text($"已添加: {addedGroup.Name}");
+            ImGui.Text(Strings.T("diag.add_already", addedGroup.Name));
             ImGui.PopStyleColor();
         }
         else
         {
-            if (ImGui.Button("添加"))
+            if (ImGui.Button(Strings.T("button.add")))
                 AddTargetGroupFromMtrl(card.FirstMtrlNode!, card.FirstParentMdl, card.LiveMdls);
         }
 
@@ -226,14 +227,14 @@ public partial class MainWindow
         if (card.MtrlPaths.Count > 1)
         {
             ImGui.SameLine();
-            ImGui.TextDisabled($"[{card.MtrlPaths.Count}材质合并]");
+            ImGui.TextDisabled(Strings.T("diag.merged_mtrl", card.MtrlPaths.Count));
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip(string.Join("\n", card.MtrlPaths.Select(p => "• " + Path.GetFileName(p))));
         }
 
         // Diagnostics popup: copy tex / mtrl / live mdl / derived candidate mdl
         ImGui.SameLine();
-        if (ImGui.SmallButton("路径"))
+        if (ImGui.SmallButton(Strings.T("button.path")))
             ImGui.OpenPopup("##PathDiag");
         DrawPathDiagPopup(card);
 
@@ -268,67 +269,67 @@ public partial class MainWindow
         var firstMtrl = card.MtrlPaths.Count > 0 ? card.MtrlPaths[0] : null;
         var derived = Core.TexPathParser.ParseBest(card.DiffuseGamePath, firstMtrl);
 
-        ImGui.TextDisabled("贴图 (Diffuse)");
-        DrawCopyRow("游戏路径", card.DiffuseGamePath);
+        ImGui.TextDisabled(Strings.T("label.tex_diffuse_header"));
+        DrawCopyRow(Strings.T("label.game_path"), card.DiffuseGamePath);
         if (!string.IsNullOrEmpty(card.DiffuseActualPath))
-            DrawCopyRow("实际路径", card.DiffuseActualPath);
+            DrawCopyRow(Strings.T("label.actual_path"), card.DiffuseActualPath);
 
         if (!string.IsNullOrEmpty(card.NormGamePath))
         {
             ImGui.Separator();
-            ImGui.TextDisabled("贴图 (Normal)");
-            DrawCopyRow("游戏路径", card.NormGamePath);
+            ImGui.TextDisabled(Strings.T("label.tex_normal_header"));
+            DrawCopyRow(Strings.T("label.game_path"), card.NormGamePath);
             if (!string.IsNullOrEmpty(card.NormActualPath))
-                DrawCopyRow("实际路径", card.NormActualPath);
+                DrawCopyRow(Strings.T("label.actual_path"), card.NormActualPath);
         }
 
         if (card.MtrlPaths.Count > 0)
         {
             ImGui.Separator();
-            ImGui.TextDisabled($"材质 ({card.MtrlPaths.Count})");
+            ImGui.TextDisabled(Strings.T("diag.mtrl_count", card.MtrlPaths.Count));
             foreach (var mp in card.MtrlPaths)
                 DrawCopyRow("mtrl", mp);
         }
 
         ImGui.Separator();
-        ImGui.TextDisabled($"模型 (资源树当前挂载: {card.LiveMdls.Count})");
+        ImGui.TextDisabled(Strings.T("diag.live_mdl_count", card.LiveMdls.Count));
         if (card.LiveMdls.Count == 0)
         {
-            ImGui.TextColored(new Vector4(1, 0.6f, 0.3f, 1), "(资源树里没有 mdl  -- -- 装备覆盖或未加载)");
+            ImGui.TextColored(new Vector4(1, 0.6f, 0.3f, 1), Strings.T("diag.no_live_mdl"));
         }
         else
         {
             foreach (var (gp, ap) in card.LiveMdls)
             {
                 if (!string.IsNullOrEmpty(gp))
-                    DrawCopyRow("游戏路径", gp);
+                    DrawCopyRow(Strings.T("label.game_path"), gp);
                 if (!string.IsNullOrEmpty(ap) && ap != gp)
-                    DrawCopyRow("实际路径", ap);
+                    DrawCopyRow(Strings.T("label.actual_path"), ap);
             }
         }
 
         ImGui.Separator();
-        ImGui.TextDisabled("模型 (SkinMeshResolver 解析)");
+        ImGui.TextDisabled(Strings.T("diag.resolver_header"));
         if (derived.IsSharedIris)
         {
             ImGui.TextColored(new Vector4(1, 0.8f, 0.3f, 1),
-                "共享 iris 贴图：需要从 mtrl 路径解析");
+                Strings.T("diag.shared_iris"));
         }
         else if (!derived.IsValid)
         {
             ImGui.TextColored(new Vector4(1, 0.4f, 0.4f, 1),
-                "(贴图/材质路径不是标准 chara/human/... 形式)");
+                Strings.T("diag.non_standard_path"));
         }
         else
         {
             ImGui.TextDisabled(
                 $"race={derived.Race} slot={derived.SlotKind}/{derived.SlotAbbr}{derived.SlotId}" +
-                (derived.BodySlotIdIsRewritten ? " (b id 已被引擎改写，资源树重新解析)" : ""));
+                (derived.BodySlotIdIsRewritten ? Strings.T("diag.body_id_rewritten") : ""));
 
             var resolution = firstMtrl != null ? GetCachedResolution(firstMtrl) : null;
             if (resolution != null && resolution.Success)
             {
-                ImGui.TextDisabled($"{resolution.MeshSlots.Count} mesh slot(s):");
+                ImGui.TextDisabled(Strings.T("diag.slot_count", resolution.MeshSlots.Count));
                 for (var i = 0; i < resolution.MeshSlots.Count; i++)
                 {
                     var slot = resolution.MeshSlots[i];
@@ -340,14 +341,14 @@ public partial class MainWindow
             }
             else if (resolution != null)
             {
-                ImGui.TextColored(new Vector4(1, 0.4f, 0.4f, 1), "解析失败");
+                ImGui.TextColored(new Vector4(1, 0.4f, 0.4f, 1), Strings.T("diag.resolver_failed"));
                 foreach (var diag in resolution.Diagnostics)
                     ImGui.TextDisabled("  " + diag);
             }
         }
 
         ImGui.Separator();
-        if (ImGui.MenuItem("一键复制全部 (markdown)"))
+        if (ImGui.MenuItem(Strings.T("label.copy_clipboard")))
             ImGui.SetClipboardText(BuildCardMarkdown(card));
 
         ImGui.EndPopup();
@@ -410,13 +411,13 @@ public partial class MainWindow
             RefreshResources();
 
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"# SkinTattoo 诊断 dump @ {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        sb.AppendLine($"# SkinTattoo diagnostic dump @ {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine($"- penumbra: {(penumbra.IsAvailable ? "ok" : "unavailable")}");
         sb.AppendLine($"- trees: {cachedTrees?.Count ?? 0}");
         sb.AppendLine();
 
         var cards = BuildMtrlCards();
-        sb.AppendLine($"# 卡片 ({cards.Count})");
+        sb.AppendLine($"# Cards ({cards.Count})");
         sb.AppendLine();
         foreach (var card in cards)
         {
@@ -425,7 +426,7 @@ public partial class MainWindow
         }
 
         // Probe shared paths that may not have a card (eye10 etc.)
-        sb.AppendLine("# 共享路径探测");
+        sb.AppendLine("# Shared path probe");
         string[] probes =
         [
             "chara/common/texture/eye/eye10_base.tex",
@@ -445,7 +446,7 @@ public partial class MainWindow
         // Raw resource trees: dump every Mdl/Mtrl/Tex node so we can spot the
         // mesh that owns the body skin. Limited to mdl/mtrl/tex to keep size sane.
         sb.AppendLine();
-        sb.AppendLine("# 资源树原始 dump (mdl/mtrl/tex)");
+        sb.AppendLine("# Raw resource tree dump (mdl/mtrl/tex)");
         if (cachedTrees != null)
         {
             foreach (var (treeId, tree) in cachedTrees)
@@ -486,7 +487,7 @@ public partial class MainWindow
     private static void DrawCopyRow(string label, string value)
     {
         ImGui.PushID(label + "::" + value);
-        if (ImGui.SmallButton("复制"))
+        if (ImGui.SmallButton(Strings.T("button.copy")))
             ImGui.SetClipboardText(value);
         ImGui.SameLine();
         ImGui.TextDisabled(label);
@@ -532,9 +533,9 @@ public partial class MainWindow
 
                     if (ImGui.BeginPopupContextItem(label))
                     {
-                        if (ImGui.Selectable("复制游戏路径"))
+                        if (ImGui.Selectable(Strings.T("menu.copy_game_path")))
                             ImGui.SetClipboardText(gamePath);
-                        if (!string.IsNullOrEmpty(actualPath) && ImGui.Selectable("复制实际路径"))
+                        if (!string.IsNullOrEmpty(actualPath) && ImGui.Selectable(Strings.T("menu.copy_actual_path")))
                             ImGui.SetClipboardText(actualPath);
                         ImGui.EndPopup();
                     }
@@ -546,7 +547,7 @@ public partial class MainWindow
         if (!rendered)
         {
             ImGui.Dummy(size);
-            if (!hasPath) ImGui.TextDisabled("(无)");
+            if (!hasPath) ImGui.TextDisabled("(None)");
         }
 
         // Show filename below preview

@@ -1,0 +1,313 @@
+{
+  "command": {
+    "help": "Open the SkinTattoo editor window"
+  },
+  "window": {
+    "main": {
+      "title": "SkinTattoo Editor",
+      "title_connected": "SkinTattoo Editor [Penumbra Connected]",
+      "title_disconnected": "SkinTattoo Editor [Penumbra Not Running]"
+    },
+    "export": {
+      "title": "Export Mod",
+      "title_local": "Export Mod to Local",
+      "title_penumbra": "Install Mod to Penumbra"
+    },
+    "debug": {
+      "title": "SkinTattoo Debug"
+    },
+    "resource": {
+      "title": "Add Target Material"
+    },
+    "editor3d": {
+      "title": "3D Editor"
+    }
+  },
+  "tab": {
+    "settings": "Settings",
+    "editor": "Editor",
+    "help": "Help"
+  },
+  "button": {
+    "add": "Add",
+    "export_local": "Export to Local",
+    "export_penumbra": "Install to Penumbra",
+    "exporting": "Exporting...",
+    "close": "Close",
+    "browse": "Browse...",
+    "refresh": "Refresh",
+    "refresh_resources": "Refresh Resources",
+    "export_diagnostics": "Export All Diagnostics",
+    "fit": "Fit",
+    "uv_mesh": "UV Mesh",
+    "default": "Default",
+    "reset_camera": "Reset Camera",
+    "add_model": "Add Model",
+    "re_resolve": "Re-resolve",
+    "manage_models": "Manage Models",
+    "open_debug": "Open Debug Log",
+    "clear": "Clear",
+    "copy_all": "Copy All",
+    "copy": "Copy",
+    "path": "Paths",
+    "remove": "Remove",
+    "save_mod": "Save Mod",
+    "browse_output": "Browse..."
+  },
+  "tooltip": {
+    "editor3d": "3D Decal Editor",
+    "reset_layer": "Reset current layer parameters",
+    "clear_redirect": "Restore textures  --  clear Penumbra redirect",
+    "export_base_tex": "Export base texture PNG (for external editing)",
+    "export_uv_wireframe": "Export UV wireframe PNG (for overlay reference)",
+    "export_local": "Export Mod to local (.pmp)",
+    "install_penumbra": "Install Mod to Penumbra",
+    "penumbra_not_running": "Penumbra is not running",
+    "load_mesh": "Load mesh",
+    "reload_mesh": "Reload mesh",
+    "auto_preview": "Auto-update in-game preview on parameter change",
+    "update_preview": "Update preview",
+    "add_group": "Add target material",
+    "delete_group": "Hold Ctrl+Shift to delete decal group",
+    "add_layer": "Add decal layer",
+    "delete_layer": "Hold Ctrl+Shift to delete layer",
+    "highlight_on": "Highlight decal",
+    "highlight_off": "Disable highlight",
+    "canvas_zoom": "Canvas zoom (scroll wheel)",
+    "uv_mesh_no_model": "Import a model first to show UV mesh",
+    "uv_mesh_show": "Show UV mesh",
+    "uv_mesh_hide": "Hide UV mesh",
+    "wire_color": "Mesh color",
+    "scale_locked": "Scale locked (pixel ratio)",
+    "scale_unlocked": "Scale unlocked (UV independent)",
+    "lock_ratio": "Lock ratio",
+    "unlock_ratio": "Unlock ratio",
+    "global_enable": "Globally enable or disable the plugin decal effect.\nDisabling restores all textures to original state.",
+    "swap_interval": "Minimum interval (ms) to sync parameter drag changes to game textures.\nSmaller = more real-time but higher CPU usage at high resolution.\n3D editor preview is not affected; it always syncs immediately on mouse release.",
+    "restore_default": "Restore default ({0}ms)",
+    "uv_aa": "Enable anti-aliased UV mesh wireframe for smoother lines.\nDisabling can significantly improve wireframe render performance for high-poly models.",
+    "uv_cull": "Skip triangles fully outside the visible canvas area.\nReduces CPU draw cost when scrolling/zooming the canvas.",
+    "uv_dedup": "Draw shared edges only once, reducing draw calls by ~50%%.\nAdds a small CPU preprocessing cost, most effective on high-poly meshes.",
+    "http_enable": "Enable local REST API for external tool automation.\nRequires plugin restart to take effect.",
+    "port": "Local HTTP debug server listening port.\nRequires plugin restart to take effect.\nDefault: 12580",
+    "port_range": "Valid range: 1024 - 65535",
+    "open_repo": "Open project repository in browser",
+    "open_discord": "Join Discord server in browser",
+    "copy_row": "Right-click to copy this line",
+    "show_hide_model": "Show/Hide",
+    "re_resolve_tip": "Re-detect current character equipment/mod state and refresh mesh",
+    "browse_image": "Browse..."
+  },
+  "label": {
+    "diffuse": "Diffuse",
+    "normal": "Normal",
+    "material": "Material",
+    "language": "Language",
+    "refresh_settings": "Refresh Settings",
+    "swap_interval": "Swap Interval",
+    "uv_wireframe": "UV Wireframe",
+    "aa": "Anti-aliasing",
+    "viewport_cull": "Viewport Culling",
+    "dedup": "Shared Edge Dedup",
+    "http_server": "HTTP Debug Server",
+    "http_server_desc": "Exposes a local REST API so external tools (AI agents, scripts) can drive the plugin programmatically: query status, add/edit layers, trigger previews, export Mods. Intended for AI-assisted debugging and automation. Leave disabled if you don't need it.",
+    "http_enable": "Enable HTTP Server",
+    "port": "Port",
+    "debug_section": "Debug",
+    "about": "About",
+    "repo": "Repository",
+    "discord": "Discord",
+    "http_restart_notice": "Changes to HTTP toggle or port require plugin restart.",
+    "penumbra_connected": "Penumbra Connected",
+    "penumbra_disconnected": "Penumbra Disconnected",
+    "center_x": "Center X",
+    "center_y": "Center Y",
+    "size": "Size",
+    "rotation": "Rotation",
+    "opacity": "Opacity",
+    "blend": "Blend",
+    "clip": "Clip",
+    "shape": "Shape",
+    "falloff": "Falloff",
+    "angle": "Angle",
+    "range": "Range",
+    "offset": "Offset",
+    "intensity": "Intensity",
+    "mask_preview": "Mask Preview:",
+    "mask_label": "Mask",
+    "effect_label": "Effect",
+    "mod_name": "Mod Name",
+    "author": "Author",
+    "version": "Version",
+    "description": "Description",
+    "export_path": "Export Path",
+    "included_groups": "Included Groups",
+    "auto_scroll": "Auto Scroll",
+    "filter_hint": "Filter...",
+    "model_info": "Models: {0}  Triangles: {1}",
+    "uv_scale": "UV Scale",
+    "size_rotation_fmt": "Size: {0}  Rotation: {1}",
+    "game_path": "Game Path",
+    "actual_path": "Actual Path",
+    "tex_diffuse_header": "Texture (Diffuse)",
+    "tex_normal_header": "Texture (Normal)",
+    "copy_clipboard": "Copy to Clipboard (markdown)"
+  },
+  "section": {
+    "image": "Decal Image",
+    "transform": "UV Position",
+    "render": "Render",
+    "pbr": "Decal Properties",
+    "fade": "Layer Falloff"
+  },
+  "checkbox": {
+    "enable_plugin": "Enable SkinTattoo",
+    "show_decal": "Show Decal",
+    "emissive": "Emissive",
+    "auto_preview": "Auto Preview",
+    "uv_aa": "Anti-aliasing##uvAA",
+    "uv_cull": "Viewport Culling##uvCull",
+    "uv_dedup": "Shared Edge Dedup##uvDedup",
+    "http_enable": "Enable HTTP Server##httpEn"
+  },
+  "menu": {
+    "copy_diffuse_path": "Copy Diffuse Path",
+    "copy_normal_path": "Copy Normal Path",
+    "copy_material_path": "Copy Material Path",
+    "copy_game_path": "Copy Game Path",
+    "copy_actual_path": "Copy Actual Path"
+  },
+  "enum": {
+    "blendmode": {
+      "normal": "Normal",
+      "multiply": "Multiply",
+      "screen": "Screen",
+      "overlay": "Overlay",
+      "softlight": "Soft Light",
+      "hardlight": "Hard Light",
+      "darken": "Darken",
+      "lighten": "Lighten",
+      "colordodge": "Color Dodge",
+      "colorburn": "Color Burn",
+      "difference": "Difference",
+      "exclusion": "Exclusion"
+    },
+    "fademask": {
+      "uniform": "Uniform",
+      "radial": "Radial Spread",
+      "ring": "Edge Ring",
+      "outline": "Edge Outline",
+      "gradient": "Directional Gradient",
+      "gaussian": "Gaussian Falloff",
+      "shape_outline": "Shape Outline"
+    },
+    "clip": {
+      "none": "No Clip",
+      "left": "Clip Left",
+      "right": "Clip Right",
+      "top": "Clip Top",
+      "bottom": "Clip Bottom"
+    }
+  },
+  "notify": {
+    "export": {
+      "success_local": "Export Successful",
+      "success_penumbra": "Installed to Penumbra",
+      "failed": "Export Failed"
+    },
+    "base_tex_exported": "Base texture saved to {0}",
+    "wireframe_exported": "UV wireframe saved to {0}",
+    "export_success": "Export Successful",
+    "export_failed": "Export Failed"
+  },
+  "error": {
+    "no_mod_name": "Please enter a Mod name",
+    "no_group_hint": "Add a decal group first",
+    "no_layer_selected": "Select or add a layer",
+    "no_group_selected": "Please select at least one layer group",
+    "no_visible_layer": "No visible layers in selected groups",
+    "penumbra_unavailable": "Penumbra is not running",
+    "no_output_path": "Please select an export file path",
+    "all_groups_skipped": "{0} group(s) all skipped",
+    "penumbra_install_failed": "Penumbra install failed: {0}",
+    "export_exception": "Export error: {0}",
+    "need_mtrl": "Material (.mtrl) must be selected",
+    "no_mesh_loaded": "No mesh loaded"
+  },
+  "help": {
+    "uv_editor_canvas": "UV Editor  -- Canvas Controls",
+    "uv_editor_modifiers": "UV Editor  -- Modifier Keys",
+    "layer_target": "Layers and Targets",
+    "editor3d_camera": "3D Editor  -- Camera",
+    "editor3d_decal": "3D Editor  -- Decal",
+    "editor3d_models": "3D Editor  -- Model Management",
+    "canvas_scroll": "Scroll wheel: zoom canvas",
+    "canvas_pan": "Middle-drag: pan canvas",
+    "canvas_move_decal": "Left-drag: move decal position",
+    "canvas_select": "Left-click empty area: select decal layer",
+    "canvas_scale": "Right-drag: scale decal",
+    "mod_shift": "Shift + Left-drag: lock X axis",
+    "mod_ctrl": "Ctrl + Left-drag: lock Y axis",
+    "mod_alt": "Alt + Right-drag: rotate decal",
+    "delete_hint": "Ctrl+Shift + Delete button: delete layer/group",
+    "context_menu": "Right-click group header: copy texture / normal / material path",
+    "cam_rotate": "Right-drag: rotate camera",
+    "cam_pan": "Middle-drag: pan camera",
+    "cam_zoom": "Ctrl + Scroll: camera zoom",
+    "cam_reset": "Reset Camera button: return to default view",
+    "decal_place": "Left-click model: place selected layer's decal at that position",
+    "decal_scale": "Scroll wheel: scale selected decal (non-Ctrl)",
+    "model_add": "Add Model: append extra model from player resource tree",
+    "model_manage": "Manage Models: toggle visibility / remove added models"
+  },
+  "hint": {
+    "canvas_ops": "LMB: move decal  RMB: scale decal  MMB: pan canvas  Scroll: zoom canvas",
+    "canvas_mods": "Shift: lock X  Ctrl: lock Y  Alt+RMB: rotate",
+    "viewport_ops": "LMB: place decal  RMB: rotate camera  MMB: pan camera",
+    "viewport_scroll": "Scroll: scale decal  Ctrl+Scroll: zoom camera",
+    "loading": "Loading...",
+    "loading_sub": "Loading models and decals, please wait",
+    "no_resources": "Click \"Refresh Resources\" to query player resources",
+    "no_model_detected": "No character models detected",
+    "select_model": "Select a model to add:",
+    "model_list": "Model list:",
+    "empty_group_list": "Click + to add target material",
+    "no_layer_groups": "(No layer groups in project)",
+    "layer_group_fmt": "{0} ({1} layers)"
+  },
+  "dialog": {
+    "select_image": "Select Decal Image",
+    "export_base_tex": "Export Base Texture",
+    "export_wireframe": "Export UV Wireframe",
+    "save_mod": "Save Mod"
+  },
+  "layer": {
+    "default": {
+      "name": "Decal {0}"
+    }
+  },
+  "tooltip_group": {
+    "diffuse": "Texture: {0}",
+    "normal": "Normal: {0}",
+    "material": "Material: {0}",
+    "copy_hint": "(Right-click menu to copy paths)"
+  },
+  "diag": {
+    "mtrl_count": "Material ({0})",
+    "live_mdl_count": "Models (resource tree, current: {0})",
+    "no_live_mdl": "(No mdl in resource tree -- equipment override or not loaded)",
+    "resolver_header": "Models (SkinMeshResolver)",
+    "resolver_failed": "Resolve failed",
+    "shared_iris": "Shared iris texture: need to resolve from mtrl path",
+    "non_standard_path": "(Texture/material path is not standard chara/human/... format)",
+    "derived_info": "race={0} slot={1}/{2}{3}{4}",
+    "body_id_rewritten": " (body id rewritten by engine, re-resolved from resource tree)",
+    "slot_count": "{0} mesh slot(s):",
+    "add_already": "Added: {0}",
+    "merged_mtrl": "[{0} materials merged]"
+  },
+  "export_summary": {
+    "success_skip": "{0} succeeded / {1} skipped",
+    "success_only": "{0} layer group(s)"
+  }
+}

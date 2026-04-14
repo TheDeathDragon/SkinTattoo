@@ -5,6 +5,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using SkinTattoo.Http;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Gui;
 
@@ -14,7 +15,7 @@ public class DebugWindow : Window
     private bool logAutoScroll = true;
 
     public DebugWindow()
-        : base("SkinTattoo 调试###SkinTattooDebug",
+        : base(Strings.T("window.debug.title") + "###SkinTattooDebug",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         SizeConstraints = new WindowSizeConstraints
@@ -27,13 +28,13 @@ public class DebugWindow : Window
     public override void Draw()
     {
         // Toolbar
-        if (ImGui.Button("清空"))
+        if (ImGui.Button(Strings.T("button.clear")))
         {
             while (DebugServer.LogBuffer.TryDequeue(out _)) { }
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("复制全部"))
+        if (ImGui.Button(Strings.T("button.copy_all")))
         {
             var sb = new StringBuilder();
             foreach (var line in DebugServer.LogBuffer)
@@ -42,14 +43,14 @@ public class DebugWindow : Window
         }
 
         ImGui.SameLine();
-        ImGui.Checkbox("自动滚动", ref logAutoScroll);
+        ImGui.Checkbox(Strings.T("label.auto_scroll"), ref logAutoScroll);
 
         ImGui.SameLine();
         ImGui.SetNextItemWidth(200);
-        ImGui.InputTextWithHint("##LogFilter", "过滤...", ref logFilter, 256);
+        ImGui.InputTextWithHint("##LogFilter", Strings.T("label.filter_hint"), ref logFilter, 256);
 
         ImGui.SameLine();
-        ImGui.TextDisabled($"({DebugServer.LogBuffer.Count} 条)");
+        ImGui.TextDisabled($"({DebugServer.LogBuffer.Count})");
 
         ImGui.Separator();
 
@@ -66,7 +67,7 @@ public class DebugWindow : Window
             if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
                 ImGui.SetClipboardText(line);
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("右键复制此行");
+                ImGui.SetTooltip(Strings.T("tooltip.copy_row"));
         }
 
         if (logAutoScroll && ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - 20)

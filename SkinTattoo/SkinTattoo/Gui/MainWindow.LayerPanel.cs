@@ -7,6 +7,7 @@ using Dalamud.Interface.Utility.Raii;
 using SkinTattoo.Core;
 using SkinTattoo.Http;
 using SkinTattoo.Interop;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Gui;
 
@@ -22,7 +23,7 @@ public partial class MainWindow
             resourceWindowOpen = true;
             RefreshResources();
         }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("添加目标材质");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.add_group"));
 
         ImGui.SameLine();
         var io = ImGui.GetIO();
@@ -46,7 +47,7 @@ public partial class MainWindow
             }
         }
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip("按住 Ctrl+Shift 删除贴花组");
+            ImGui.SetTooltip(Strings.T("tooltip.delete_group"));
 
         ImGui.SameLine();
         ImGui.TextDisabled($"({project.Groups.Count})");
@@ -65,7 +66,7 @@ public partial class MainWindow
         }
 
         if (project.Groups.Count == 0)
-            ImGui.TextDisabled("点击 + 添加目标材质");
+            ImGui.TextDisabled(Strings.T("hint.empty_group_list"));
     }
 
     private void DrawGroupCard(int gi)
@@ -116,12 +117,12 @@ public partial class MainWindow
         {
             ImGui.BeginTooltip();
             if (!string.IsNullOrEmpty(group.DiffuseGamePath))
-                ImGui.Text($"贴图: {group.DiffuseGamePath}");
+                ImGui.Text(Strings.T("tooltip_group.diffuse", group.DiffuseGamePath));
             if (!string.IsNullOrEmpty(group.NormGamePath))
-                ImGui.Text($"法线: {group.NormGamePath}");
+                ImGui.Text(Strings.T("tooltip_group.normal", group.NormGamePath));
             if (!string.IsNullOrEmpty(group.MtrlGamePath))
-                ImGui.Text($"材质: {group.MtrlGamePath}");
-            ImGui.TextDisabled("(右键菜单可复制路径)");
+                ImGui.Text(Strings.T("tooltip_group.material", group.MtrlGamePath));
+            ImGui.TextDisabled(Strings.T("tooltip_group.copy_hint"));
             ImGui.EndTooltip();
         }
 
@@ -130,17 +131,17 @@ public partial class MainWindow
         {
             var hasDiffuse = !string.IsNullOrEmpty(group.DiffuseGamePath);
             using (ImRaii.Disabled(!hasDiffuse))
-                if (ImGui.MenuItem("复制贴图路径"))
+                if (ImGui.MenuItem(Strings.T("menu.copy_diffuse_path")))
                     ImGui.SetClipboardText(group.DiffuseGamePath ?? "");
 
             var hasNorm = !string.IsNullOrEmpty(group.NormGamePath);
             using (ImRaii.Disabled(!hasNorm))
-                if (ImGui.MenuItem("复制法线路径"))
+                if (ImGui.MenuItem(Strings.T("menu.copy_normal_path")))
                     ImGui.SetClipboardText(group.NormGamePath ?? "");
 
             var hasMtrl = !string.IsNullOrEmpty(group.MtrlGamePath);
             using (ImRaii.Disabled(!hasMtrl))
-                if (ImGui.MenuItem("复制材质路径"))
+                if (ImGui.MenuItem(Strings.T("menu.copy_material_path")))
                     ImGui.SetClipboardText(group.MtrlGamePath ?? "");
             ImGui.EndPopup();
         }
@@ -163,7 +164,7 @@ public partial class MainWindow
         {
             project.SelectedGroupIndex = gi;
             layerCounter++;
-            var newLayer = group.AddLayer($"贴花 {layerCounter}");
+            var newLayer = group.AddLayer(Strings.T("layer.default.name", layerCounter));
             // Correct initial UvScale for texture aspect ratio so the decal
             // starts as a square in pixel space (e.g., 1024x2048 -> aspect 0.5).
             var (tw, th) = previewService.GetBaseTextureSize(group);
@@ -174,7 +175,7 @@ public partial class MainWindow
             // from the previously-selected layer (across groups too).
             SyncImagePathBuf();
         }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("添加贴花图层");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.add_layer"));
 
         ImGui.SameLine();
         var io2 = ImGui.GetIO();
@@ -197,7 +198,7 @@ public partial class MainWindow
             }
         }
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip("按住 Ctrl+Shift 删除图层");
+            ImGui.SetTooltip(Strings.T("tooltip.delete_layer"));
 
         ImGui.SameLine();
         using (ImRaii.Disabled(!isGroupSelected || group.SelectedLayerIndex <= 0))
@@ -272,7 +273,7 @@ public partial class MainWindow
                 ImGuiComponents.IconButton(200 + li, FontAwesomeIcon.Crosshairs);
                 if (isThisHighlighted) ImGui.PopStyleColor();
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip(isThisHighlighted ? "关闭高亮" : "高亮显示贴花");
+                    ImGui.SetTooltip(isThisHighlighted ? Strings.T("tooltip.highlight_off") : Strings.T("tooltip.highlight_on"));
                 if (ImGui.IsItemClicked())
                 {
                     if (isThisHighlighted)

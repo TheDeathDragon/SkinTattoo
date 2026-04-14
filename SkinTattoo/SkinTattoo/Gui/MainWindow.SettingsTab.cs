@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Gui;
 
@@ -18,13 +19,58 @@ public partial class MainWindow
     private const string RepoUrl = "https://github.com/TheDeathDragon/SkinTattoo";
     private const string DiscordUrl = "https://discord.gg/FPY94anSRN";
 
+    private void DrawLanguageSelector()
+    {
+        var mgr = Strings.Manager;
+        var current = mgr.CurrentLanguage;
+        var supported = mgr.SupportedLanguages;
+        var available = mgr.AvailableLanguages;
+
+        var preview = supported.TryGetValue(current, out var dn) ? dn : current;
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text(Strings.T("label.language"));
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(200f);
+        if (ImGui.BeginCombo("##LanguageCombo", preview))
+        {
+            foreach (var kv in supported)
+            {
+                var code = kv.Key;
+                var display = kv.Value;
+                var selected = code == current;
+                var exists = available.ContainsKey(code);
+                if (!exists) display += " (missing)";
+
+                if (ImGui.Selectable(display, selected))
+                {
+                    if (code != current && exists)
+                    {
+                        try
+                        {
+                            mgr.LoadLanguage(code);
+                            config.Language = code;
+                            config.Save();
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log?.Error(ex, "Language switch failed");
+                        }
+                    }
+                }
+                if (selected) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+    }
+
     private void DrawSettingsTab()
     {
         using var scroll = ImRaii.Child("##SettingsScroll", new Vector2(-1, -1), false);
         if (!scroll.Success) return;
 
         var enabled = config.PluginEnabled;
-        if (ImGui.Checkbox("启用 SkinTattoo", ref enabled))
+        if (ImGui.Checkbox(Strings.T("checkbox.enable_plugin"), ref enabled))
         {
             config.PluginEnabled = enabled;
             config.Save();
@@ -43,7 +89,9 @@ public partial class MainWindow
             }
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("全局启用或禁用插件的贴花效果。\n关闭后会还原所有贴图到原始状态。");
+            ImGui.SetTooltip(Strings.T("tooltip.global_enable"));
+
+        DrawLanguageSelector();
 
         ImGui.Spacing();
 
@@ -51,11 +99,11 @@ public partial class MainWindow
         if (!string.IsNullOrEmpty(shpkConflict))
         {
             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
-            ImGui.TextWrapped("检测到其他 Mod 修改了 skin.shpk：");
+            ImGui.TextWrapped("Detected another Mod modifying skin.shpk:");
             ImGui.PopStyleColor();
             ImGui.TextWrapped(shpkConflict);
-            ImGui.TextWrapped("启用发光时，本插件的 skin.shpk 会覆盖该 Mod 的着色器。" +
-                "如果出现渲染异常，请在 Penumbra 中禁用冲突 Mod。");
+            ImGui.TextWrapped("When emissive is enabled, this plugin's skin.shpk will override that Mod's shader. " +
+                "If rendering issues occur, disable the conflicting Mod in Penumbra.");
             ImGui.Spacing();
         }
 
@@ -65,7 +113,7 @@ public partial class MainWindow
         const float labelW = 110f;
 
         // ── Refresh ──
-        ImGui.TextDisabled("刷新设置");
+        ImGui.TextDisabled(Strings.T("label.refresh_settings"));
         ImGui.Spacing();
 
         if (!settingsDraggingSwapInterval)
@@ -73,11 +121,9 @@ public partial class MainWindow
                 config.GameSwapIntervalMs, SwapIntervalMin, SwapIntervalMax);
 
         ImGui.AlignTextToFramePadding();
-        ImGui.Text("刷新间隔");
+        ImGui.Text(Strings.T("label.swap_interval"));
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("拖拽调整参数时，将修改同步到游戏贴图的最小间隔（毫秒）。\n"
-                           + "数值越小越实时，但在大分辨率下会占用更多主线程时间。\n"
-                           + "3D 编辑器预览不受此限制，松手时总会立即同步。");
+            ImGui.SetTooltip(Strings.T("tooltip.swap_interval"));
         ImGui.SameLine(labelW);
         ImGui.SetNextItemWidth(160);
         ImGui.SliderInt("##SwapInt", ref settingsPendingSwapInterval,
@@ -91,7 +137,7 @@ public partial class MainWindow
         }
 
         ImGui.SameLine();
-        if (ImGui.SmallButton("默认"))
+        if (ImGui.SmallButton(Strings.T("button.default")))
         {
             settingsPendingSwapInterval = SwapIntervalDefault;
             config.GameSwapIntervalMs = SwapIntervalDefault;
@@ -99,67 +145,68 @@ public partial class MainWindow
             settingsDraggingSwapInterval = false;
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip($"恢复默认值 ({SwapIntervalDefault}ms)");
+            ImGui.SetTooltip(Strings.T("tooltip.restore_default", SwapIntervalDefault));
 
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
 
         // ── UV wireframe ──
-        ImGui.TextDisabled("UV 网格线框");
+        ImGui.TextDisabled(Strings.T("label.uv_wireframe"));
         ImGui.Spacing();
 
         var uvAA = config.UvWireframeAntiAlias;
-        if (ImGui.Checkbox("抗锯齿##uvAA", ref uvAA))
+        if (ImGui.Checkbox(Strings.T("checkbox.uv_aa"), ref uvAA))
         {
             config.UvWireframeAntiAlias = uvAA;
             config.Save();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("开启后 UV 网格线框使用抗锯齿渲染，线条更平滑。\n"
-                           + "关闭可显著提升线框渲染性能，适用于高面数模型。");
+            ImGui.SetTooltip(Strings.T("tooltip.uv_aa"));
 
         var uvCull = config.UvWireframeCulling;
-        if (ImGui.Checkbox("视口外剔除##uvCull", ref uvCull))
+        if (ImGui.Checkbox(Strings.T("checkbox.uv_cull"), ref uvCull))
         {
             config.UvWireframeCulling = uvCull;
             config.Save();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("跳过完全在画布可见区域之外的三角形。\n"
-                           + "开启可减少画布滚动/缩放时的 CPU 绘制开销。");
+            ImGui.SetTooltip(Strings.T("tooltip.uv_cull"));
 
         var uvDedup = config.UvWireframeDedup;
-        if (ImGui.Checkbox("共享边去重##uvDedup", ref uvDedup))
+        if (ImGui.Checkbox(Strings.T("checkbox.uv_dedup"), ref uvDedup))
         {
             config.UvWireframeDedup = uvDedup;
             config.Save();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("相邻三角形的共享边只绘制一次，减少约 50%% 绘制量。\n"
-                           + "会增加少量 CPU 预处理开销，网格面数极高时效益最明显。");
+            ImGui.SetTooltip(Strings.T("tooltip.uv_dedup"));
 
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
 
         // ── HTTP ──
-        ImGui.TextDisabled("HTTP 调试服务器");
+        ImGui.TextDisabled(Strings.T("label.http_server"));
+        ImGui.Spacing();
+        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.7f, 0.7f, 0.7f, 1f));
+        ImGui.TextWrapped(Strings.T("label.http_server_desc"));
+        ImGui.PopStyleColor();
         ImGui.Spacing();
 
         var httpEnabled = config.HttpEnabled;
-        if (ImGui.Checkbox("启用 HTTP 服务器##httpEn", ref httpEnabled))
+        if (ImGui.Checkbox(Strings.T("checkbox.http_enable"), ref httpEnabled))
         {
             config.HttpEnabled = httpEnabled;
             config.Save();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("开启后在本地端口提供 REST API，\n可用于外部工具自动化操作。\n修改后需重启插件生效。");
+            ImGui.SetTooltip(Strings.T("tooltip.http_enable"));
 
         ImGui.AlignTextToFramePadding();
-        ImGui.Text("端口号");
+        ImGui.Text(Strings.T("label.port"));
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("本地 HTTP 调试服务器监听端口。\n修改后需重启插件生效。\n默认: 12580");
+            ImGui.SetTooltip(Strings.T("tooltip.port"));
         ImGui.SameLine(labelW);
         ImGui.SetNextItemWidth(120);
         var port = config.HttpPort;
@@ -172,53 +219,51 @@ public partial class MainWindow
             }
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("有效范围: 1024 - 65535");
+            ImGui.SetTooltip(Strings.T("tooltip.port_range"));
 
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
 
         // ── Debug ──
-        ImGui.TextDisabled("调试");
+        ImGui.TextDisabled(Strings.T("label.debug_section"));
         ImGui.Spacing();
 
-        if (ImGui.Button("打开调试日志窗口"))
+        if (ImGui.Button(Strings.T("button.open_debug")))
         {
             if (DebugWindowRef != null)
                 DebugWindowRef.IsOpen = true;
         }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("查看插件运行时日志。");
 
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
 
         // ── About / links ──
-        ImGui.TextDisabled("关于");
+        ImGui.TextDisabled(Strings.T("label.about"));
         ImGui.Spacing();
 
         ImGui.AlignTextToFramePadding();
-        ImGui.Text("仓库");
+        ImGui.Text(Strings.T("label.repo"));
         ImGui.SameLine(labelW);
         if (ImGui.Button($"{RepoUrl}##repoLink"))
             OpenUrl(RepoUrl);
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("在浏览器中打开项目仓库");
+            ImGui.SetTooltip(Strings.T("tooltip.open_repo"));
 
         ImGui.AlignTextToFramePadding();
-        ImGui.Text("Discord");
+        ImGui.Text(Strings.T("label.discord"));
         ImGui.SameLine(labelW);
         if (ImGui.Button($"{DiscordUrl}##discordLink"))
             OpenUrl(DiscordUrl);
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("在浏览器中加入 Discord 服务器");
+            ImGui.SetTooltip(Strings.T("tooltip.open_discord"));
 
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
         ImGui.TextColored(new Vector4(1, 0.8f, 0.3f, 1),
-            "修改 HTTP 开关或端口后需重启插件生效。");
+            Strings.T("label.http_restart_notice"));
     }
 
     private static void OpenUrl(string url)

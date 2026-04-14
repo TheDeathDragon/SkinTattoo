@@ -2,7 +2,7 @@
 <Project Sdk="Dalamud.NET.Sdk/14.0.0">
   <PropertyGroup>
     <Version>$(SkinTattooVersion)</Version>
-    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -25,6 +25,13 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Shaders\Model.hlsl" />
+    <EmbeddedResource Include="Localization\*.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="images\icon.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>

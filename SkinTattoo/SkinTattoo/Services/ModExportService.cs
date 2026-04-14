@@ -8,6 +8,7 @@ using Penumbra.Api.Enums;
 using SkinTattoo.Core;
 using SkinTattoo.Http;
 using SkinTattoo.Interop;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Services;
 
@@ -79,20 +80,20 @@ public class ModExportService : IDisposable
     public string? Validate(ModExportOptions options)
     {
         if (string.IsNullOrWhiteSpace(options.ModName))
-            return "请输入 Mod 名称";
+            return Strings.T("error.no_mod_name");
         if (options.SelectedGroups.Count == 0)
-            return "请至少选择一个图层组";
+            return Strings.T("error.no_group_selected");
 
         bool anyVisible = options.SelectedGroups
             .Any(g => g.Layers.Any(l => l.IsVisible && !string.IsNullOrEmpty(l.ImagePath)));
         if (!anyVisible)
-            return "选中的图层组没有可见图层";
+            return Strings.T("error.no_visible_layer");
 
         if (options.Target == ExportTarget.InstallToPenumbra && !penumbra.IsAvailable)
-            return "Penumbra 未运行";
+            return Strings.T("error.penumbra_unavailable");
 
         if (options.Target == ExportTarget.LocalPmp && string.IsNullOrWhiteSpace(options.OutputPmpPath))
-            return "请选择导出文件路径";
+            return Strings.T("error.no_output_path");
 
         return null;
     }
@@ -103,7 +104,7 @@ public class ModExportService : IDisposable
         var err = Validate(options);
         if (err != null)
         {
-            Notify(false, "导出失败", err);
+            Notify(false, Strings.T("notify.export.failed"), err);
             return new ModExportResult { Success = false, Message = err };
         }
 
@@ -153,8 +154,8 @@ public class ModExportService : IDisposable
 
             if (success == 0)
             {
-                var msg = $"{skipped} 个 group 全部跳过";
-                Notify(false, "导出失败", msg);
+                var msg = Strings.T("error.all_groups_skipped", skipped);
+                Notify(false, Strings.T("notify.export.failed"), msg);
                 return new ModExportResult
                 {
                     Success = false,
@@ -174,8 +175,8 @@ public class ModExportService : IDisposable
                 var ec = penumbra.InstallMod(pmpPath);
                 if (ec != PenumbraApiEc.Success)
                 {
-                    var failMsg = $"Penumbra 安装失败：{ec}";
-                    Notify(false, "导出失败", failMsg);
+                    var failMsg = Strings.T("error.penumbra_install_failed", ec);
+                    Notify(false, Strings.T("notify.export.failed"), failMsg);
                     return new ModExportResult
                     {
                         Success = false,
@@ -187,11 +188,11 @@ public class ModExportService : IDisposable
             }
 
             var summary = skipped > 0
-                ? $"{success} 成功 / {skipped} 跳过"
-                : $"{success} 个图层组";
+                ? Strings.T("export_summary.success_skip", success, skipped)
+                : Strings.T("export_summary.success_only", success);
             var notifyTitle = options.Target == ExportTarget.LocalPmp
-                ? "导出成功"
-                : "已安装到 Penumbra";
+                ? Strings.T("notify.export.success_local")
+                : Strings.T("notify.export.success_penumbra");
             var notifyContent = options.Target == ExportTarget.LocalPmp
                 ? $"{options.ModName}：{summary}\n{pmpPath}"
                 : $"{options.ModName}：{summary}";
@@ -209,8 +210,8 @@ public class ModExportService : IDisposable
         catch (Exception ex)
         {
             log.Error(ex, "[ModExport] Export failed");
-            var msg = $"导出异常：{ex.Message}";
-            Notify(false, "导出失败", msg);
+            var msg = Strings.T("error.export_exception", ex.Message);
+            Notify(false, Strings.T("notify.export.failed"), msg);
             return new ModExportResult { Success = false, Message = msg };
         }
         finally

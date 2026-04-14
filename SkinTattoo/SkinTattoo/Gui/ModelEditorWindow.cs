@@ -13,6 +13,7 @@ using SkinTattoo.DirectX;
 using SkinTattoo.Interop;
 using SkinTattoo.Mesh;
 using SkinTattoo.Services;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Gui;
 
@@ -57,7 +58,7 @@ public class ModelEditorWindow : Window, IDisposable
         PenumbraBridge penumbra,
         SkinMeshResolver skinMeshResolver,
         nint deviceHandle)
-        : base("3D 编辑器###SkinTattooModelEditor",
+        : base(Strings.T("window.editor3d.title") + "###SkinTattooModelEditor",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         this.project = project;
@@ -105,11 +106,11 @@ public class ModelEditorWindow : Window, IDisposable
 
     private void DrawToolbar()
     {
-        if (ImGui.Button("重置相机"))
+        if (ImGui.Button(Strings.T("button.reset_camera")))
             camera.Reset();
 
         ImGui.SameLine();
-        if (ImGui.Button("添加模型"))
+        if (ImGui.Button(Strings.T("button.add_model")))
         {
             RefreshMdlList();
             ImGui.OpenPopup("AddMdlPopup");
@@ -120,7 +121,7 @@ public class ModelEditorWindow : Window, IDisposable
         var canReResolve = reGroup != null && !string.IsNullOrEmpty(reGroup.MtrlGamePath);
         using (ImRaii.Disabled(!canReResolve))
         {
-            if (ImGui.Button("重新解析"))
+            if (ImGui.Button(Strings.T("button.re_resolve")))
             {
                 var trees = penumbra.GetPlayerTrees();
                 var resolution = skinMeshResolver.Resolve(reGroup!.MtrlGamePath!, trees);
@@ -151,18 +152,18 @@ public class ModelEditorWindow : Window, IDisposable
             }
         }
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip("重新检测角色当前装备/mod 状态并刷新网格");
+            ImGui.SetTooltip(Strings.T("tooltip.re_resolve_tip"));
 
         if (ImGui.BeginPopup("AddMdlPopup"))
         {
             var group = project.SelectedGroup;
             if (cachedMdlList == null || cachedMdlList.Count == 0)
             {
-                ImGui.TextDisabled("未检测到角色模型");
+                ImGui.TextDisabled(Strings.T("hint.no_model_detected"));
             }
             else
             {
-                ImGui.Text("选择要添加的模型:");
+                ImGui.Text(Strings.T("hint.select_model"));
                 ImGui.Separator();
                 var existing = group?.AllMeshPaths ?? [];
                 foreach (var (name, diskPath) in cachedMdlList)
@@ -195,12 +196,12 @@ public class ModelEditorWindow : Window, IDisposable
         if (group2 != null && group2.AllMeshPaths.Count > 0)
         {
             ImGui.SameLine();
-            if (ImGui.Button("管理模型"))
+            if (ImGui.Button(Strings.T("button.manage_models")))
                 ImGui.OpenPopup("MeshListPopup");
 
             if (ImGui.BeginPopup("MeshListPopup"))
             {
-                ImGui.Text("模型列表:");
+                ImGui.Text(Strings.T("hint.model_list"));
                 ImGui.Separator();
                 var changed = false;
                 string? removeTarget = null;
@@ -219,14 +220,14 @@ public class ModelEditorWindow : Window, IDisposable
                             group2.HiddenMeshPaths.Add(p);
                         changed = true;
                     }
-                    if (ImGui.IsItemHovered()) ImGui.SetTooltip("显示/隐藏");
+                    if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.show_hide_model"));
 
                     ImGui.SameLine();
                     ImGui.Text(Path.GetFileName(p));
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip(p);
 
                     ImGui.SameLine();
-                    if (ImGui.SmallButton("移除"))
+                    if (ImGui.SmallButton(Strings.T("button.remove")))
                         removeTarget = p;
 
                     ImGui.PopID();
@@ -263,7 +264,7 @@ public class ModelEditorWindow : Window, IDisposable
         var pathCount = group2?.AllMeshPaths.Count ?? 0;
         if (mesh != null)
         {
-            ImGui.TextDisabled($"模型: {pathCount}  三角面: {mesh.TriangleCount}");
+            ImGui.TextDisabled(Strings.T("label.model_info", pathCount, mesh.TriangleCount));
             var layer = project.SelectedLayer;
             if (layer != null)
             {
@@ -273,7 +274,7 @@ public class ModelEditorWindow : Window, IDisposable
         }
         else
         {
-            ImGui.TextColored(new Vector4(1, 0.5f, 0.3f, 1), "未加载网格");
+            ImGui.TextColored(new Vector4(1, 0.5f, 0.3f, 1), Strings.T("error.no_mesh_loaded"));
         }
     }
 
@@ -316,7 +317,7 @@ public class ModelEditorWindow : Window, IDisposable
         if (layer != null)
         {
             var line1 = $"UV: {layer.UvCenter.X:F3}, {layer.UvCenter.Y:F3}";
-            var line2 = $"大小: {layer.UvScale.X:F3}  旋转: {layer.RotationDeg:F1}\u00b0";
+            var line2 = Strings.T("label.size_rotation_fmt", $"{layer.UvScale.X:F3}", $"{layer.RotationDeg:F1}\u00b0");
             var pos2 = viewportPos + new Vector2(4, viewportSize.Y - 20);
             var pos1 = pos2 - new Vector2(0, 18);
             var size1 = ImGui.CalcTextSize(line1);
@@ -329,8 +330,8 @@ public class ModelEditorWindow : Window, IDisposable
 
         // Bottom-right: operation hints (stacked lines)
         {
-            var hint1 = "左键:放置贴花  右键:旋转相机  中键:平移相机";
-            var hint2 = "滚轮:缩放贴花  Ctrl+滚轮:缩放相机";
+            var hint1 = Strings.T("hint.viewport_ops");
+            var hint2 = Strings.T("hint.viewport_scroll");
             var hint1Size = ImGui.CalcTextSize(hint1);
             var hint2Size = ImGui.CalcTextSize(hint2);
             var pos2 = viewportPos + new Vector2(viewportSize.X - hint2Size.X - 6, viewportSize.Y - 20);

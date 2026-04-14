@@ -12,6 +12,7 @@ using StbImageWriteSharp;
 using SkinTattoo.Core;
 using SkinTattoo.Http;
 using SkinTattoo.Mesh;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Gui;
 
@@ -65,7 +66,7 @@ public partial class MainWindow
         var (data, w, h) = tex.Value;
 
         fileDialog.SaveFileDialog(
-            "导出底图",
+            Strings.T("dialog.export_base_tex"),
             "PNG{.png}",
             $"base_{w}x{h}.png",
             ".png",
@@ -82,12 +83,12 @@ public partial class MainWindow
                         var writer = new ImageWriter();
                         writer.WritePng(capturedData, cw, ch, ColorComponents.RedGreenBlueAlpha, ms);
                         File.WriteAllBytes(path, ms.ToArray());
-                        Notify(true, "导出成功", $"底图已保存到 {Path.GetFileName(path)}");
+                        Notify(true, Strings.T("notify.export_success"), Strings.T("notify.base_tex_exported", Path.GetFileName(path)));
                     }
                     catch (Exception ex)
                     {
-                        DebugServer.AppendLog($"[Export] 导出失败: {ex.Message}");
-                        Notify(false, "导出失败", ex.Message);
+                        DebugServer.AppendLog($"[Export] failed: {ex.Message}");
+                        Notify(false, Strings.T("notify.export_failed"), ex.Message);
                     }
                 });
             },
@@ -105,7 +106,7 @@ public partial class MainWindow
         int w = tex.Value.Width, h = tex.Value.Height;
 
         fileDialog.SaveFileDialog(
-            "导出 UV 线框",
+            Strings.T("dialog.export_wireframe"),
             "PNG{.png}",
             $"wireframe_{w}x{h}.png",
             ".png",
@@ -123,12 +124,12 @@ public partial class MainWindow
                         var writer = new ImageWriter();
                         writer.WritePng(pixels, cw, ch, ColorComponents.RedGreenBlueAlpha, ms);
                         File.WriteAllBytes(path, ms.ToArray());
-                        Notify(true, "导出成功", $"UV 线框已保存到 {Path.GetFileName(path)}");
+                        Notify(true, Strings.T("notify.export_success"), Strings.T("notify.wireframe_exported", Path.GetFileName(path)));
                     }
                     catch (Exception ex)
                     {
-                        DebugServer.AppendLog($"[Export] 导出失败: {ex.Message}");
-                        Notify(false, "导出失败", ex.Message);
+                        DebugServer.AppendLog($"[Export] failed: {ex.Message}");
+                        Notify(false, Strings.T("notify.export_failed"), ex.Message);
                     }
                 });
             },

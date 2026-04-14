@@ -78,6 +78,7 @@ public class Configuration : IPluginConfiguration
 {
     public int Version { get; set; } = 4;
     public bool PluginEnabled { get; set; } = true;
+    public string Language { get; set; } = "en";
     public bool HttpEnabled { get; set; } = false;
     public int HttpPort { get; set; } = 12580;
 
