@@ -181,17 +181,19 @@ public sealed class Plugin : IDalamudPlugin
                     { hasLayers = true; break; }
                 }
 
+                // Respect the global toggle: when disabled, skip Penumbra redirect
+                // build + apply so opening the editor doesn't auto-install decals.
+                // Mesh load above still runs so the 3D editor has geometry to show.
                 Dictionary<string, string>? redirects = null;
-                if (hasLayers)
+                if (hasLayers && config.PluginEnabled)
                     redirects = previewService.BuildPreviewRedirects(project);
 
-                // Penumbra IPC + redraw must run on the framework thread
                 await framework.RunOnFrameworkThread(() =>
                 {
                     try
                     {
                         previewService.NotifyMeshChanged();
-                        if (redirects != null && redirects.Count > 0)
+                        if (config.PluginEnabled && redirects != null && redirects.Count > 0)
                         {
                             previewService.ApplyPreviewRedirects(project, redirects);
                             modelEditorWindow.MarkTexturesDirty();

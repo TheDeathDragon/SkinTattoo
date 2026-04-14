@@ -1669,6 +1669,29 @@ public class PreviewService : IDisposable
                         redirects[group.NormGamePath!] = normOut;
                     }
                 }
+
+                // Iris mask: red-channel composite of decal shapes.
+                // iris.shpk reads mask.r as emissive coverage; without it the
+                // patched g_EmissiveColor has no visible surface to light.
+                if (IsIrisMaterial(group))
+                {
+                    var irisMtrlDisk = group.OrigMtrlDiskPath ?? group.MtrlDiskPath;
+                    var maskGamePath = GetMaskGamePathFromMtrl(group.MtrlGamePath!, irisMtrlDisk);
+                    if (!string.IsNullOrEmpty(maskGamePath))
+                    {
+                        var maskTex = LoadGameTexture(maskGamePath);
+                        if (maskTex != null)
+                        {
+                            var (maskData, mw, mh) = maskTex.Value;
+                            var maskPatched = CompositeIrisMask(visibleLayers, maskData, mw, mh);
+                            if (maskPatched != null)
+                            {
+                                var maskOut = WriteStagingTex(stagingDir, maskGamePath, maskPatched, mw, mh);
+                                redirects[maskGamePath] = maskOut;
+                            }
+                        }
+                    }
+                }
             }
         }
 

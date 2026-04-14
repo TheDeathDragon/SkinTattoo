@@ -113,7 +113,8 @@ public class ModExportService : IDisposable
 
         try
         {
-            var allRedirects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var sharedRedirects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var groupExports = new List<GroupExport>();
             int success = 0, skipped = 0;
 
             foreach (var group in options.SelectedGroups)
@@ -126,8 +127,20 @@ public class ModExportService : IDisposable
                         skipped++;
                         continue;
                     }
+
+                    // Shared assets (patched skin_ct.shpk) always load with the mod,
+                    // not per-option — otherwise disabling one decal group would drop
+                    // the shader that other enabled groups still need.
+                    var groupFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var (gp, rp) in groupRedirects)
-                        allRedirects[gp] = rp;
+                    {
+                        if (IsSharedAsset(gp))
+                            sharedRedirects[gp] = rp;
+                        else
+                            groupFiles[gp] = rp;
+                    }
+
+                    groupExports.Add(new GroupExport(group.Name, groupFiles));
                     success++;
                 }
                 catch (Exception ex)
@@ -154,7 +167,7 @@ public class ModExportService : IDisposable
                 ? options.OutputPmpPath!
                 : installPmpPath;
 
-            PmpPackageWriter.Pack(stagingDir, options, allRedirects, pmpPath);
+            PmpPackageWriter.Pack(stagingDir, options, sharedRedirects, groupExports, pmpPath);
 
             if (options.Target == ExportTarget.InstallToPenumbra)
             {
@@ -206,4 +219,11 @@ public class ModExportService : IDisposable
             catch (Exception ex) { DebugServer.AppendLog($"[ModExport] Staging cleanup failed: {ex.Message}"); }
         }
     }
+
+    // shader packages must stay always-on so the decal groups that reference
+    // them keep rendering correctly when the user toggles individual groups.
+    private static bool IsSharedAsset(string gamePath)
+        => gamePath.Replace('\\', '/').StartsWith("shader/", StringComparison.OrdinalIgnoreCase);
 }
+
+internal sealed record GroupExport(string Name, Dictionary<string, string> Files);

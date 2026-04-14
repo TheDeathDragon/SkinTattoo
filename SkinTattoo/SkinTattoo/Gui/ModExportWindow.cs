@@ -76,6 +76,13 @@ public class ModExportWindow : Window
     {
         fileDialog.Draw();
 
+        if (closeAfterExport)
+        {
+            closeAfterExport = false;
+            IsOpen = false;
+            return;
+        }
+
         ImGui.Text("Mod 名称");
         ImGui.SetNextItemWidth(-1);
         ImGui.InputText("##modName", ref modName, 128);
@@ -185,14 +192,19 @@ public class ModExportWindow : Window
                 options.SelectedGroups.Add(project.Groups[i]);
 
         exporting = true;
-        // Result is delivered via Dalamud Notification (see ModExportService.Notify).
-        // Window can be closed by user immediately; the notification persists.
         Task.Run(() =>
         {
-            try { exportService.Export(options); }
+            try
+            {
+                var result = exportService.Export(options);
+                if (result.Success)
+                    closeAfterExport = true;
+            }
             finally { exporting = false; }
         });
     }
+
+    private volatile bool closeAfterExport;
 
     private static string SafeFileName(string s)
     {
