@@ -248,15 +248,13 @@ public partial class MainWindow
             if (ImGuiComponents.IconButton(100 + li, visIcon))
             {
                 layer.IsVisible = !layer.IsVisible;
+                // Force a Full Redraw so the toggle also propagates to materials that
+                // live in a different TargetGroup but share this group's texture state.
+                // Inplace GPU swap only covers the current group and misses those cases.
                 if (layer.AffectsEmissive || layer.RequiresRowPair)
-                {
                     previewService.InvalidateEmissiveForGroup(group);
-                    MarkPreviewDirty(immediate: true);
-                }
-                else
-                {
-                    MarkPreviewDirty();
-                }
+                previewService.ForceFullRedrawNextCycle();
+                MarkPreviewDirty(immediate: true);
             }
             ImGui.PopStyleColor();
 

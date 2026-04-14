@@ -1529,6 +1529,16 @@ public class PreviewService : IDisposable
         CanSwapInPlace = false;
     }
 
+    /// <summary>Force the next UpdatePreview to take the Full Redraw path across all groups.
+    /// Lighter than ResetSwapState — keeps row-pair allocators, vanilla CT cache, and
+    /// emissive offsets intact, just drops the redirect-init markers so
+    /// <see cref="CheckCanSwapInPlace"/> returns false next cycle.</summary>
+    public void ForceFullRedrawNextCycle()
+    {
+        initializedRedirects.Clear();
+        CanSwapInPlace = false;
+    }
+
     /// <summary>Clear GPU swap state, forcing next update to do full redraw.</summary>
     public void ResetSwapState()
     {
@@ -2912,39 +2922,13 @@ public class PreviewService : IDisposable
 
                     if (da < 0.001f) continue;
 
-                    // Emissive layers: cut the diffuse at the same maskValue >= 0.5 boundary
-                    // that the normal.a row-index composite uses. Without this, the decal's
-                    // soft diffuse fade extends beyond where emissive reaches and the raw
-                    // decal color becomes a visible outline — especially on low-resolution
-                    // face textures (512x512) where the fade spans multiple screen pixels.
-                    if (layerLocal.AffectsEmissive && layerLocal.AllocatedRowPair >= 0)
-                    {
-                        float mv;
-                        if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
-                        {
-                            mv = ComputeDirectionalGradient(ru, rv, da,
-                                layerLocal.GradientAngleDeg, layerLocal.GradientScale,
-                                layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
-                        }
-                        else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
-                        {
-                            float sum = 0; int cnt = 0;
-                            for (int dy = -1; dy <= 1; dy++)
-                                for (int dx = -1; dx <= 1; dx++)
-                                {
-                                    if (dx == 0 && dy == 0) continue;
-                                    float ndu = du + dx; float ndv = dv + dy;
-                                    SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
-                                    sum += na * opacity; cnt++;
-                                }
-                            mv = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
-                        }
-                        else
-                        {
-                            mv = ComputeFadeMaskWeight(layerLocal.FadeMask, layerLocal.FadeMaskFalloff, ru, rv, da);
-                        }
-                        if (mv < 0.5f) continue;
-                    }
+                    // Previously this clipped the diffuse to the emissive feather-mask
+                    // boundary (mv >= 0.5) so the diffuse couldn't extend past the
+                    // emissive region. That caused the underlying decal to disappear
+                    // whenever the user combined "show decal" + emissive + a feather —
+                    // and if emissive was black, nothing rendered at all.
+                    // Now diffuse always paints the full decal shape; emissive coverage
+                    // is independently controlled by the normal.a row-index composite.
 
                     int oIdx = (py * w + px) * 4;
                     float br = output[oIdx] / 255f;
