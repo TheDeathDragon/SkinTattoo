@@ -1,0 +1,35 @@
+name: 'Build SkinTattoo'
+description: 'Build SkinTattoo, archive the output, and upload as a workflow artifact.'
+inputs:
+  configuration:
+    description: 'Build configuration: Release or Debug.'
+    required: false
+    default: 'Release'
+  version:
+    description: 'Assembly version (e.g. 1.0.0.0). Leave empty for default.'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Build
+      shell: pwsh
+      run: |
+        $ver = "${{ inputs.version }}"
+        if ([string]::IsNullOrWhiteSpace($ver)) {
+          dotnet build --no-restore --nologo --configuration ${{ inputs.configuration }}
+        } else {
+          dotnet build --no-restore --nologo --configuration ${{ inputs.configuration }} `
+            -p:SkinTattooVersion=$ver -p:Version=$ver -p:FileVersion=$ver -p:AssemblyVersion=$ver
+        }
+
+    - name: Archive
+      shell: pwsh
+      run: Compress-Archive -Path SkinTattoo/SkinTattoo/bin/${{ inputs.configuration }}/win-x64/* -DestinationPath SkinTattoo.zip
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: SkinTattoo
+        path: ./SkinTattoo.zip
