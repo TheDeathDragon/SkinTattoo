@@ -2,16 +2,24 @@
   "Author": "Shiro",
   "Name": "SkinTattoo",
   "InternalName": "SkinTattoo",
-  "Punchline": "实时皮肤贴花投影与预览",
-  "Description": "将 PNG 贴花投影到角色皮肤上，支持漫反射和法线通道，通过 Penumbra 实时预览。使用 /skintattoo 打开。",
+  "Punchline": "Real-time skin decal compositor for FFXIV",
+  "Description": "Composites image decals onto character skin textures (diffuse + normal) in real time via Penumbra. No game file modification. Supports per-layer emissive, iris glow, ColorTable PBR, and Mod (.pmp) export. Under active development - feedback welcome via Issues or Discord. Type /skintattoo to open.",
   "AssemblyVersion": "0.0.0.1",
   "ApplicableVersion": "any",
   "DalamudApiLevel": 14,
+  "IconUrl": "https://raw.githubusercontent.com/TheDeathDragon/SkinTattoo/master/images/icon.png",
   "Tags": [
     "texture",
     "decal",
     "tattoo",
     "skin",
-    "penumbra"
-  ]
+    "penumbra",
+    "glamour",
+    "mod",
+    "cosmetic"
+  ],
+  "CategoryTags": [
+    "utility"
+  ],
+  "Changelog": ""
 }
