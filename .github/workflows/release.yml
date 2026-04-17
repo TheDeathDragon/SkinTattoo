@@ -70,4 +70,4 @@ jobs:
           git checkout repo
           git add repo.json repo.cn.json
           git commit -m "[CI] Update repo manifests for ${{ github.ref_name }}" || $true
-          git push origin repo
+          git push --force-with-lease origin repo
