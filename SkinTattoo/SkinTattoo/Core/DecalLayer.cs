@@ -44,6 +44,14 @@ public enum EmissiveAnimMode
     Pulse = 1,
     Flicker = 2,
     Gradient = 3,
+    Ripple = 4,
+}
+
+public enum RippleDirMode
+{
+    Radial = 0,
+    Linear = 1,
+    Bidirectional = 2,
 }
 
 public class DecalLayer
@@ -77,6 +85,14 @@ public class DecalLayer
     public float AnimSpeed { get; set; } = 1.0f;
     public float AnimAmplitude { get; set; } = 0.5f;
     public Vector3 EmissiveColorB { get; set; } = new(0f, 0f, 1f);
+    // Ripple frequency (rings per UV unit). ~20 gives 20 ring peaks across the full texture.
+    public float AnimFreq { get; set; } = 20f;
+    // Ripple wave direction mode.
+    public RippleDirMode AnimDirMode { get; set; } = RippleDirMode.Radial;
+    // Ripple wave angle in degrees (0=+U axis, 90=+V axis). Only used in Linear/Bidirectional.
+    public float AnimDirAngle { get; set; } = 0f;
+    // When true, Ripple peaks/valleys interpolate between colorA and colorB (like Gradient in space).
+    public bool AnimDualColor { get; set; } = false;
     public float Roughness { get; set; } = 0.5f;
     public float Metalness { get; set; } = 0f;
     public float SheenRate { get; set; } = 0.1f;

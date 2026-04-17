@@ -125,15 +125,17 @@ cbuffer g_PbrParameterCommon
 - DecalLayer 新增 `EmissiveColorB` 字段（默认蓝色）
 - shpk 缓存文件名 `skin_ct_v3.shpk` 强制重生
 
-### 阶段 3（旧编号）：Ripple 水波纹（未实施）
-**目标**：从中心扩散的同心圆波纹。
+### 阶段 5：Ripple 水波纹（已完成 2026-04-18）
+**目标**：从贴花中心向外扩散的同心圆发光波纹。
 
-实现思路：
-- CT row column 4（halfs 16-19）新增 `(centerU, centerV, frequency, mode=2)`
-- DXBC 计算：`dist = length(v2.xy - center); k = 1 + amp*sin(freq*dist - 2pi*speed*t)`
-- `mul/sqrt/dp2` 实现距离，组合到 phase
-
-**退出条件**：选择波纹模式 → 中心自动对齐贴花 → 调频率和速度 → 从中心向外扩散的光波。
+实现：
+- 公式 `phase = 2π·speed·t - freq·dist`，`k = 1 + amp·sin(phase)`，最终 `r1 *= k`
+- `dist = length(v2.xy - center)`，`v2.xy` = TEXCOORD0（vanilla PS[19] 保留的 body UV0）
+- ColorTable col 5 halfs 20/21/22 = `centerU`、`centerV`、`freq`；非 Ripple 模式写 0 → 空间相位偏移为 0 → 路径无条件执行但等效 Pulse，避免 shader 分支
+- DXBC 新增 7 条指令（`mov col5 U` + `sample col5` + `add d = uv - center` + `dp2` + `sqrt` + `mul freq·dist` + `add phase -= ripple`），payload 从 169 → 220 token
+- Center 直接取 `DecalLayer.UvCenter`（贴花自己的 UV 中心），freq 新增字段 `AnimFreq`（默认 20 rings/UV）
+- iris.shpk 路径 `EmissiveCBufferHook.ComputeModulatedColor` 没法获取逐像素 UV，Ripple 模式优雅降级为 Pulse
+- shpk 缓存 `skin_ct_v5.shpk`
 
 ### 阶段 4：Iris（眼部）pulse 支持（已完成 2026-04-17，路线 4B）
 **目标**：让眼睛也能按相同参数 pulse。
@@ -161,16 +163,25 @@ cbuffer g_PbrParameterCommon
 
 ## 三、ColorTable 每层数据布局
 
-ColorTable 是 8 × 32 的 half4 纹理，每 rowPair 两行写相同值（bilinear 填充）。列 0..10 + 16 为 vanilla PBR 字段；列 3 (halfs 12-15) 专供动画参数使用：
+ColorTable 是 8 × 32 的 half4 纹理，每 rowPair 两行写相同值（bilinear 填充）。vanilla 只用到 halfs 0..10 + 16（PBR 字段），其余对我们可用。最终布局：
 
-| Half | 含义 | 阶段 |
+| Half | 含义 | 引入阶段 |
 |---|---|---|
+| 8-10  | emissive RGB (colorA) | 1 |
 | 12 | speed (Hz) | 1 |
 | 13 | amplitude (0..1) | 1 |
-| 14 | mode (0=Pulse, 1=Flicker, 2=Ripple) | 2+ |
-| 15 | 备用 | 2+ |
-
-未来若需更多字段可扩展到 column 4 (halfs 16-19)，vanilla 只用到 half 16（roughness），17-19 空闲。
+| 14 | mode (0=Pulse, 1=Flicker, 2=Gradient, 3=Ripple) | 2-5 |
+| 15 | 备用 | — |
+| 16 | (vanilla roughness — 保留不动) | — |
+| 17-19 | dualColor / Gradient colorB RGB | 3 |
+| 20 | ripple centerU | 5 |
+| 21 | ripple centerV | 5 |
+| 22 | ripple freq (rings per UV unit) | 5 |
+| 23 | ripple dirMode (0=radial, 1=linear, 2=bidir) | 5b |
+| 24 | ripple dirX (cos(angle)) | 5b |
+| 25 | ripple dirY (sin(angle)) | 5b |
+| 26 | dualActive (1=Gradient 或 Ripple+dual) | 5b |
+| 27 | 备用 | — |
 
 **最初的 cb0[19] 方案已废弃**（参见阶段 1 架构决策记录）。
 
@@ -180,25 +191,29 @@ ColorTable 是 8 × 32 的 half4 纹理，每 rowPair 两行写相同值（bilin
 
 生产实现在 **C#** (`SkinShpkPatcher.cs`)，不走独立 Python 脚本。Python 工具 (`ShaderPatcher/`) 保留为研究辅助：
 - `parse_shpk.py` — dump vanilla shpk 结构
-- `gen_pulse_tokens.py` — 编译参考 HLSL，提取 DXBC token 模板
-- `scan_cb0_usage.py` — 风险扫描：确认新 cb 索引不冲突
-- `verify_cb0_extended.py` — 运行后抽检 PS 反汇编是否符合预期
+- `gen_pulse_tokens.py` / `gen_flicker_tokens.py` / `gen_gradient_tokens.py` / `gen_ripple_tokens.py` / `gen_ripple_ext_tokens.py` — 编译参考 HLSL，提取 DXBC token 模板
+- `verify_*_payload.py` — payload 字节级自检（opcode 长度字段 vs 实际 token 数），字节写错会被抓住
+- `scan_cb0_usage.py` — 风险扫描
+- `dump_ps19_inputs.py` / `read_vanilla_ps19.py` — 调试辅助
 
 C# 侧注入流程（`PatchSinglePs`）按以下顺序串联：
 1. `PatchShexAddDeclarations` — 添加 s5 sampler + t10 texture
 2. `PatchShexReplaceEmissive` — 把 vanilla 的 `mul cb0[3]*cb0[3]` + `mul r0.z*r1` 替换为 `mad V + mov U + sample r1` 读 ColorTable
-3. `PatchShexExtendCb0` — 仍保留（stage 0 遗留，让 cb0[19] 可读，虽然 stage 1 实际没用到）
-4. `PatchShexInjectPulseModulation` — 在 emissive sample 之后插入 pulse 8 指令
+3. `PatchShexExtendCb0` — 保留（stage 0 遗留，cb0[18..19] dcl 已扩容，虽然实际没用到）
+4. `PatchShexInjectPulseModulation` — 在 emissive sample 之后插入完整的动画调制 payload（当前 36 指令 / 276 token，包含 pulse / flicker / gradient / ripple + 方向 + 双色 四合一逻辑）
 
 失败回退：若 emissive 模式匹配失败（24/32 PS 有此情况），整个 PS 跳过。pulse 注入失败不阻塞，记录日志继续。
+
+**shpk 缓存文件名升级规则**：每次 payload 大小变化或发现 bug 修复时，`candidate` 文件名后缀 (`skin_ct_v1/v2/...`) 要 bump，否则用户机上的老 shpk 缓存不会被重新生成。当前为 `skin_ct_v6.shpk`。
 
 ---
 
 ## 五、风险与未决问题
 
-1. **Flicker 的 hash 质量**：`frac(sin(x)*43758)` 在某些 GPU 上条带化。备选用 Hash32 LUT（更多指令）
-2. **Ripple 中心在镜像 UV 问题**：FFXIV 身体 UV 在 [1,2] 镜像区，波纹需在正确的 UV 子空间扩散。可能需要 UV pre-clamp 到 [0,1] 或用贴花局部空间坐标
-3. **Mod 导出**：动画参数存在 ColorTable 里随 mtrl 导出，其他客户端若没有 patched skin.shpk 不会看到动画（等效静态发光，行为安全）
+1. **Ripple 在镜像 UV 的不连续**：FFXIV 身体 UV 某些部位在 [1,2] 镜像区；同个贴花中心在左右两半对称出现，线性 ripple 跨过 UV=1 边界时波纹会断开。暂无解（需要贴花局部空间坐标系，改动大）
+2. **Mod 导出**：动画参数（包括 ripple 的 center/freq/dir 和 dualColor 等）都存在 ColorTable 里随 mtrl 导出；其他客户端若没有 patched skin.shpk 不会看到动画，等效静态发光
+3. **iris 的 Ripple 降级**：`EmissiveCBufferHook` 在 CPU 端没有逐像素 UV，因此 iris 上的 Ripple 降级为 Pulse。若需真正眼球 ripple，需 iris.shpk 同样做 DXBC patch
+4. **register 占用**：payload 用到 r3, r4, r5, r6, r7, r8, r9, r10；vanilla dcl_temps=16 所以有富余，但若未来 payload 扩展需要更多寄存器，应先核对 vanilla 的 r10+ 活性
 
 ---
 
@@ -206,10 +221,9 @@ C# 侧注入流程（`PatchSinglePs`）按以下顺序串联：
 
 | 阶段 | 状态 | 备注 |
 |---|---|---|
-| 0 — 基础设施 | ✅ 2026-04-17 | CB0 dcl [18]→[20]，零视觉影响 |
-| 1 — Pulse | ✅ 2026-04-17 | 每层独立 via ColorTable column 3 |
-| 2 — Flicker | 未实施 | 按 ColorTable 方案可增量扩展 |
-| 2 — Flicker | ✅ 2026-04-17 | sin → sign 方波，DXBC +32 tokens，iris 同步支持 |
-| 3 — Gradient | ✅ 2026-04-18 | 双色 lerp，CT col 4 存 colorB，DXBC +77 tokens |
-| 4 — Iris pulse | ✅ 2026-04-17 | 路线 4B：EmissiveCBufferHook + Stopwatch 实时调制 |
-| 5 — Ripple | 未实施 | 需要 UV 距离场 + 位置参数 |
+| 0 — 基础设施 | 完成 2026-04-17 | CB0 dcl [18]→[20]，零视觉影响 |
+| 1 — Pulse | 完成 2026-04-17 | 每层独立 via ColorTable column 3 |
+| 2 — Flicker | 完成 2026-04-17 | sin → sign 方波，DXBC +32 tokens，iris 同步支持 |
+| 3 — Gradient | 完成 2026-04-18 | 双色 lerp，CT col 4 存 colorB，DXBC +77 tokens |
+| 4 — Iris pulse | 完成 2026-04-17 | 路线 4B：EmissiveCBufferHook + Stopwatch 实时调制 |
+| 5 — Ripple | 完成 2026-04-18 | v2.xy UV 距离场 + CT col 5 + col 6，三种方向（radial/linear/bidir）+ 双色，DXBC 最终 36 指令 / 276 token |

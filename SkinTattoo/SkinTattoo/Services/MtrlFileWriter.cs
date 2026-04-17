@@ -298,15 +298,34 @@ public static class MtrlFileWriter
             bool hasAnim = layer.AnimMode != Core.EmissiveAnimMode.None;
             float animSpeed = hasAnim ? layer.AnimSpeed : 0f;
             float animAmp   = hasAnim ? layer.AnimAmplitude : 0f;
-            // mode sentinel for DXBC branch selection: 0=pulse, 1=flicker, 2=gradient.
+            // mode sentinel for DXBC branch selection: 0=pulse, 1=flicker, 2=gradient, 3=ripple
             float animMode = layer.AnimMode switch
             {
-                Core.EmissiveAnimMode.Flicker => 1f,
+                Core.EmissiveAnimMode.Flicker  => 1f,
                 Core.EmissiveAnimMode.Gradient => 2f,
+                Core.EmissiveAnimMode.Ripple   => 3f,
                 _ => 0f,
             };
             // Gradient second color (scaled by intensity for consistent brightness).
             var emB = layer.EmissiveColorB * layer.EmissiveIntensity;
+            // Ripple: centerU/V from layer UV placement, freq only when in Ripple mode
+            // so other modes produce zero spatial phase offset (shader unconditional path).
+            bool isRipple = layer.AnimMode == Core.EmissiveAnimMode.Ripple;
+            float centerU = isRipple ? layer.UvCenter.X : 0f;
+            float centerV = isRipple ? layer.UvCenter.Y : 0f;
+            float freq    = isRipple ? layer.AnimFreq : 0f;
+            float dirMode = isRipple ? (float)(int)layer.AnimDirMode : 0f;
+            // Direction unit vector precomputed from angle (shader does d·dir projection).
+            float angleRad = layer.AnimDirAngle * MathF.PI / 180f;
+            float dirX = isRipple ? MathF.Cos(angleRad) : 1f;
+            float dirY = isRipple ? MathF.Sin(angleRad) : 0f;
+            // dualActive triggers the lerp(colorA, colorB, 0.5+0.5*amp*sin) path:
+            // - Gradient mode always dual (by definition)
+            // - Ripple mode when user selected AnimDualColor
+            // - Pulse/Flicker/None never dual
+            bool dualActive = layer.AnimMode == Core.EmissiveAnimMode.Gradient
+                              || (isRipple && layer.AnimDualColor);
+            float dualFlag = dualActive ? 1f : 0f;
             for (int r = 0; r < 2; r++)
             {
                 WriteHalf(rowLower + r, 8,  em.X);
@@ -315,10 +334,19 @@ public static class MtrlFileWriter
                 WriteHalf(rowLower + r, 12, animSpeed);
                 WriteHalf(rowLower + r, 13, animAmp);
                 WriteHalf(rowLower + r, 14, animMode);
-                // halfs 17/18/19 = colorB RGB (half 16 = vanilla roughness, must not touch).
+                // halfs 17/18/19 = Gradient/Ripple-dual colorB RGB (half 16 = vanilla roughness).
                 WriteHalf(rowLower + r, 17, emB.X);
                 WriteHalf(rowLower + r, 18, emB.Y);
                 WriteHalf(rowLower + r, 19, emB.Z);
+                // halfs 20/21/22/23 = Ripple centerU / centerV / freq / dirMode.
+                WriteHalf(rowLower + r, 20, centerU);
+                WriteHalf(rowLower + r, 21, centerV);
+                WriteHalf(rowLower + r, 22, freq);
+                WriteHalf(rowLower + r, 23, dirMode);
+                // halfs 24/25/26 = dirX / dirY / dualActive (half 27 unused).
+                WriteHalf(rowLower + r, 24, dirX);
+                WriteHalf(rowLower + r, 25, dirY);
+                WriteHalf(rowLower + r, 26, dualFlag);
             }
         }
 

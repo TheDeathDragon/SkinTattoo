@@ -32,6 +32,11 @@ public class SavedLayer
     public float EmissiveColorB_R { get; set; } = 0f;
     public float EmissiveColorB_G { get; set; } = 0f;
     public float EmissiveColorB_B { get; set; } = 1f;
+    // Ripple: rings per UV unit.
+    public float AnimFreq { get; set; } = 20f;
+    public int AnimDirMode { get; set; } = 0;
+    public float AnimDirAngle { get; set; } = 0f;
+    public bool AnimDualColor { get; set; } = false;
     public int EmissiveMask { get; set; }
     public float EmissiveMaskFalloff { get; set; } = 0.5f;
     public float GradientAngleDeg { get; set; }

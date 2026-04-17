@@ -462,39 +462,77 @@ public static class SkinShpkPatcher
         0x00107E46, 0x0000000A,
         0x00106000, 0x00000005);
 
-    // Animation modulation payload: 21 instructions, 171 tokens, 684 bytes.
-    // Pulse + Flicker + Gradient: samples col 3 (anim params) and col 4 (colorB RGB in halfs
-    // 17/18/19; half 16 = roughness, ignored). r7 holds backup of sin and colorA for the
-    // Gradient branch; r1 ends up holding the final emissive color routed by mode.
+    // Animation modulation payload: 36 instructions, 276 tokens, 1104 bytes.
+    // Modes: Pulse(0) / Flicker(1) / Gradient(2) / Ripple(3) + RippleDirection(radial/linear/bidir) + DualColor.
+    //  - col 3 halfs 12..15 = speed, amp, mode, (unused)
+    //  - col 4 halfs 17..19 = gradient/dual colorB RGB (half 16 = vanilla roughness, untouched)
+    //  - col 5 halfs 20..23 = ripple centerU, centerV, freq, dirMode
+    //  - col 6 halfs 24..26 = dirX, dirY, dualActive (half 27 unused)
+    // C# sets dualActive=1 when (mode==Gradient) or (mode==Ripple && RippleDual).
+    // dirMode: 0=radial, 1=linear, 2=bidirectional. Non-Ripple modes use freq=0 → spatial offset is 0.
     //
-    //   mov    r9.x, l(0.4375)                      ; col 3 U
-    //   mad    r9.y, r0.z, l(0.9375), l(0.015625)   ; V from normal.alpha
-    //   sample r2.xyzw, r9.xyxx, t10, s5            ; r2.x=speed, .y=amp, .z=mode
-    //   mul    r9.x, r2.x, cb2[0].x                 ; phase = speed * LoopTime
-    //   mul    r9.x, r9.x, l(6.283185)              ; *2pi
-    //   sincos r9.x, null, r9.x                     ; r9.x = sin(phase)
-    //   mov    r7.w, r9.x                           ; backup sin for Gradient
-    //   ge     r9.z, r9.x, l(0)                     ; sin>=0 mask
-    //   movc   r9.z, r9.z, l(1), l(-1)              ; sign (square wave)
-    //   ge     r9.w, r2.z, l(0.5)                   ; mode >= 0.5? (flicker/gradient)
-    //   movc   r9.x, r9.w, r9.z, r9.x               ; wave = flicker_mask ? sign : sin
-    //   mad    r9.x, r2.y, r9.x, l(1.0)             ; k_pf = amp*wave + 1
-    //   mov    r7.xyz, r1.xyzx                      ; backup colorA for Gradient
-    //   mul    r1.xyz, r1.xyzx, r9.xxxx             ; r1 = Pulse/Flicker result
-    //   mov    r9.z, l(0.5625)                      ; col 4 U
-    //   sample r3.xyzw, r9.zyzz, t10, s5            ; r3.y/z/w = colorB RGB (r3.x=rough)
-    //   mul    r4.x, r7.w, r2.y                     ; amp * sin (original, not square)
-    //   mad    r4.x, r4.x, l(0.5), l(0.5)           ; mix = 0.5 + 0.5*amp*sin ∈ [0..1]
-    //   add    r5.xyz, r3.yzwy, -r7.xyzx            ; colorB - colorA
-    //   mad    r5.xyz, r4.xxxx, r5.xyzx, r7.xyzx    ; lerp(colorA, colorB, mix)
-    //   ge     r4.y, r2.z, l(1.5)                   ; mode >= 1.5? (gradient)
-    //   movc   r1.xyz, r4.yyyy, r5.xyzx, r1.xyzx    ; final: gradient_mask ? lerp : k_pf
+    //   -- col 3 (anim params) --
+    //   mov    r9.x, l(0.4375)                       ; col 3 U
+    //   mad    r9.y, r0.z, l(0.9375), l(0.015625)    ; V
+    //   sample r2.xyzw, r9.xyxx, t10, s5             ; r2.x=speed, .y=amp, .z=mode
+    //   -- col 5 (ripple + dirMode) --
+    //   mov    r9.z, l(0.6875)                       ; col 5 U
+    //   sample r6.xyzw, r9.zyzz, t10, s5             ; r6.x=cU, .y=cV, .z=freq, .w=dirMode
+    //   add    r8.xy, v2.xyxx, -r6.xyxx              ; d = uv - center
+    //   dp2    r8.z, r8.xyxx, r8.xyxx                ; d·d
+    //   sqrt   r8.z, r8.z                            ; distRadial
+    //   -- col 6 (direction + dualActive) --
+    //   mov    r9.w, l(0.8125)                       ; col 6 U
+    //   sample r10.xyzw, r9.wyww, t10, s5            ; r10.x=dirX, .y=dirY, .z=dualActive
+    //   dp2    r8.w, r8.xyxx, r10.xyxx               ; distLinear = d·dir
+    //   ge     r4.x, r6.w, l(0.5)                    ; dirMode>=0.5? (linear or bidir)
+    //   ge     r4.y, r6.w, l(1.5)                    ; dirMode>=1.5? (bidir)
+    //   movc   r8.z, r4.x, r8.w, r8.z                ; pick linear vs radial
+    //   movc   r8.z, r4.y, |r8.w|, r8.z              ; if bidir, use |linear|
+    //   mul    r8.x, r6.z, r8.z                      ; spatialPhase = freq * dist
+    //   -- phase --
+    //   mul    r9.x, r2.x, cb2[0].x
+    //   mul    r9.x, r9.x, l(6.283185)
+    //   add    r9.x, r9.x, -r8.x
+    //   sincos r9.x, null, r9.x
+    //   -- Pulse/Flicker branch --
+    //   mov    r7.w, r9.x
+    //   ge     r9.z, r9.x, l(0)
+    //   movc   r9.z, r9.z, l(1), l(-1)
+    //   ge     r9.w, r2.z, l(0.5)
+    //   movc   r9.x, r9.w, r9.z, r9.x
+    //   mad    r9.x, r2.y, r9.x, l(1.0)
+    //   mov    r7.xyz, r1.xyzx
+    //   mul    r1.xyz, r1.xyzx, r9.xxxx
+    //   -- Gradient / dual-color branch --
+    //   mov    r9.z, l(0.5625)
+    //   sample r3.xyzw, r9.zyzz, t10, s5
+    //   mul    r4.x, r7.w, r2.y
+    //   mad    r4.x, r4.x, l(0.5), l(0.5)
+    //   add    r5.xyz, r3.yzwy, -r7.xyzx
+    //   mad    r5.xyz, r4.xxxx, r5.xyzx, r7.xyzx
+    //   ge     r4.y, r10.z, l(0.5)                    ; dualActive mask (from col 6)
+    //   movc   r1.xyz, r4.yyyy, r5.xyzx, r1.xyzx     ; dual ? lerp : mono
     private static readonly byte[] PulsePayload = ToLeBytes(
         0x05000036, 0x00100012, 0x00000009, 0x00004001, 0x3EE00000,
         0x09000032, 0x00100022, 0x00000009, 0x0010002A, 0x00000000, 0x00004001, 0x3F700000, 0x00004001, 0x3C800000,
         0x8B000045, 0x800000C2, 0x00155543, 0x001000F2, 0x00000002, 0x00100046, 0x00000009, 0x00107E46, 0x0000000A, 0x00106000, 0x00000005,
+        0x05000036, 0x00100042, 0x00000009, 0x00004001, 0x3F300000,
+        0x8B000045, 0x800000C2, 0x00155543, 0x001000F2, 0x00000006, 0x00100A66, 0x00000009, 0x00107E46, 0x0000000A, 0x00106000, 0x00000005,
+        0x08000000, 0x00100032, 0x00000008, 0x00101046, 0x00000002, 0x80100046, 0x00000041, 0x00000006,
+        0x0700000F, 0x00100042, 0x00000008, 0x00100046, 0x00000008, 0x00100046, 0x00000008,
+        0x0500004B, 0x00100042, 0x00000008, 0x0010002A, 0x00000008,
+        0x05000036, 0x00100082, 0x00000009, 0x00004001, 0x3F500000,
+        0x8B000045, 0x800000C2, 0x00155543, 0x001000F2, 0x0000000A, 0x00100F76, 0x00000009, 0x00107E46, 0x0000000A, 0x00106000, 0x00000005,
+        0x0700000F, 0x00100082, 0x00000008, 0x00100046, 0x00000008, 0x00100046, 0x0000000A,
+        0x0700001D, 0x00100012, 0x00000004, 0x0010003A, 0x00000006, 0x00004001, 0x3F000000,
+        0x0700001D, 0x00100022, 0x00000004, 0x0010003A, 0x00000006, 0x00004001, 0x3FC00000,
+        0x09000037, 0x00100042, 0x00000008, 0x0010000A, 0x00000004, 0x0010003A, 0x00000008, 0x0010002A, 0x00000008,
+        0x0A000037, 0x00100042, 0x00000008, 0x0010001A, 0x00000004, 0x8010003A, 0x00000081, 0x00000008, 0x0010002A, 0x00000008,
+        0x07000038, 0x00100012, 0x00000008, 0x0010002A, 0x00000006, 0x0010002A, 0x00000008,
         0x08000038, 0x00100012, 0x00000009, 0x0010000A, 0x00000002, 0x0020800A, 0x00000002, 0x00000000,
         0x07000038, 0x00100012, 0x00000009, 0x0010000A, 0x00000009, 0x00004001, 0x40C90FDA,
+        0x08000000, 0x00100012, 0x00000009, 0x0010000A, 0x00000009, 0x8010000A, 0x00000041, 0x00000008,
         0x0600004D, 0x00100012, 0x00000009, 0x0000D000, 0x0010000A, 0x00000009,
         0x05000036, 0x00100082, 0x00000007, 0x0010000A, 0x00000009,
         0x0700001D, 0x00100042, 0x00000009, 0x0010000A, 0x00000009, 0x00004001, 0x00000000,
@@ -510,7 +548,7 @@ public static class SkinShpkPatcher
         0x09000032, 0x00100012, 0x00000004, 0x0010000A, 0x00000004, 0x00004001, 0x3F000000, 0x00004001, 0x3F000000,
         0x08000000, 0x00100072, 0x00000005, 0x00100796, 0x00000003, 0x80100246, 0x00000041, 0x00000007,
         0x09000032, 0x00100072, 0x00000005, 0x00100006, 0x00000004, 0x00100246, 0x00000005, 0x00100246, 0x00000007,
-        0x0700001D, 0x00100022, 0x00000004, 0x0010002A, 0x00000002, 0x00004001, 0x3FC00000,
+        0x0700001D, 0x00100022, 0x00000004, 0x0010002A, 0x0000000A, 0x00004001, 0x3F000000,
         0x09000037, 0x00100072, 0x00000001, 0x00100556, 0x00000004, 0x00100246, 0x00000005, 0x00100246, 0x00000001);
 
     /// <summary>Insert pulse modulation payload after the ColorTable sample instruction

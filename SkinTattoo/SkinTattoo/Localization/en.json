@@ -137,6 +137,10 @@
     "speed": "Speed",
     "amplitude": "Amp",
     "color_b": "Color B",
+    "frequency": "Freq",
+    "direction": "Dir",
+    "angle": "Angle",
+    "dual_color": "Dual color",
     "mask_preview": "Mask Preview:",
     "mask_label": "Mask",
     "effect_label": "Effect",
@@ -185,7 +189,13 @@
     "none": "None",
     "pulse": "Pulse",
     "flicker": "Flicker",
-    "gradient": "Gradient"
+    "gradient": "Gradient",
+    "ripple": "Ripple"
+  },
+  "dir": {
+    "radial": "Radial",
+    "linear": "Linear",
+    "bidir": "Bidirectional"
   },
   "enum": {
     "blendmode": {

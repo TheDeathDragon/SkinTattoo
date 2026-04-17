@@ -137,6 +137,10 @@
     "speed": "速度",
     "amplitude": "幅度",
     "color_b": "颜色 B",
+    "frequency": "密度",
+    "direction": "方向",
+    "angle": "角度",
+    "dual_color": "双色",
     "mask_preview": "遮罩预览:",
     "mask_label": "遮罩",
     "effect_label": "效果",
@@ -185,7 +189,13 @@
     "none": "无",
     "pulse": "脉冲",
     "flicker": "闪烁",
-    "gradient": "双色渐变"
+    "gradient": "双色渐变",
+    "ripple": "水波纹"
+  },
+  "dir": {
+    "radial": "同心圆",
+    "linear": "线性",
+    "bidir": "双向"
   },
   "enum": {
     "blendmode": {

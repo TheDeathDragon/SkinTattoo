@@ -622,6 +622,11 @@ public class PreviewService : IDisposable
                     AnimMode = l.AnimMode,
                     AnimSpeed = l.AnimSpeed,
                     AnimAmplitude = l.AnimAmplitude,
+                    AnimFreq = l.AnimFreq,
+                    AnimDirMode = l.AnimDirMode,
+                    AnimDirAngle = l.AnimDirAngle,
+                    AnimDualColor = l.AnimDualColor,
+                    UvCenter = l.UvCenter,
                 });
             }
             if (tempLayers.Count == 0) return;
@@ -1125,7 +1130,9 @@ public class PreviewService : IDisposable
         public Vector3 DiffuseColor, SpecularColor, EmissiveColor, EmissiveColorB;
         public float EmissiveIntensity;
         public EmissiveAnimMode AnimMode;
-        public float AnimSpeed, AnimAmplitude;
+        public float AnimSpeed, AnimAmplitude, AnimFreq, AnimDirAngle;
+        public RippleDirMode AnimDirMode;
+        public bool AnimDualColor;
         public float Roughness, Metalness, SheenRate, SheenTint, SheenAperture;
         public float GradientAngleDeg;
         public float GradientScale;
@@ -1143,7 +1150,8 @@ public class PreviewService : IDisposable
             FadeMask = l.FadeMask; FadeMaskFalloff = l.FadeMaskFalloff;
             DiffuseColor = l.DiffuseColor; SpecularColor = l.SpecularColor;
             EmissiveColor = l.EmissiveColor; EmissiveColorB = l.EmissiveColorB; EmissiveIntensity = l.EmissiveIntensity;
-            AnimMode = l.AnimMode; AnimSpeed = l.AnimSpeed; AnimAmplitude = l.AnimAmplitude;
+            AnimMode = l.AnimMode; AnimSpeed = l.AnimSpeed; AnimAmplitude = l.AnimAmplitude; AnimFreq = l.AnimFreq;
+            AnimDirMode = l.AnimDirMode; AnimDirAngle = l.AnimDirAngle; AnimDualColor = l.AnimDualColor;
             Roughness = l.Roughness; Metalness = l.Metalness;
             SheenRate = l.SheenRate; SheenTint = l.SheenTint; SheenAperture = l.SheenAperture;
             GradientAngleDeg = l.GradientAngleDeg; GradientScale = l.GradientScale;
@@ -1179,6 +1187,10 @@ public class PreviewService : IDisposable
             AnimMode = AnimMode,
             AnimSpeed = AnimSpeed,
             AnimAmplitude = AnimAmplitude,
+            AnimFreq = AnimFreq,
+            AnimDirMode = AnimDirMode,
+            AnimDirAngle = AnimDirAngle,
+            AnimDualColor = AnimDualColor,
             Roughness = Roughness,
             Metalness = Metalness,
             SheenRate = SheenRate,
@@ -2807,9 +2819,9 @@ public class PreviewService : IDisposable
 
         if (patchedSkinShpkPath == null || !File.Exists(patchedSkinShpkPath))
         {
-            // v4: fixes two DXBC encoding bugs in v3 gradient payload
-            // (mov opcode len byte + r3.yzwy swizzle encoding) that crashed GPU.
-            var candidate = Path.Combine(outputDir, "skin_ct_v4.shpk");
+            // v6: Ripple direction modes (radial/linear/bidir) + dual-color ripple.
+            // Payload 220 → 276 tokens with new col 6 sample and dir dispatch.
+            var candidate = Path.Combine(outputDir, "skin_ct_v6.shpk");
             if (!File.Exists(candidate))
             {
                 // Runtime patch: read vanilla skin.shpk from SqPack and patch in memory

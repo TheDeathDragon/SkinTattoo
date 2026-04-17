@@ -243,7 +243,7 @@ public partial class MainWindow
                 ImGui.AlignTextToFramePadding(); ImGui.TextDisabled(Strings.T("label.anim_mode")); ImGui.SameLine();
                 ImGui.SetNextItemWidth(80f);
                 var animIdx = (int)layer.AnimMode;
-                var animNames = new[] { Strings.T("anim.none"), Strings.T("anim.pulse"), Strings.T("anim.flicker"), Strings.T("anim.gradient") };
+                var animNames = new[] { Strings.T("anim.none"), Strings.T("anim.pulse"), Strings.T("anim.flicker"), Strings.T("anim.gradient"), Strings.T("anim.ripple") };
                 if (ImGui.Combo("##animMode", ref animIdx, animNames, animNames.Length))
                 {
                     layer.AnimMode = (EmissiveAnimMode)animIdx;
@@ -272,6 +272,43 @@ public partial class MainWindow
                         if (ImGui.ColorEdit3("##emColorB", ref emB,
                             ImGuiColorEditFlags.NoLabel | ImGuiColorEditFlags.NoInputs))
                         { layer.EmissiveColorB = emB; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
+                    }
+                    else if (layer.AnimMode == EmissiveAnimMode.Ripple)
+                    {
+                        ImGui.AlignTextToFramePadding(); ImGui.TextDisabled(Strings.T("label.frequency")); ImGui.SameLine();
+                        ImGui.SetNextItemWidth(-1);
+                        var fq = layer.AnimFreq;
+                        if (ImGui.DragFloat("##animFreq", ref fq, 1f, 1f, 200f, "%.0f"))
+                        { layer.AnimFreq = fq; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
+
+                        ImGui.AlignTextToFramePadding(); ImGui.TextDisabled(Strings.T("label.direction")); ImGui.SameLine();
+                        ImGui.SetNextItemWidth(100f);
+                        var dirIdx = (int)layer.AnimDirMode;
+                        var dirNames = new[] { Strings.T("dir.radial"), Strings.T("dir.linear"), Strings.T("dir.bidir") };
+                        if (ImGui.Combo("##animDirMode", ref dirIdx, dirNames, dirNames.Length))
+                        { layer.AnimDirMode = (RippleDirMode)dirIdx; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
+
+                        if (layer.AnimDirMode != RippleDirMode.Radial)
+                        {
+                            ImGui.SameLine();
+                            ImGui.TextDisabled(Strings.T("label.angle")); ImGui.SameLine();
+                            ImGui.SetNextItemWidth(-1);
+                            var ang = layer.AnimDirAngle;
+                            if (ImGui.DragFloat("##animDirAngle", ref ang, 1f, -180f, 180f, "%.0f°"))
+                            { layer.AnimDirAngle = ang; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
+                        }
+
+                        var dual = layer.AnimDualColor;
+                        if (ImGui.Checkbox(Strings.T("label.dual_color"), ref dual))
+                        { layer.AnimDualColor = dual; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
+                        if (layer.AnimDualColor)
+                        {
+                            ImGui.SameLine();
+                            var emB = layer.EmissiveColorB;
+                            if (ImGui.ColorEdit3("##emColorBRipple", ref emB,
+                                ImGuiColorEditFlags.NoLabel | ImGuiColorEditFlags.NoInputs))
+                            { layer.EmissiveColorB = emB; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
+                        }
                     }
                 }
             }

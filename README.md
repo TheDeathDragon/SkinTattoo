@@ -18,7 +18,8 @@ SkinTattoo is a Dalamud plugin that composites image decals onto Final Fantasy X
 
 * Project PNG decals onto character skin (diffuse + normal) with live preview through Penumbra.
 * Per-layer emissive with independent color and intensity; ColorTable-based PBR editing (character.shpk / skin.shpk / iris.shpk).
-* Iris glow support via automatic mask-red-channel generation from vanilla masks.
+* Per-layer emissive animation: **Pulse**, **Flicker**, **Gradient** (two-color lerp), and **Ripple** (radial / linear / bidirectional wave with optional dual color) — all driven by the engine's native `m_LoopTime` via a custom DXBC injection, no per-frame CPU hook.
+* Iris glow support via automatic mask-red-channel generation from vanilla masks; iris supports Pulse / Flicker / Gradient via real-time CBuffer modulation.
 * Multi-model UV matching: collects all meshes sharing the same material, including non-standard body mods (bibo, etc.).
 * Built-in 3D editor for placing decals by clicking on the model; UV canvas with wireframe overlay and half-clip preprocessing (for mirrored UV layouts).
 * Zero-flicker GPU texture swap after the first preview; no character redraw needed for subsequent parameter changes.
