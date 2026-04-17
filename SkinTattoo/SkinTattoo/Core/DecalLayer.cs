@@ -42,6 +42,7 @@ public enum EmissiveAnimMode
 {
     None = 0,
     Pulse = 1,
+    Flicker = 2,
 }
 
 public class DecalLayer

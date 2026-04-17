@@ -182,7 +182,8 @@
   },
   "anim": {
     "none": "None",
-    "pulse": "Pulse"
+    "pulse": "Pulse",
+    "flicker": "Flicker"
   },
   "enum": {
     "blendmode": {

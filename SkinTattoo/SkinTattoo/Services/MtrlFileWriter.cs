@@ -295,8 +295,12 @@ public static class MtrlFileWriter
             if (!layer.IsVisible || !layer.AffectsEmissive || layer.AllocatedRowPair < 0) continue;
             int rowLower = layer.AllocatedRowPair * 2;
             var em = layer.EmissiveColor * layer.EmissiveIntensity;
-            float animSpeed = layer.AnimMode == Core.EmissiveAnimMode.Pulse ? layer.AnimSpeed : 0f;
-            float animAmp   = layer.AnimMode == Core.EmissiveAnimMode.Pulse ? layer.AnimAmplitude : 0f;
+            bool hasAnim = layer.AnimMode == Core.EmissiveAnimMode.Pulse
+                           || layer.AnimMode == Core.EmissiveAnimMode.Flicker;
+            float animSpeed = hasAnim ? layer.AnimSpeed : 0f;
+            float animAmp   = hasAnim ? layer.AnimAmplitude : 0f;
+            // mode sentinel for the DXBC pulse-vs-flicker branch: pulse=0, flicker=1.
+            float animMode  = layer.AnimMode == Core.EmissiveAnimMode.Flicker ? 1f : 0f;
             for (int r = 0; r < 2; r++)
             {
                 WriteHalf(rowLower + r, 8,  em.X);
@@ -304,6 +308,7 @@ public static class MtrlFileWriter
                 WriteHalf(rowLower + r, 10, em.Z);
                 WriteHalf(rowLower + r, 12, animSpeed);
                 WriteHalf(rowLower + r, 13, animAmp);
+                WriteHalf(rowLower + r, 14, animMode);
             }
         }
 

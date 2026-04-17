@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -8,6 +9,7 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Kernel;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Render;
 using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
+using SkinTattoo.Core;
 using SkinTattoo.Http;
 
 namespace SkinTattoo.Interop;
@@ -24,8 +26,18 @@ public unsafe class EmissiveCBufferHook : IDisposable
     private readonly IPluginLog log;
     private readonly Hook<OnRenderMaterialDelegate> hook;
 
-    private readonly ConcurrentDictionary<nint, Vector3> targets = new();
+    private struct TargetData
+    {
+        public Vector3 BaseColor;
+        public EmissiveAnimMode AnimMode;
+        public float AnimSpeed;
+        public float AnimAmplitude;
+    }
+
+    private readonly ConcurrentDictionary<nint, TargetData> targets = new();
     private readonly ConcurrentDictionary<nint, int> offsetCache = new();
+    private readonly Stopwatch clock = Stopwatch.StartNew();
+    private readonly System.Collections.Generic.HashSet<string> loggedMisses = new(StringComparer.OrdinalIgnoreCase);
 
     // Diagnostic: one-shot log per MaterialResourceHandle to dump ShaderPackage info
     // for skin-family materials. Verifies whether the patched skin.shpk is actually bound
@@ -80,7 +92,9 @@ public unsafe class EmissiveCBufferHook : IDisposable
     /// <summary>Register a target by matching MaterialResourceHandle path.</summary>
     public void SetTargetByPath(
         FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase,
-        string mtrlGamePath, string? mtrlDiskPath, Vector3 emissiveColor)
+        string mtrlGamePath, string? mtrlDiskPath, Vector3 emissiveColor,
+        EmissiveAnimMode animMode = EmissiveAnimMode.None,
+        float animSpeed = 0f, float animAmplitude = 0f)
     {
         if (charBase == null) return;
 
@@ -126,17 +140,36 @@ public unsafe class EmissiveCBufferHook : IDisposable
                 if (matched)
                 {
                     var key = (nint)mrh;
-                    if (targets.TryGetValue(key, out var existing) && existing == emissiveColor)
+                    var data = new TargetData
+                    {
+                        BaseColor = emissiveColor,
+                        AnimMode = animMode,
+                        AnimSpeed = animSpeed,
+                        AnimAmplitude = animAmplitude,
+                    };
+                    if (targets.TryGetValue(key, out var existing)
+                        && existing.BaseColor == data.BaseColor
+                        && existing.AnimMode == data.AnimMode
+                        && existing.AnimSpeed == data.AnimSpeed
+                        && existing.AnimAmplitude == data.AnimAmplitude)
                         return;
-                    targets[key] = emissiveColor;
+                    targets[key] = data;
+                    lock (loggedMisses) loggedMisses.Remove(mtrlGamePath);
                     if (!enabled) Enable();
-                    DebugServer.AppendLog($"[EmissiveHook] Target set: {fileName} color=({emissiveColor.X:F2},{emissiveColor.Y:F2},{emissiveColor.Z:F2})");
+                    DebugServer.AppendLog(
+                        $"[EmissiveHook] Target set: {fileName} color=({emissiveColor.X:F2},{emissiveColor.Y:F2},{emissiveColor.Z:F2}) " +
+                        $"anim={animMode} speed={animSpeed:F2} amp={animAmplitude:F2}");
                     return;
                 }
             }
         }
 
-        DebugServer.AppendLog($"[EmissiveHook] Material not found: {mtrlGamePath}");
+        // Throttle the miss log: per-frame maintenance calls retry every frame until the
+        // fresh MaterialResourceHandle appears. Log once per path per session.
+        bool shouldLog;
+        lock (loggedMisses) shouldLog = loggedMisses.Add(mtrlGamePath);
+        if (shouldLog)
+            DebugServer.AppendLog($"[EmissiveHook] Material not found: {mtrlGamePath}");
     }
 
     public void ClearTargets()
@@ -206,7 +239,9 @@ public unsafe class EmissiveCBufferHook : IDisposable
     /// <summary>Set emissive color for iris materials (_iri_a / _iri_b) on the character.</summary>
     public void SetIrisEmissive(
         FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase,
-        Vector3 leftColor, Vector3 rightColor)
+        Vector3 leftColor, Vector3 rightColor,
+        EmissiveAnimMode animMode = EmissiveAnimMode.None,
+        float animSpeed = 0f, float animAmplitude = 0f)
     {
         if (charBase == null) return;
 
@@ -244,12 +279,20 @@ public unsafe class EmissiveCBufferHook : IDisposable
 
                 if (lower.Contains("_iri_a"))
                 {
-                    targets[(nint)mrh] = leftColor;
+                    targets[(nint)mrh] = new TargetData
+                    {
+                        BaseColor = leftColor, AnimMode = animMode,
+                        AnimSpeed = animSpeed, AnimAmplitude = animAmplitude,
+                    };
                     if (!enabled) Enable();
                 }
                 else if (lower.Contains("_iri_b"))
                 {
-                    targets[(nint)mrh] = rightColor;
+                    targets[(nint)mrh] = new TargetData
+                    {
+                        BaseColor = rightColor, AnimMode = animMode,
+                        AnimSpeed = animSpeed, AnimAmplitude = animAmplitude,
+                    };
                     if (!enabled) Enable();
                 }
             }
@@ -318,8 +361,8 @@ public unsafe class EmissiveCBufferHook : IDisposable
                 if (mrh != null)
                 {
                     LogSkinShpkDiag(mrh);
-                    if (!targets.IsEmpty && targets.TryGetValue((nint)mrh, out var color))
-                        PatchEmissive(material, mrh, color);
+                    if (!targets.IsEmpty && targets.TryGetValue((nint)mrh, out var data))
+                        PatchEmissive(material, mrh, ComputeModulatedColor(data));
                 }
             }
             catch (Exception ex)
@@ -390,6 +433,22 @@ public unsafe class EmissiveCBufferHook : IDisposable
             $"matKeys={shpk->MaterialKeyCount} " +
             $"g_SamplerTable={hasSamplerTable} " +
             $"g_EmissiveColor={hasEmissive}(off={emOff},sz={emSize})");
+    }
+
+    private Vector3 ComputeModulatedColor(TargetData data)
+    {
+        if (data.AnimAmplitude <= 0f || data.AnimSpeed <= 0f)
+            return data.BaseColor;
+        double t = clock.Elapsed.TotalSeconds;
+        float s = (float)Math.Sin(t * data.AnimSpeed * 2.0 * Math.PI);
+        float wave = data.AnimMode switch
+        {
+            EmissiveAnimMode.Pulse => s,
+            EmissiveAnimMode.Flicker => s >= 0f ? 1f : -1f,
+            _ => 0f,
+        };
+        float k = MathF.Max(0f, 1f + wave * data.AnimAmplitude);
+        return data.BaseColor * k;
     }
 
     private void PatchEmissive(Material* material, MaterialResourceHandle* mrh, Vector3 color)

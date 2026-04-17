@@ -462,19 +462,23 @@ public static class SkinShpkPatcher
         0x00107E46, 0x0000000A,
         0x00106000, 0x00000005);
 
-    // Pulse modulation payload: 8 instructions, 62 tokens, 248 bytes.
+    // Animation modulation payload: 12 instructions, 94 tokens, 376 bytes.
     // Samples a SECOND ColorTable column (U=0.4375 = column 3 = halfs 12..15) to get
-    // per-layer speed / amplitude; the first sample (U=0.3125) already gave us emissive.
+    // per-layer speed / amplitude / mode; the first sample (U=0.3125) already gave us emissive.
     // Inserted DIRECTLY AFTER the emissive sample. r9 and r2 are scratch (r2 is overwritten
     // a few instructions later by the original shader so collision is safe).
     //
     //   mov    r9.x, l(0.4375)                      ; U for animation column
     //   mad    r9.y, r0.z, l(0.9375), l(0.015625)   ; V from normal.alpha (same formula as emissive sample)
-    //   sample r2.xyzw, r9.xyxx, t10, s5            ; r2.x=speed, r2.y=amp
+    //   sample r2.xyzw, r9.xyxx, t10, s5            ; r2.x=speed, r2.y=amp, r2.z=mode
     //   mul    r9.x, r2.x, cb2[0].x                 ; phase = speed * m_LoopTime
     //   mul    r9.x, r9.x, l(6.283185)              ; *2pi
-    //   sincos r9.x, null, r9.x                     ; sin(phase)
-    //   mad    r9.x, r2.y, r9.x, l(1.0)             ; k = amp*sin + 1
+    //   sincos r9.x, null, r9.x                     ; r9.x = sin(phase)  (pulse wave)
+    //   ge     r9.z, r9.x, l(0)                     ; mask = (sin >= 0)
+    //   movc   r9.z, r9.z, l(1), l(-1)              ; sign = mask ? +1 : -1  (square wave)
+    //   ge     r9.w, r2.z, l(0.5)                   ; flicker_mask = (mode >= 0.5)
+    //   movc   r9.x, r9.w, r9.z, r9.x               ; wave = flicker_mask ? sign : sin
+    //   mad    r9.x, r2.y, r9.x, l(1.0)             ; k = amp*wave + 1
     //   mul    r1.xyz, r1.xyzx, r9.xxxx             ; emissive *= k
     private static readonly byte[] PulsePayload = ToLeBytes(
         0x05000036, 0x00100012, 0x00000009, 0x00004001, 0x3EE00000,
@@ -483,6 +487,10 @@ public static class SkinShpkPatcher
         0x08000038, 0x00100012, 0x00000009, 0x0010000A, 0x00000002, 0x0020800A, 0x00000002, 0x00000000,
         0x07000038, 0x00100012, 0x00000009, 0x0010000A, 0x00000009, 0x00004001, 0x40C90FDA,
         0x0600004D, 0x00100012, 0x00000009, 0x0000D000, 0x0010000A, 0x00000009,
+        0x0700001D, 0x00100042, 0x00000009, 0x0010000A, 0x00000009, 0x00004001, 0x00000000,
+        0x09000037, 0x00100042, 0x00000009, 0x0010002A, 0x00000009, 0x00004001, 0x3F800000, 0x00004001, 0xBF800000,
+        0x0700001D, 0x00100082, 0x00000009, 0x0010002A, 0x00000002, 0x00004001, 0x3F000000,
+        0x09000037, 0x00100012, 0x00000009, 0x0010003A, 0x00000009, 0x0010002A, 0x00000009, 0x0010000A, 0x00000009,
         0x09000032, 0x00100012, 0x00000009, 0x0010001A, 0x00000002, 0x0010000A, 0x00000009, 0x00004001, 0x3F800000,
         0x07000038, 0x00100072, 0x00000001, 0x00100246, 0x00000001, 0x00100006, 0x00000009);
 

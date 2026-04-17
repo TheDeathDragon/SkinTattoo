@@ -243,14 +243,14 @@ public partial class MainWindow
                 ImGui.AlignTextToFramePadding(); ImGui.TextDisabled(Strings.T("label.anim_mode")); ImGui.SameLine();
                 ImGui.SetNextItemWidth(80f);
                 var animIdx = (int)layer.AnimMode;
-                var animNames = new[] { Strings.T("anim.none"), Strings.T("anim.pulse") };
+                var animNames = new[] { Strings.T("anim.none"), Strings.T("anim.pulse"), Strings.T("anim.flicker") };
                 if (ImGui.Combo("##animMode", ref animIdx, animNames, animNames.Length))
                 {
                     layer.AnimMode = (EmissiveAnimMode)animIdx;
                     MarkPreviewDirty();
                     TryDirectEmissiveUpdate(group);
                 }
-                if (layer.AnimMode == EmissiveAnimMode.Pulse)
+                if (layer.AnimMode == EmissiveAnimMode.Pulse || layer.AnimMode == EmissiveAnimMode.Flicker)
                 {
                     ImGui.SameLine();
                     ImGui.TextDisabled(Strings.T("label.speed")); ImGui.SameLine();

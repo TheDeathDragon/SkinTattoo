@@ -165,7 +165,7 @@ public class PreviewService : IDisposable
     // Emissive dedupe: skip UpdateEmissiveViaColorTable + SetTargetByPath when the color
     // for this material hasn't changed since last flush. Without this, a slider drag that
     // doesn't touch emissive still spams tree-walks + GPU CT texture recreates every cycle.
-    private readonly Dictionary<string, Vector3> lastAppliedEmissive =
+    private readonly Dictionary<string, (Vector3 Color, EmissiveAnimMode Anim, float Speed, float Amp)> lastAppliedEmissive =
         new(StringComparer.OrdinalIgnoreCase);
 
     // Per-group reusable scratch buffers  -- eliminates the per-cycle 4-67MB LOH allocations
@@ -257,7 +257,8 @@ public class PreviewService : IDisposable
     }
 
     private record SwapBatchEntry(string GamePath, string? DiskPath, byte[] BgraData, int Width, int Height);
-    private record EmissiveEntry(string MtrlGamePath, string? MtrlDiskPath, Vector3 Color, int CBufferOffset);
+    private record EmissiveEntry(string MtrlGamePath, string? MtrlDiskPath, Vector3 Color, int CBufferOffset,
+        EmissiveAnimMode AnimMode, float AnimSpeed, float AnimAmplitude);
     private record ColorTableEntry(string MtrlGamePath, string? MtrlDiskPath, Half[] Data, int Width, int Height);
     private record SwapBatch(List<SwapBatchEntry> Textures, List<EmissiveEntry> Emissives, List<ColorTableEntry> ColorTables);
 
@@ -458,6 +459,8 @@ public class PreviewService : IDisposable
         }
         else
         {
+            // Diagnostic: explicit reason when we fall back to Full Redraw
+            DebugServer.AppendLog($"[UpdatePreview] → FULL (UseGpuSwap={config.UseGpuSwap} textureSwap={(textureSwap != null)} canSwap={CanSwapInPlace} denyReason={lastCanSwapDenyReason ?? "(none)"})");
             UpdatePreviewFull(project);
         }
     }
@@ -474,6 +477,14 @@ public class PreviewService : IDisposable
         // happened in an earlier frame and the GPU is now ready to read.
         if (activeProject != null)
             TryCacheVanillaColorTables(activeProject);
+
+        // Opportunistic EmissiveCBufferHook re-arming: on plugin open the first Full Redraw
+        // does not produce an in-place batch, and the player's CharacterBase may still be
+        // mid-redraw when any early SetTargetByPath fires. Running it every frame (cheap
+        // pointer scan; hook dedupes internally) guarantees pulse targets arm as soon as
+        // the fresh material handles exist -- no user wiggle required.
+        if (activeProject != null)
+            MaintainEmissiveHookTargets(activeProject);
 
         var batch = Interlocked.Exchange(ref pendingBatch, null);
         if (batch == null) return;
@@ -529,13 +540,22 @@ public class PreviewService : IDisposable
             // Dedupe: skip if this mtrl's color is identical to what we pushed last time  --
             // otherwise a drag that never touches emissive still spams tree walks + CT
             // texture recreation every cycle.
-            if (lastAppliedEmissive.TryGetValue(em.MtrlGamePath, out var prevColor) && prevColor == em.Color)
-                continue;
-            lastAppliedEmissive[em.MtrlGamePath] = em.Color;
+            var key = (em.Color, em.AnimMode, em.AnimSpeed, em.AnimAmplitude);
+            bool isDup = lastAppliedEmissive.TryGetValue(em.MtrlGamePath, out var prev) && prev == key;
+
+            // Hook registration is always attempted: on plugin open the first compose may
+            // hit the CharacterBase mid-redraw when fresh material handles aren't ready,
+            // causing the initial SetTargetByPath to silently miss. Re-calling each cycle
+            // until the handle exists guarantees the hook arms for pulse without requiring
+            // the user to wiggle a slider. The hook itself dedupes internally.
+            if (emissiveHook != null && em.CBufferOffset > 0)
+                emissiveHook.SetTargetByPath(charBase, em.MtrlGamePath, em.MtrlDiskPath, em.Color,
+                    em.AnimMode, em.AnimSpeed, em.AnimAmplitude);
+
+            if (isDup) continue;
+            lastAppliedEmissive[em.MtrlGamePath] = key;
 
             textureSwap!.UpdateEmissiveViaColorTable(charBase, em.MtrlGamePath, em.MtrlDiskPath, em.Color);
-            if (emissiveHook != null && em.CBufferOffset > 0)
-                emissiveHook.SetTargetByPath(charBase, em.MtrlGamePath, em.MtrlDiskPath, em.Color);
         }
 
         LastUpdateMode = "inplace";
@@ -544,6 +564,32 @@ public class PreviewService : IDisposable
     /// <summary>Get local player CharacterBase pointer for direct manipulation.</summary>
     public unsafe FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* GetCharacterBase()
         => textureSwap?.GetLocalPlayerCharacterBase();
+
+    /// <summary>
+    /// Idempotent per-frame hook maintenance: re-announces every emissive group's current
+    /// color + anim params to EmissiveCBufferHook. Exists so the first successful
+    /// CharacterBase scan (post-redraw) arms the hook without waiting for a user-triggered
+    /// compose cycle. skin-CT materials are excluded (they drive pulse via DXBC, not cbuffer).
+    /// </summary>
+    private unsafe void MaintainEmissiveHookTargets(DecalProject project)
+    {
+        if (emissiveHook == null) return;
+        var charBase = textureSwap?.GetLocalPlayerCharacterBase();
+        if (charBase == null) return;
+
+        foreach (var group in project.Groups)
+        {
+            if (string.IsNullOrEmpty(group.MtrlGamePath)) continue;
+            if (skinCtMaterials.ContainsKey(group.MtrlGamePath!)) continue;
+            if (!emissiveOffsets.TryGetValue(group.MtrlGamePath!, out var emOff) || emOff <= 0) continue;
+            if (!group.HasEmissiveLayers()) continue;
+
+            var color = GetCombinedEmissiveColor(group.Layers);
+            var (mode, speed, amp) = GetDominantEmissiveAnim(group.Layers);
+            var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
+            emissiveHook.SetTargetByPath(charBase, group.MtrlGamePath!, mtrlDisk, color, mode, speed, amp);
+        }
+    }
 
     /// <summary>Write highlight emissive color via ColorTable texture swap or CBuffer hook.</summary>
     /// <param name="highlightLayerIndex">For skin CT: only highlight this layer, others keep original color. -1 = all.</param>
@@ -588,7 +634,11 @@ public class PreviewService : IDisposable
         emissiveOffsets.TryGetValue(group.MtrlGamePath!, out var cbufOffset);
         textureSwap.UpdateEmissiveViaColorTable(charBase, group.MtrlGamePath!, mtrlDiskPath, color);
         if (emissiveHook != null && cbufOffset > 0)
-            emissiveHook.SetTargetByPath(charBase, group.MtrlGamePath!, mtrlDiskPath, color);
+        {
+            var (animMode, animSpeed, animAmp) = GetDominantEmissiveAnim(group.Layers);
+            emissiveHook.SetTargetByPath(charBase, group.MtrlGamePath!, mtrlDiskPath, color,
+                animMode, animSpeed, animAmp);
+        }
     }
 
     /// <summary>
@@ -1010,7 +1060,9 @@ public class PreviewService : IDisposable
                         {
                             var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(job.MtrlGamePath!);
                             emissiveOffsets.TryGetValue(job.MtrlGamePath!, out var emOff);
-                            emEntries.Add(new EmissiveEntry(job.MtrlGamePath!, mtrlDisk, job.EmissiveColor, emOff));
+                            var (animMode, animSpeed, animAmp) = GetDominantEmissiveAnim(layers);
+                            emEntries.Add(new EmissiveEntry(job.MtrlGamePath!, mtrlDisk, job.EmissiveColor, emOff,
+                                animMode, animSpeed, animAmp));
                         }
                     }
 
@@ -1741,6 +1793,7 @@ public class PreviewService : IDisposable
     {
         if (initializedRedirects.Count == 0)
         {
+            LogCanSwapDeny($"initializedRedirects empty (previewDiskPaths={previewDiskPaths.Count})");
             CanSwapInPlace = false;
             return false;
         }
@@ -1863,14 +1916,30 @@ public class PreviewService : IDisposable
             ? CpuUvComposite(group.Layers, baseTex.Data, w, h, ignoreAffectsDiffuseFilter: true)
             : diffResult;
 
-        // PBR-only or WholeMaterial-only groups produce no diffuse delta but still need the
-        // material mounted for inplace ColorTable swap. Synthesize a passthrough by cloning
-        // vanilla diffuse so the redirect pipeline can engage.
-        if (diffResult == null && group.HasPbrLayers() && MaterialSupportsPbr(group))
+        // Emissive-only / PBR-only / WholeMaterial-only groups produce no diffuse delta but
+        // still need the redirect pipeline to engage so CheckCanSwapInPlace's diffuse-init
+        // gate passes on subsequent slider drags (otherwise every drag falls back to Full
+        // Redraw). Synthesize a passthrough by cloning vanilla diffuse.
+        //
+        // Must ignore IsVisible: when the user hides all emissive layers, HasEmissiveLayers()
+        // returns false and the passthrough is skipped, breaking CanSwap on next drag. The
+        // group is still emissive-configured — Penumbra redirect, mtrl hook, and CT all
+        // remain active (emissive values just go to zero when nothing is visible).
+        bool hasEmissiveConfigured = false;
+        bool hasPbrConfigured = false;
+        foreach (var l in group.Layers)
+        {
+            if (string.IsNullOrEmpty(l.ImagePath)) continue;
+            if (l.AffectsEmissive) hasEmissiveConfigured = true;
+            if (l.RequiresRowPair) hasPbrConfigured = true;
+        }
+        bool needsPassthrough = hasEmissiveConfigured
+                                || (hasPbrConfigured && MaterialSupportsPbr(group));
+        if (diffResult == null && needsPassthrough)
         {
             diffResult = (byte[])baseTex.Data.Clone();
         }
-        if (diffPreview == null && group.HasPbrLayers() && MaterialSupportsPbr(group))
+        if (diffPreview == null && needsPassthrough)
             diffPreview = (byte[])baseTex.Data.Clone();
 
         // 3D editor reads compositeResults  -- feed it the preview version.
@@ -2564,6 +2633,20 @@ public class PreviewService : IDisposable
     public Vector3 GetCombinedEmissiveColorForGroup(TargetGroup group) =>
         GetCombinedEmissiveColor(group.Layers);
 
+    // Picks the first visible emissive layer's animation params. For single-layer groups
+    // (iris etc.) this is exact; for legacy multi-layer skin fallbacks it is a best-effort
+    // approximation — skin.shpk CT path handles per-layer anim directly and does not reach here.
+    private static (EmissiveAnimMode Mode, float Speed, float Amp) GetDominantEmissiveAnim(List<DecalLayer> layers)
+    {
+        foreach (var l in layers)
+        {
+            if (!l.IsVisible || !l.AffectsEmissive || string.IsNullOrEmpty(l.ImagePath)) continue;
+            if (l.AnimMode == EmissiveAnimMode.None) continue;
+            return (l.AnimMode, l.AnimSpeed, l.AnimAmplitude);
+        }
+        return (EmissiveAnimMode.None, 0f, 0f);
+    }
+
     private bool TryBuildEmissiveMtrlWithColorTable(string mtrlPath, string outputPath,
         Vector3 emissiveColor, byte[] colorTableBytes, out int emissiveByteOffset)
     {
@@ -2722,7 +2805,9 @@ public class PreviewService : IDisposable
 
         if (patchedSkinShpkPath == null || !File.Exists(patchedSkinShpkPath))
         {
-            var candidate = Path.Combine(outputDir, "skin_ct.shpk");
+            // v2 suffix invalidates cached v1 shpk (62-token pulse-only payload) so the
+            // 94-token pulse+flicker payload gets regenerated after a plugin update.
+            var candidate = Path.Combine(outputDir, "skin_ct_v2.shpk");
             if (!File.Exists(candidate))
             {
                 // Runtime patch: read vanilla skin.shpk from SqPack and patch in memory

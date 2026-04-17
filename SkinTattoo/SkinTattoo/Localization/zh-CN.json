@@ -182,7 +182,8 @@
   },
   "anim": {
     "none": "无",
-    "pulse": "脉冲"
+    "pulse": "脉冲",
+    "flicker": "闪烁"
   },
   "enum": {
     "blendmode": {

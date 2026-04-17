@@ -121,20 +121,27 @@ cbuffer g_PbrParameterCommon
 
 **退出条件**：选择波纹模式 → 中心自动对齐贴花 → 调频率和速度 → 从中心向外扩散的光波。
 
-### 阶段 4：Iris（眼部）pulse 支持（未实施）
+### 阶段 4：Iris（眼部）pulse 支持（已完成 2026-04-17，路线 4B）
 **目标**：让眼睛也能按相同参数 pulse。
 
-Iris 材质走 `iris.shpk`，PS 结构与 skin.shpk 类似但独立。两个子方案：
+选中 **4B（CBuffer 实时调制）**——iris 组通常只有一层贴花，不需要 per-layer 独立。
 
-**4A. iris.shpk 同样 patch**：
-- 给 iris.shpk 注入 s5/t10 + ColorTable + 我们的 8 条 pulse 指令
-- iris 只有一层贴花（单 rowPair），独立动画天然成立
-- 工作量：中等（沿用 SkinShpkPatcher 的架构）
+实现：
+1. `Interop/EmissiveCBufferHook.cs`：
+   - `targets` 的 value 从 `Vector3` 扩展为 `TargetData { BaseColor, AnimMode, AnimSpeed, AnimAmplitude }`
+   - 新增 `Stopwatch clock`，Detour 每帧计算 `k = max(0, 1 + amp·sin(2π·speed·t))`，`modulatedColor = baseColor·k`
+   - `SetTargetByPath` / `SetIrisEmissive` 新增可选参数 `animMode/speed/amplitude`（默认 None/0/0，向后兼容）
+2. `Services/PreviewService.cs`：
+   - `EmissiveEntry` record 增加三个动画字段
+   - Legacy fallback 路径构造 `EmissiveEntry` 时调用 `GetDominantEmissiveAnim(layers)` 取第一个启用 pulse 的可见 emissive 层参数
+   - `ApplyInPlaceSwap` 的 `SetTargetByPath` 调用透传 anim 参数
+3. 时钟源：每个 hook 实例一个 Stopwatch（wall-clock seconds），无需读 `cb2[0].x`。数值不与 shader DXBC pulse 完全同步，但视觉频率一致。
 
-**4B. 直接 CBuffer 调制**：
-- iris.shpk 已有 `g_EmissiveColor` 在 CBuffer，工作量最小
-- 缺点：同 skin 早期方案，单材质单参数，无 per-layer 独立。但 iris 只有一层层所以无影响
-- 实现：复用 EmissiveCBufferHook 机制，每帧根据当前时间写调制后的 emissive
+**行为约束**：
+- iris 路径与 skin CT 路径隔离：iris 走 EmissiveEntry → CBuffer hook；skin 走 CT entry → DXBC pulse。两条路径不会互相干扰
+- amp=0 或 speed=0 自动退回静态颜色，关闭 pulse 等效于不调用动画分支
+
+**4A 备选（未采用）**：给 iris.shpk 同样做 DXBC + ColorTable patch。工作量中等，但没有实际收益（iris 单层）
 
 ---
 
@@ -189,4 +196,4 @@ C# 侧注入流程（`PatchSinglePs`）按以下顺序串联：
 | 1 — Pulse | ✅ 2026-04-17 | 每层独立 via ColorTable column 3 |
 | 2 — Flicker | 未实施 | 按 ColorTable 方案可增量扩展 |
 | 3 — Ripple | 未实施 | 需要 mode 字段 + 距离计算 |
-| 4 — Iris pulse | 未实施 | iris.shpk 独立 patch |
+| 4 — Iris pulse | ✅ 2026-04-17 | 路线 4B：EmissiveCBufferHook + Stopwatch 实时调制 |
