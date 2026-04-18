@@ -92,6 +92,47 @@ public partial class MainWindow : Window, IDisposable
 
     private static readonly BlendMode[] BlendModeValues = [BlendMode.Normal, BlendMode.Multiply, BlendMode.Screen, BlendMode.Overlay, BlendMode.SoftLight, BlendMode.HardLight, BlendMode.Darken, BlendMode.Lighten, BlendMode.ColorDodge, BlendMode.ColorBurn, BlendMode.Difference, BlendMode.Exclusion];
 
+    private static float GetScaleSign(float value) => value < 0f ? -1f : 1f;
+
+    private static float ClampScaleMagnitude(float value) => Math.Clamp(value, 0.01f, 10f);
+
+    private static float ClampSignedScale(float value)
+    {
+        var sign = GetScaleSign(value);
+        return ClampScaleMagnitude(MathF.Abs(value)) * sign;
+    }
+
+    private static Vector2 ClampSignedScale(Vector2 scale) =>
+        new(ClampSignedScale(scale.X), ClampSignedScale(scale.Y));
+
+    private static Vector2 GetScaleAbs(Vector2 scale) =>
+        new(MathF.Abs(scale.X), MathF.Abs(scale.Y));
+
+    private static float NormalizeAngleDeg(float angle)
+    {
+        while (angle > 180f) angle -= 360f;
+        while (angle <= -180f) angle += 360f;
+        return angle;
+    }
+
+    private void RotateLayer(DecalLayer layer, float deltaDeg)
+    {
+        layer.RotationDeg = NormalizeAngleDeg(layer.RotationDeg + deltaDeg);
+        MarkPreviewDirty();
+    }
+
+    private void MirrorLayerHorizontally(DecalLayer layer)
+    {
+        layer.UvScale = new Vector2(-layer.UvScale.X, layer.UvScale.Y);
+        MarkPreviewDirty();
+    }
+
+    private void MirrorLayerVertically(DecalLayer layer)
+    {
+        layer.UvScale = new Vector2(layer.UvScale.X, -layer.UvScale.Y);
+        MarkPreviewDirty();
+    }
+
     private static string[] GetBlendModeNames() => [
         Strings.T("enum.blendmode.normal"), Strings.T("enum.blendmode.multiply"), Strings.T("enum.blendmode.screen"),
         Strings.T("enum.blendmode.overlay"), Strings.T("enum.blendmode.softlight"), Strings.T("enum.blendmode.hardlight"),

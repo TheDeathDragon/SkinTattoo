@@ -189,16 +189,18 @@ public partial class MainWindow
         float texAspect = (texAspW > 0 && texAspH > 0) ? (float)texAspW / texAspH : 1f;
         if (scaleLocked)
         {
-            var s = uvScale.X;
+            var signX = GetScaleSign(uvScale.X);
+            var signY = GetScaleSign(uvScale.Y);
+            var s = MathF.Abs(uvScale.X);
             if (ImGui.DragFloat("##scaleLocked", ref s, 0.005f, 0.01f, 10f, "%.3f"))
-            { layer.UvScale = new Vector2(s, s * texAspect); MarkPreviewDirty(); }
+            { layer.UvScale = new Vector2(signX * s, signY * s * texAspect); MarkPreviewDirty(); }
             if (ScrollAdjust(ref s, 0.005f, 0.01f, 10f))
-            { layer.UvScale = new Vector2(s, s * texAspect); MarkPreviewDirty(); }
+            { layer.UvScale = new Vector2(signX * s, signY * s * texAspect); MarkPreviewDirty(); }
         }
         else
         {
-            if (ImGui.DragFloat2("##scaleUnlocked", ref uvScale, 0.005f, 0.01f, 10f, "%.3f"))
-            { layer.UvScale = uvScale; MarkPreviewDirty(); }
+            if (ImGui.DragFloat2("##scaleUnlocked", ref uvScale, 0.005f, -10f, 10f, "%.3f"))
+            { layer.UvScale = ClampSignedScale(uvScale); MarkPreviewDirty(); }
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(scaleLocked ? Strings.T("tooltip.scale_locked") : Strings.T("tooltip.scale_unlocked"));
         ImGui.SameLine();
@@ -214,6 +216,19 @@ public partial class MainWindow
         { layer.RotationDeg = rot; MarkPreviewDirty(); }
         if (ScrollAdjust(ref rot, 1f, -180f, 180f))
         { layer.RotationDeg = rot; MarkPreviewDirty(); }
+
+        var buttonWidth = (ImGui.GetContentRegionAvail().X - ImGui.GetStyle().ItemSpacing.X) * 0.5f;
+        if (ImGui.Button(Strings.T("button.rotate_ccw_90"), new Vector2(buttonWidth, 0f)))
+            RotateLayer(layer, -90f);
+        ImGui.SameLine();
+        if (ImGui.Button(Strings.T("button.rotate_cw_90"), new Vector2(buttonWidth, 0f)))
+            RotateLayer(layer, 90f);
+
+        if (ImGui.Button(Strings.T("button.mirror_x"), new Vector2(buttonWidth, 0f)))
+            MirrorLayerHorizontally(layer);
+        ImGui.SameLine();
+        if (ImGui.Button(Strings.T("button.mirror_y"), new Vector2(buttonWidth, 0f)))
+            MirrorLayerVertically(layer);
     }
 
     private void DrawRenderSection(DecalLayer layer)

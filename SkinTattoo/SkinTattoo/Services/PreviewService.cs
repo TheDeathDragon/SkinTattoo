@@ -2585,10 +2585,7 @@ public class PreviewService : IDisposable
             var cosR = MathF.Cos(rotRad);
             var sinR = MathF.Sin(rotRad);
 
-            int pxMin = Math.Max(0, (int)((center.X - scale.X / 2f) * w));
-            int pxMax = Math.Min(w - 1, (int)((center.X + scale.X / 2f) * w));
-            int pyMin = Math.Max(0, (int)((center.Y - scale.Y / 2f) * h));
-            int pyMax = Math.Min(h - 1, (int)((center.Y + scale.Y / 2f) * h));
+            GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
 
             // Per-row parallel  -- each row writes disjoint output bytes (alpha channel only).
             // The Math.Max read-modify-write is per-pixel and rows don't overlap.
@@ -2707,10 +2704,7 @@ public class PreviewService : IDisposable
             var cosR = MathF.Cos(rotRad);
             var sinR = MathF.Sin(rotRad);
 
-            int pxMin = Math.Max(0, (int)((center.X - scale.X / 2f) * w));
-            int pxMax = Math.Min(w - 1, (int)((center.X + scale.X / 2f) * w));
-            int pyMin = Math.Max(0, (int)((center.Y - scale.Y / 2f) * h));
-            int pyMax = Math.Min(h - 1, (int)((center.Y + scale.Y / 2f) * h));
+            GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
 
             var layerLocal = layer;
             var rowByteLocal = rowByte;
@@ -2798,10 +2792,7 @@ public class PreviewService : IDisposable
             var cosR = MathF.Cos(rotRad);
             var sinR = MathF.Sin(rotRad);
 
-            int pxMin = Math.Max(0, (int)((center.X - scale.X / 2f) * mw));
-            int pxMax = Math.Min(mw - 1, (int)((center.X + scale.X / 2f) * mw));
-            int pyMin = Math.Max(0, (int)((center.Y - scale.Y / 2f) * mh));
-            int pyMax = Math.Min(mh - 1, (int)((center.Y + scale.Y / 2f) * mh));
+            GetLayerPixelBounds(center, scale, mw, mh, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
 
             var layerLocal = layer;
             ParallelRows(pyMin, pyMax, py =>
@@ -2928,10 +2919,7 @@ public class PreviewService : IDisposable
             var cosR = MathF.Cos(rotRad);
             var sinR = MathF.Sin(rotRad);
 
-            int pxMin = Math.Max(0, (int)((center.X - scale.X / 2f) * w));
-            int pxMax = Math.Min(w - 1, (int)((center.X + scale.X / 2f) * w));
-            int pyMin = Math.Max(0, (int)((center.Y - scale.Y / 2f) * h));
-            int pyMax = Math.Min(h - 1, (int)((center.Y + scale.Y / 2f) * h));
+            GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
 
             // Per-row parallel  -- each row writes disjoint output pixels. anyWritten is a
             // bool-set-to-true-only flag so concurrent races are benign.
@@ -3310,12 +3298,20 @@ public class PreviewService : IDisposable
     /// Matches the scan-range derivation inside the paint loops (non-rotated extents,
     /// same as the engine's own tile clamping). Rotation is handled per-pixel inside.
     /// </summary>
+    private static void GetLayerPixelBounds(Vector2 uvCenter, Vector2 uvScale, int w, int h,
+        out int pxMin, out int pxMax, out int pyMin, out int pyMax)
+    {
+        var halfW = MathF.Abs(uvScale.X) * 0.5f;
+        var halfH = MathF.Abs(uvScale.Y) * 0.5f;
+        pxMin = Math.Max(0, (int)((uvCenter.X - halfW) * w));
+        pxMax = Math.Min(w - 1, (int)((uvCenter.X + halfW) * w));
+        pyMin = Math.Max(0, (int)((uvCenter.Y - halfH) * h));
+        pyMax = Math.Min(h - 1, (int)((uvCenter.Y + halfH) * h));
+    }
+
     private static DirtyRect ComputeLayerBbox(Vector2 uvCenter, Vector2 uvScale, int w, int h)
     {
-        int pxMin = Math.Max(0, (int)((uvCenter.X - uvScale.X / 2f) * w));
-        int pxMax = Math.Min(w - 1, (int)((uvCenter.X + uvScale.X / 2f) * w));
-        int pyMin = Math.Max(0, (int)((uvCenter.Y - uvScale.Y / 2f) * h));
-        int pyMax = Math.Min(h - 1, (int)((uvCenter.Y + uvScale.Y / 2f) * h));
+        GetLayerPixelBounds(uvCenter, uvScale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
         if (pxMax < pxMin || pyMax < pyMin) return DirtyRect.Empty;
         return new DirtyRect(pxMin, pyMin, pxMax - pxMin + 1, pyMax - pyMin + 1);
     }
