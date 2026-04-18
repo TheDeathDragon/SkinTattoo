@@ -60,31 +60,42 @@ public partial class MainWindow
             return;
         }
 
-        ImGui.Bullet();
-        ImGui.SameLine(0, 0);
-
         var text = bullet.Text;
         int cursor = 0;
-        bool needSameLine = false;
+        bool bulletDrawn = false;
+
         foreach (var link in bullet.Links)
         {
             if (string.IsNullOrEmpty(link.Label)) continue;
             int idx = text.IndexOf(link.Label, cursor, StringComparison.Ordinal);
             if (idx < 0) continue;
-            if (idx > cursor)
+
+            var pre = idx > cursor ? text.Substring(cursor, idx - cursor) : "";
+            if (!bulletDrawn)
             {
-                if (needSameLine) ImGui.SameLine(0, 0);
-                ImGui.TextUnformatted(text.Substring(cursor, idx - cursor));
-                needSameLine = true;
+                // Use BulletText to match the glyph/spacing of link-less bullets.
+                ImGui.BulletText(pre);
+                bulletDrawn = true;
             }
-            if (needSameLine) ImGui.SameLine(0, 0);
+            else if (pre.Length > 0)
+            {
+                ImGui.SameLine(0, 0);
+                ImGui.TextUnformatted(pre);
+            }
+            ImGui.SameLine(0, 0);
             DrawLink(link.Label, link.Url);
-            needSameLine = true;
             cursor = idx + link.Label.Length;
         }
+
+        if (!bulletDrawn)
+        {
+            ImGui.BulletText(text);
+            return;
+        }
+
         if (cursor < text.Length)
         {
-            if (needSameLine) ImGui.SameLine(0, 0);
+            ImGui.SameLine(0, 0);
             ImGui.TextUnformatted(text.Substring(cursor));
         }
     }
