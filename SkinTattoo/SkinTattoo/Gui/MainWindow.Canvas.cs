@@ -350,25 +350,66 @@ public partial class MainWindow
 
             // texture UV -> virtual UV -> screen
             var pCenter = uvOrigin + (texOffset + layer.UvCenter * uvScale) * fitSize;
-            var pHalfSize = layer.UvScale * uvScale * fitSize * 0.5f;
+            var absScale = GetScaleAbs(layer.UvScale);
+            var pHalfSize = absScale * uvScale * fitSize * 0.5f;
+            var mirroredX = layer.UvScale.X < 0f;
+            var mirroredY = layer.UvScale.Y < 0f;
 
             var localMin = -pHalfSize;
             var localMax = pHalfSize;
-            var uvMin = Vector2.Zero;
-            var uvMax = Vector2.One;
+            float uvLeft = mirroredX ? 1f : 0f;
+            float uvRight = mirroredX ? 0f : 1f;
+            float uvTop = mirroredY ? 1f : 0f;
+            float uvBottom = mirroredY ? 0f : 1f;
             switch (layer.Clip)
             {
                 case ClipMode.ClipLeft:
-                    localMin.X = 0; uvMin.X = 0.5f;
+                    if (mirroredX)
+                    {
+                        localMax.X = 0;
+                        uvRight = 0.5f;
+                    }
+                    else
+                    {
+                        localMin.X = 0;
+                        uvLeft = 0.5f;
+                    }
                     break;
                 case ClipMode.ClipRight:
-                    localMax.X = 0; uvMax.X = 0.5f;
+                    if (mirroredX)
+                    {
+                        localMin.X = 0;
+                        uvLeft = 0.5f;
+                    }
+                    else
+                    {
+                        localMax.X = 0;
+                        uvRight = 0.5f;
+                    }
                     break;
                 case ClipMode.ClipTop:
-                    localMin.Y = 0; uvMin.Y = 0.5f;
+                    if (mirroredY)
+                    {
+                        localMax.Y = 0;
+                        uvBottom = 0.5f;
+                    }
+                    else
+                    {
+                        localMin.Y = 0;
+                        uvTop = 0.5f;
+                    }
                     break;
                 case ClipMode.ClipBottom:
-                    localMax.Y = 0; uvMax.Y = 0.5f;
+                    if (mirroredY)
+                    {
+                        localMin.Y = 0;
+                        uvTop = 0.5f;
+                    }
+                    else
+                    {
+                        localMax.Y = 0;
+                        uvBottom = 0.5f;
+                    }
                     break;
             }
 
@@ -385,7 +426,7 @@ public partial class MainWindow
                         {
                             drawList.AddImage(wrap.Handle,
                                 pCenter + localMin, pCenter + localMax,
-                                uvMin, uvMax, alpha);
+                                new Vector2(uvLeft, uvTop), new Vector2(uvRight, uvBottom), alpha);
                         }
                         else
                         {
@@ -403,8 +444,8 @@ public partial class MainWindow
 
                             drawList.AddImageQuad(wrap.Handle,
                                 tl, tr, br, bl,
-                                new Vector2(uvMin.X, uvMin.Y), new Vector2(uvMax.X, uvMin.Y),
-                                new Vector2(uvMax.X, uvMax.Y), new Vector2(uvMin.X, uvMax.Y),
+                                new Vector2(uvLeft, uvTop), new Vector2(uvRight, uvTop),
+                                new Vector2(uvRight, uvBottom), new Vector2(uvLeft, uvBottom),
                                 alpha);
                         }
                     }
@@ -477,7 +518,7 @@ public partial class MainWindow
             if (ImGui.IsMouseClicked(ImGuiMouseButton.Right))
             {
                 var pCenter = uvOrigin + (texOffset + selectedLayer!.UvCenter * uvScale) * fitSize;
-                var pHalfSize = selectedLayer.UvScale * texScreenSize * 0.5f;
+                var pHalfSize = GetScaleAbs(selectedLayer.UvScale) * texScreenSize * 0.5f;
                 canvasScalingLayer = mousePos.X >= pCenter.X - pHalfSize.X && mousePos.X <= pCenter.X + pHalfSize.X &&
                                     mousePos.Y >= pCenter.Y - pHalfSize.Y && mousePos.Y <= pCenter.Y + pHalfSize.Y;
             }
@@ -499,14 +540,18 @@ public partial class MainWindow
                         // Aspect ratio correction so decal stays square in pixel space
                         float texAspect = (lastBaseTexWidth > 0 && lastBaseTexHeight > 0)
                             ? (float)lastBaseTexWidth / lastBaseTexHeight : 1f;
-                        var s = Math.Clamp(selectedLayer!.UvScale.X + scaleDelta, 0.01f, 10f);
-                        selectedLayer.UvScale = new Vector2(s, s * texAspect);
+                        var signX = GetScaleSign(selectedLayer!.UvScale.X);
+                        var signY = GetScaleSign(selectedLayer.UvScale.Y);
+                        var s = ClampScaleMagnitude(MathF.Abs(selectedLayer.UvScale.X) + scaleDelta);
+                        selectedLayer.UvScale = new Vector2(signX * s, signY * s * texAspect);
                     }
                     else
                     {
-                        selectedLayer!.UvScale = new Vector2(
-                            Math.Clamp(selectedLayer.UvScale.X + scaleDelta, 0.01f, 10f),
-                            Math.Clamp(selectedLayer.UvScale.Y + scaleDelta, 0.01f, 10f));
+                        var x = GetScaleSign(selectedLayer!.UvScale.X)
+                            * ClampScaleMagnitude(MathF.Abs(selectedLayer.UvScale.X) + scaleDelta);
+                        var y = GetScaleSign(selectedLayer.UvScale.Y)
+                            * ClampScaleMagnitude(MathF.Abs(selectedLayer.UvScale.Y) + scaleDelta);
+                        selectedLayer.UvScale = new Vector2(x, y);
                     }
                 }
                 MarkPreviewDirty();
@@ -524,7 +569,7 @@ public partial class MainWindow
                 if (hasActiveLayer)
                 {
                     var pCenter = uvOrigin + (texOffset + selectedLayer!.UvCenter * uvScale) * fitSize;
-                    var pHalfSize = selectedLayer.UvScale * texScreenSize * 0.5f;
+                    var pHalfSize = GetScaleAbs(selectedLayer.UvScale) * texScreenSize * 0.5f;
                     canvasDraggingLayer = mousePos.X >= pCenter.X - pHalfSize.X && mousePos.X <= pCenter.X + pHalfSize.X &&
                                          mousePos.Y >= pCenter.Y - pHalfSize.Y && mousePos.Y <= pCenter.Y + pHalfSize.Y;
                 }
@@ -536,7 +581,7 @@ public partial class MainWindow
                         var l = group.Layers[i];
                         if (!l.IsVisible || string.IsNullOrEmpty(l.ImagePath)) continue;
                         var lc = uvOrigin + (texOffset + l.UvCenter * uvScale) * fitSize;
-                        var lh = l.UvScale * texScreenSize * 0.5f;
+                        var lh = GetScaleAbs(l.UvScale) * texScreenSize * 0.5f;
                         if (mousePos.X >= lc.X - lh.X && mousePos.X <= lc.X + lh.X &&
                             mousePos.Y >= lc.Y - lh.Y && mousePos.Y <= lc.Y + lh.Y)
                         {

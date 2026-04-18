@@ -431,8 +431,8 @@ public class ModelEditorWindow : Window, IDisposable
                     float factor = 1f + io.MouseWheel * 0.05f;
                     layer.UvScale *= factor;
                     layer.UvScale = new Vector2(
-                        Math.Clamp(layer.UvScale.X, 0.01f, 10f),
-                        Math.Clamp(layer.UvScale.Y, 0.01f, 10f));
+                        (layer.UvScale.X < 0f ? -1f : 1f) * Math.Clamp(MathF.Abs(layer.UvScale.X), 0.01f, 10f),
+                        (layer.UvScale.Y < 0f ? -1f : 1f) * Math.Clamp(MathF.Abs(layer.UvScale.Y), 0.01f, 10f));
                     previewService.MarkDirty();
                 }
             }
