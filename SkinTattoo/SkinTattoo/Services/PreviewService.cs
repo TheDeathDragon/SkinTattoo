@@ -1968,24 +1968,55 @@ public class PreviewService : IDisposable
             if (string.IsNullOrEmpty(group.DiffuseGamePath) || group.Layers.Count == 0)
                 continue;
 
-            // Group has layers but was never initialized by a Full Redraw  --
-            // can't swap in-place without the Penumbra redirect being set up first.
-            if (!previewDiskPaths.ContainsKey(group.DiffuseGamePath))
+            // Required redirects depend on layer composition. A Normal-only group
+            // produces no diffuse redirect, so it mustn't fail-fast on that check.
+            bool needsDiffuse = false, needsNorm = false;
+            foreach (var l in group.Layers)
             {
-                LogCanSwapDeny($"new group needs full redraw: {group.DiffuseGamePath}");
-                CanSwapInPlace = false;
-                return false;
-            }
-
-            if (!initializedRedirects.ContainsKey(group.DiffuseGamePath))
-            {
-                LogCanSwapDeny($"diffuse not initialized: {group.DiffuseGamePath}");
-                CanSwapInPlace = false;
-                return false;
+                if (!l.IsVisible || string.IsNullOrEmpty(l.ImagePath)) continue;
+                if (l.TargetMap == TargetMap.Diffuse && l.AffectsDiffuse) needsDiffuse = true;
+                else if (l.TargetMap == TargetMap.Normal) needsNorm = true;
             }
 
             var hasEmissiveLayers = group.HasEmissiveLayers();
             var hasPbrLayers = group.HasPbrLayers() && MaterialSupportsPbr(group);
+
+            // Group that contributes nothing this cycle  -- no need to gate CanSwap on it.
+            if (!needsDiffuse && !needsNorm && !hasEmissiveLayers && !hasPbrLayers)
+                continue;
+
+            if (needsDiffuse)
+            {
+                if (!previewDiskPaths.ContainsKey(group.DiffuseGamePath))
+                {
+                    LogCanSwapDeny($"new group needs full redraw: {group.DiffuseGamePath}");
+                    CanSwapInPlace = false;
+                    return false;
+                }
+                if (!initializedRedirects.ContainsKey(group.DiffuseGamePath))
+                {
+                    LogCanSwapDeny($"diffuse not initialized: {group.DiffuseGamePath}");
+                    CanSwapInPlace = false;
+                    return false;
+                }
+            }
+
+            if (needsNorm && !string.IsNullOrEmpty(group.NormGamePath))
+            {
+                if (!previewDiskPaths.ContainsKey(group.NormGamePath))
+                {
+                    LogCanSwapDeny($"new norm-only group needs full redraw: {group.NormGamePath}");
+                    CanSwapInPlace = false;
+                    return false;
+                }
+                if (!initializedRedirects.ContainsKey(group.NormGamePath))
+                {
+                    LogCanSwapDeny($"norm not initialized: {group.NormGamePath}");
+                    CanSwapInPlace = false;
+                    return false;
+                }
+            }
+
             if (hasEmissiveLayers || hasPbrLayers)
             {
                 if (!string.IsNullOrEmpty(group.MtrlGamePath)
