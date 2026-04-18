@@ -883,8 +883,14 @@ public class PreviewService : IDisposable
         {
             if (string.IsNullOrEmpty(group.DiffuseGamePath) || group.Layers.Count == 0)
                 continue;
-            if (!previewDiskPaths.ContainsKey(group.DiffuseGamePath))
-                continue;
+            // A group qualifies for inplace swap once ANY of its applicable
+            // target textures has been initialized via Full Redraw. A Normal-only
+            // group never writes a diffuse redirect, so gating strictly on
+            // DiffuseGamePath would permanently skip it.
+            bool anyInitialized = previewDiskPaths.ContainsKey(group.DiffuseGamePath)
+                || (!string.IsNullOrEmpty(group.NormGamePath)
+                    && previewDiskPaths.ContainsKey(group.NormGamePath!));
+            if (!anyInitialized) continue;
 
             previewDiskPaths.TryGetValue(group.DiffuseGamePath, out var diffDisk);
 
