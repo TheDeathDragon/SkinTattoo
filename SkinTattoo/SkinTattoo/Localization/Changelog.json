@@ -1,6 +1,28 @@
 {
   "versions": [
     {
+      "version": "0.2.1",
+      "date": "2026-04-18",
+      "en": [
+        "Normal target decals no longer leave trails when dragged",
+        "UV wireframe shows the full mesh right after plugin reload — no need to reopen the 3D editor",
+        "Path diagnostics opens in a resizable standalone window",
+        "Added Full Redraw toolbar button to recover when previews get stuck",
+        "Support for body mods with non-standard texture names (Bibo+ etc.)",
+        "Skin body materials no longer show the Mask option since it has no effect there",
+        "Changelog tab and multi-select copy in the debug log"
+      ],
+      "zh": [
+        "Normal 目标贴花拖动时不再有残影",
+        "插件重载后 UV 网格立即完整显示，无需重新打开 3D 编辑器",
+        "路径诊断改为独立可调整大小的窗口",
+        "工具栏新增完全重绘按钮，预览卡住时一键恢复",
+        "支持非标命名的身体 mod (Bibo+ 等)",
+        "skin 身体材质不再显示 Mask 选项 (该材质上没效果)",
+        "新增更新日志 Tab 和调试日志多选复制"
+      ]
+    },
+    {
       "version": "0.2.0",
       "date": "2026-04-18",
       "en": [
