@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
@@ -155,24 +156,40 @@ public sealed class Plugin : IDalamudPlugin
                 {
                     foreach (var group in project.Groups)
                     {
-                        // Only auto-upgrade groups that have no mesh config at all.
-                        // If a group already has a fallback AllMeshPaths (e.g. from
-                        // a non-standard body mod like Bibo+ where the resolver
-                        // originally failed), re-resolving could narrow the set of
-                        // mdls and cut off parts of the UV wireframe/mesh.
+                        // MeshSlots + MeshGamePath + TargetMatIdx aren't persisted in
+                        // SavedTargetGroup, so we re-run the resolver on load to
+                        // rebuild them. Without per-slot matIdx, ExtractAndMerge on
+                        // the raw mdl list falls back to MaterialIdx==0 per mdl,
+                        // which for Bibo+ style multi-mdl groups only keeps one
+                        // body region (user sees just the upper body UV).
+                        //
+                        // Preserve manually added MeshDiskPaths that aren't in the
+                        // resolver's result so the user doesn't lose extras.
                         if (group.MeshSlots.Count > 0) continue;
-                        if (group.AllMeshPaths.Count > 0) continue;
                         if (string.IsNullOrEmpty(group.MtrlGamePath)) continue;
 
                         var resolution = skinMeshResolver.Resolve(group.MtrlGamePath, trees);
-                        if (resolution.Success)
-                        {
-                            group.MeshSlots = resolution.MeshSlots;
-                            group.LiveTreeHash = resolution.LiveTreeHash;
-                            group.MeshGamePath = resolution.PrimaryMdlGamePath;
-                            group.MeshDiskPath = resolution.PrimaryMdlDiskPath;
-                            group.TargetMatIdx = resolution.MeshSlots[0].MatIdx;
-                        }
+                        if (!resolution.Success) continue;
+
+                        var resolvedPaths = new System.Collections.Generic.HashSet<string>(
+                            resolution.MeshSlots.Select(s => s.DiskPath ?? s.GamePath),
+                            StringComparer.OrdinalIgnoreCase);
+                        var manualExtras = group.MeshDiskPaths
+                            .Where(p => !resolvedPaths.Contains(p))
+                            .ToList();
+                        if (!string.IsNullOrEmpty(group.MeshDiskPath)
+                            && !resolvedPaths.Contains(group.MeshDiskPath))
+                            manualExtras.Insert(0, group.MeshDiskPath);
+
+                        group.MeshSlots = resolution.MeshSlots;
+                        group.LiveTreeHash = resolution.LiveTreeHash;
+                        group.MeshGamePath = resolution.PrimaryMdlGamePath;
+                        group.MeshDiskPath = resolution.PrimaryMdlDiskPath;
+                        group.TargetMatIdx = resolution.MeshSlots[0].MatIdx;
+                        group.MeshDiskPaths.Clear();
+                        foreach (var extra in manualExtras)
+                            if (!string.IsNullOrEmpty(extra) && !group.MeshDiskPaths.Contains(extra))
+                                group.MeshDiskPaths.Add(extra);
                     }
                 }
 
