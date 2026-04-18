@@ -39,14 +39,6 @@ public class ModelEditorWindow : Window, IDisposable
     private bool isDraggingCamera;
     private Vector2 lastMousePos;
     private MeshData? uploadedMesh;
-    private string? lastMeshPath;
-    private TargetGroup? lastMeshGroup;
-
-    // 1Hz live-tree poll: re-runs the resolver and compares LiveTreeHash to
-    // detect equipment / body-mod swaps and auto-refresh the cached mesh.
-    private DateTime lastLiveTreePollUtc = DateTime.MinValue;
-    private const double LiveTreePollIntervalSec = 1.0;
-
     private List<(string name, string diskPath)>? cachedMdlList;
 
     private static SharpDX.Vector3 ToSDX(Vector3 v) => new(v.X, v.Y, v.Z);
@@ -80,11 +72,8 @@ public class ModelEditorWindow : Window, IDisposable
         previewService.MeshChanged += OnPreviewMeshChanged;
     }
 
-    // Reset only GPU upload tokens  -- NEVER touch lastMeshPath here. If we
-    // did, TryUploadMesh's pathKey diff would re-trigger LoadMeshForGroup
-    // every frame after a load, which would re-fire MeshChanged -> infinite
-    // loop. lastMeshPath is owned by TryUploadMesh's own group-switch and
-    // pathKey diff logic.
+    // Reset only GPU upload token so the next TryUploadMesh re-uploads into
+    // meshBuffer. Path/group tracking now lives in MainWindow.TickMeshState.
     private void OnPreviewMeshChanged()
     {
         uploadedMesh = null;
@@ -95,7 +84,10 @@ public class ModelEditorWindow : Window, IDisposable
 
     public override void Draw()
     {
-        PollLiveTreeChange();
+        // Mesh state tracking (group ref, pathKey diff, live tree poll) is owned
+        // by MainWindow.TickMeshState so the UV canvas stays in sync regardless
+        // of whether this window is open. Here we just mirror currentMesh into
+        // our meshBuffer when it changes.
         TryUploadMesh();
         TryUpdateTexture();
 
@@ -479,100 +471,32 @@ public class ModelEditorWindow : Window, IDisposable
         }
     }
 
-    // Poll Penumbra's live resource tree once per second; if the resolver
-    // would now produce a different LiveTreeHash than what we cached on the
-    // current group, the player has changed equipment or toggled a body
-    // mod  -- refresh MeshSlots and reload the mesh automatically.
-    //
-    // Cheap because: window only draws while open (so polling stops when
-    // hidden), GetPlayerTrees is a single Penumbra IPC call on the main
-    // thread, hash comparison is a string equality.
-    private void PollLiveTreeChange()
-    {
-        var group = project.SelectedGroup;
-        if (group == null
-            || string.IsNullOrEmpty(group.MtrlGamePath)
-            || group.MeshSlots.Count == 0
-            || group.LiveTreeHash == null)
-            return;
-
-        var now = DateTime.UtcNow;
-        if ((now - lastLiveTreePollUtc).TotalSeconds < LiveTreePollIntervalSec) return;
-        lastLiveTreePollUtc = now;
-
-        var trees = penumbra.GetPlayerTrees();
-        if (trees == null) return;
-
-        var newRes = skinMeshResolver.Resolve(group.MtrlGamePath!, trees);
-        if (!newRes.Success) return;
-        if (newRes.LiveTreeHash == group.LiveTreeHash) return;
-
-        group.MeshSlots = newRes.MeshSlots;
-        group.LiveTreeHash = newRes.LiveTreeHash;
-        group.MeshGamePath = newRes.PrimaryMdlGamePath;
-        group.MeshDiskPath = newRes.PrimaryMdlDiskPath;
-        group.TargetMatIdx = newRes.MeshSlots[0].MatIdx;
-        previewService.LoadMeshForGroup(group);
-        previewService.NotifyMeshChanged();
-    }
-
     private void TryUploadMesh()
     {
         var group = project.SelectedGroup;
+        var mesh = previewService.CurrentMesh;
 
-        // Detect group switch by object reference (including deletion and
-        // delete-then-add at the same index).
-        if (!ReferenceEquals(group, lastMeshGroup))
+        if (group == null || mesh == null)
         {
-            lastMeshGroup = group;
-            lastMeshPath = null;
-            lastCompositeVersion = -1;
-
-            // Clear display if no group selected
-            if (group == null)
+            if (uploadedMesh != null)
             {
                 meshBuffer.Dispose();
                 uploadedMesh = null;
+            }
+            if (group == null)
+            {
                 diffuseSrv?.Dispose();
                 diffuseSrv = null;
                 diffuseTex?.Dispose();
                 diffuseTex = null;
                 diffuseTexW = 0;
                 diffuseTexH = 0;
-                return;
+                lastCompositeVersion = -1;
             }
+            return;
         }
 
-        // Load mesh when the group changes. We use a key built from the
-        // resolver MeshSlots if present, otherwise fall back to the legacy
-        // VisibleMeshPaths list. Either way the actual load goes through
-        // PreviewService.LoadMeshForGroup so the resolver path is honored.
-        string? pathKey;
-        if (group != null && group.MeshSlots.Count > 0)
-            pathKey = "slots:" + string.Join("|", group.MeshSlots.Select(s => s.GamePath + "#" + string.Join(",", s.MatIdx)));
-        else
-        {
-            var paths = group?.VisibleMeshPaths;
-            pathKey = paths != null && paths.Count > 0 ? string.Join("|", paths) : null;
-        }
-
-        if (pathKey != lastMeshPath)
-        {
-            lastMeshPath = pathKey;
-            if (pathKey != null && group != null)
-            {
-                previewService.LoadMeshForGroup(group);
-                uploadedMesh = null;
-            }
-            else
-            {
-                meshBuffer.Dispose();
-                uploadedMesh = null;
-            }
-        }
-
-        var mesh = previewService.CurrentMesh;
-        if (mesh == null || mesh == uploadedMesh) return;
+        if (ReferenceEquals(mesh, uploadedMesh)) return;
 
         meshBuffer.Upload(renderer.Device, mesh);
         uploadedMesh = mesh;

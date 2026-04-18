@@ -51,8 +51,14 @@ public partial class MainWindow : Window, IDisposable
     private int lastBaseTexWidth;
     private int lastBaseTexHeight;
 
-    // Track group switch to clear stale mesh
-    private int lastSelectedGroupIndex = -1;
+    // Mesh state tick: tracked by object ref + resolver-slot-path hash so we pick
+    // up group switches, in-place mutations (add/remove model, resolver reruns),
+    // and live-tree swaps (character re-equipment) regardless of whether the 3D
+    // editor is open.
+    private TargetGroup? lastMeshGroupRef;
+    private string? lastMeshPathKey;
+    private DateTime lastLiveTreePollUtc = DateTime.MinValue;
+    private const double LiveTreePollIntervalSec = 1.0;
 
     // Panel widths (resizable)
     private float leftPanelWidth = -1;
@@ -169,8 +175,9 @@ public partial class MainWindow : Window, IDisposable
                 DebugServer.AppendLog($"[MainWindow] Init task faulted: {initTask.Exception?.GetBaseException().Message}");
             initTask = null;
             initPhase = InitPhase.Done;
-            // Sync so the group-switch detection below doesn't re-trigger a full preview
-            lastSelectedGroupIndex = project.SelectedGroupIndex;
+            // Seed the mesh tick so it doesn't re-fire the work init just did.
+            lastMeshGroupRef = project.SelectedGroup;
+            lastMeshPathKey = BuildMeshPathKey(project.SelectedGroup);
             previewDirty = false;
         }
 
@@ -178,6 +185,7 @@ public partial class MainWindow : Window, IDisposable
 
         previewService.ApplyPendingSwaps();
         TickPendingAdd();
+        TickMeshState();
 
         if (previewService.ExternalDirty)
         {
@@ -288,6 +296,93 @@ public partial class MainWindow : Window, IDisposable
 
         // skin CT: rebuild per-layer CT; legacy: set CBuffer color
         TryDirectEmissiveUpdate(group);
+    }
+
+    // ── Mesh state tick ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Runs every frame from Draw. Detects selected-group change, in-place mesh
+    /// config mutation (add/remove model, resolver rerun), and live-tree swaps,
+    /// then keeps <see cref="PreviewService.CurrentMesh"/> in sync. Lives in
+    /// MainWindow so the canvas wireframe stays correct even when the 3D editor
+    /// window is closed.
+    /// </summary>
+    private void TickMeshState()
+    {
+        if (initPhase != InitPhase.Done) return;
+
+        var group = project.SelectedGroup;
+
+        if (!ReferenceEquals(group, lastMeshGroupRef))
+        {
+            if (lastMeshGroupRef != null && project.Groups.Contains(lastMeshGroupRef))
+                previewService.InvalidateEmissiveForGroup(lastMeshGroupRef);
+            lastMeshGroupRef = group;
+            lastMeshPathKey = null;
+            MarkPreviewDirty();
+        }
+
+        var pathKey = BuildMeshPathKey(group);
+        if (pathKey != lastMeshPathKey)
+        {
+            lastMeshPathKey = pathKey;
+            if (group != null && pathKey != null)
+            {
+                var captured = group;
+                Task.Run(() => previewService.LoadMeshForGroup(captured));
+            }
+            else
+            {
+                previewService.ClearMesh();
+            }
+            previewService.NotifyMeshChanged();
+        }
+
+        var now = DateTime.UtcNow;
+        if ((now - lastLiveTreePollUtc).TotalSeconds >= LiveTreePollIntervalSec)
+        {
+            lastLiveTreePollUtc = now;
+            PollLiveTreeChange(group);
+        }
+    }
+
+    private static string? BuildMeshPathKey(TargetGroup? group)
+    {
+        if (group == null) return null;
+        if (group.MeshSlots.Count > 0)
+            return "slots:" + string.Join("|",
+                group.MeshSlots.Select(s => s.GamePath + "#" + string.Join(",", s.MatIdx)));
+        if (group.VisibleMeshPaths.Count > 0)
+            return string.Join("|", group.VisibleMeshPaths);
+        return null;
+    }
+
+    /// <summary>
+    /// 1Hz poll that reruns the resolver against the current Penumbra resource
+    /// tree. When the player's worn gear (or a mod install) changes the mesh
+    /// composition, MeshSlots/LiveTreeHash get refreshed and the next
+    /// TickMeshState cycle reloads the mesh via the pathKey diff.
+    /// </summary>
+    private void PollLiveTreeChange(TargetGroup? group)
+    {
+        if (group == null) return;
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return;
+        if (group.MeshSlots.Count == 0) return;
+        if (string.IsNullOrEmpty(group.LiveTreeHash)) return;
+
+        var trees = penumbra.GetPlayerTrees();
+        if (trees == null) return;
+
+        var newRes = skinMeshResolver.Resolve(group.MtrlGamePath!, trees);
+        if (!newRes.Success) return;
+        if (newRes.LiveTreeHash == group.LiveTreeHash) return;
+
+        group.MeshSlots = newRes.MeshSlots;
+        group.LiveTreeHash = newRes.LiveTreeHash;
+        group.MeshGamePath = newRes.PrimaryMdlGamePath;
+        group.MeshDiskPath = newRes.PrimaryMdlDiskPath;
+        group.TargetMatIdx = newRes.MeshSlots[0].MatIdx;
+        // pathKey will differ next frame -> TickMeshState reloads mesh.
     }
 
     // ── Loading overlay ──────────────────────────────────────────────────────
@@ -579,39 +674,6 @@ public partial class MainWindow : Window, IDisposable
     {
         var group = project.SelectedGroup;
         var hasTarget = group != null && !string.IsNullOrEmpty(group.DiffuseGamePath);
-
-        if (project.SelectedGroupIndex != lastSelectedGroupIndex)
-        {
-            var oldGroupIndex = lastSelectedGroupIndex;
-            lastSelectedGroupIndex = project.SelectedGroupIndex;
-
-            // Clean up emissive hook state from the previous group
-            if (oldGroupIndex >= 0 && oldGroupIndex < project.Groups.Count)
-                previewService.InvalidateEmissiveForGroup(project.Groups[oldGroupIndex]);
-
-            if (project.SelectedGroup == null)
-            {
-                previewService.ClearMesh();
-                previewService.NotifyMeshChanged();
-            }
-            else
-            {
-                // Each group can have different MeshSlots (different mdl files
-                // and UV layouts). Reload mesh in background so the UV
-                // wireframe on the canvas matches the new group.
-                // Don't call NotifyMeshChanged from background thread  -- the
-                // canvas reads CurrentMesh directly each frame, and
-                // ModelEditorWindow detects changes via its own pathKey diff.
-                var newGroup = project.SelectedGroup;
-                if (newGroup.MeshSlots.Count > 0 || newGroup.AllMeshPaths.Count > 0
-                    || !string.IsNullOrEmpty(newGroup.MeshGamePath))
-                {
-                    Task.Run(() => previewService.LoadMeshForGroup(newGroup));
-                }
-
-                MarkPreviewDirty();
-            }
-        }
 
         // Poll external file changes (PS save, etc.)
         if (config.PluginEnabled && config.AutoPreview && hasTarget)
