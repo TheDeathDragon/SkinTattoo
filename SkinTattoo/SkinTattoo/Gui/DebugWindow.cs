@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
 using Dalamud.Bindings.ImGui;
@@ -13,6 +14,8 @@ public class DebugWindow : Window
 {
     private string logFilter = string.Empty;
     private bool logAutoScroll = true;
+    private bool multiSelectMode;
+    private readonly HashSet<string> selectedLines = new();
 
     public DebugWindow()
         : base(Strings.T("window.debug.title") + "###SkinTattooDebug",
@@ -27,20 +30,52 @@ public class DebugWindow : Window
 
     public override void Draw()
     {
-        // Toolbar
         if (ImGui.Button(Strings.T("button.clear")))
         {
             while (DebugServer.LogBuffer.TryDequeue(out _)) { }
+            selectedLines.Clear();
         }
 
         ImGui.SameLine();
-        if (ImGui.Button(Strings.T("button.copy_all")))
+        if (multiSelectMode)
         {
-            var sb = new StringBuilder();
-            foreach (var line in DebugServer.LogBuffer)
-                sb.AppendLine(line);
-            ImGui.SetClipboardText(sb.ToString());
+            var label = $"{Strings.T("button.copy_selected")} ({selectedLines.Count})";
+            using (ImRaii.Disabled(selectedLines.Count == 0))
+            {
+                if (ImGui.Button(label))
+                {
+                    var sb = new StringBuilder();
+                    foreach (var line in DebugServer.LogBuffer)
+                        if (selectedLines.Contains(line))
+                            sb.AppendLine(line);
+                    ImGui.SetClipboardText(sb.ToString());
+                }
+            }
         }
+        else
+        {
+            if (ImGui.Button(Strings.T("button.copy_all")))
+            {
+                var sb = new StringBuilder();
+                foreach (var line in DebugServer.LogBuffer)
+                    sb.AppendLine(line);
+                ImGui.SetClipboardText(sb.ToString());
+            }
+        }
+
+        ImGui.SameLine();
+        var multiLabel = multiSelectMode
+            ? Strings.T("button.exit_multi_select")
+            : Strings.T("button.multi_select");
+        if (multiSelectMode)
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.3f, 0.5f, 0.8f, 1f));
+        if (ImGui.Button(multiLabel))
+        {
+            multiSelectMode = !multiSelectMode;
+            if (!multiSelectMode) selectedLines.Clear();
+        }
+        if (multiSelectMode)
+            ImGui.PopStyleColor();
 
         ImGui.SameLine();
         ImGui.Checkbox(Strings.T("label.auto_scroll"), ref logAutoScroll);
@@ -63,14 +98,27 @@ public class DebugWindow : Window
             if (hasFilter && !line.Contains(logFilter, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            ImGui.Selectable(line);
-            if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
-                ImGui.SetClipboardText(line);
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(Strings.T("tooltip.copy_row"));
+            if (multiSelectMode)
+            {
+                var isSelected = selectedLines.Contains(line);
+                if (ImGui.Selectable(line, isSelected))
+                {
+                    if (isSelected) selectedLines.Remove(line);
+                    else selectedLines.Add(line);
+                }
+            }
+            else
+            {
+                ImGui.Selectable(line);
+                if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                    ImGui.SetClipboardText(line);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(Strings.T("tooltip.copy_row"));
+            }
         }
 
-        if (logAutoScroll && ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - 20)
+        if (logAutoScroll && !multiSelectMode
+            && ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - 20)
             ImGui.SetScrollHereY(1.0f);
     }
 }
