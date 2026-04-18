@@ -865,7 +865,6 @@ public class PreviewService : IDisposable
                 continue;
 
             previewDiskPaths.TryGetValue(group.DiffuseGamePath, out var diffDisk);
-            previewDiskPaths.TryGetValue(group.NormGamePath ?? "", out var normDisk);
 
             emissiveOffsets.TryGetValue(group.MtrlGamePath ?? "", out var emOff);
 
@@ -884,8 +883,11 @@ public class PreviewService : IDisposable
             foreach (var l in group.Layers)
                 snapshots.Add(new LayerSnapshot(l));
 
+            // Composite base MUST come from the vanilla/mod original, never from
+            // previewDiskPaths (our own prior output) — user Normal/Mask RGB
+            // paints would accumulate on each async cycle and produce a trail.
             jobs.Add((group, group.DiffuseGamePath, diffDisk,
-                group.NormGamePath, normDisk ?? (group.OrigNormDiskPath ?? group.NormDiskPath),
+                group.NormGamePath, group.OrigNormDiskPath ?? group.NormDiskPath,
                 group.MtrlGamePath, emOff,
                 indexGame, indexDisk,
                 snapshots,
