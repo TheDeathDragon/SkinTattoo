@@ -302,6 +302,8 @@
     "viewport_scroll": "Scroll: scale decal  Ctrl+Scroll: zoom camera",
     "loading": "Loading...",
     "loading_sub": "Loading models and decals, please wait",
+    "char_redrawing": "Character redrawing...",
+    "char_redrawing_sub": "Will refresh automatically when done",
     "no_resources": "Click \"Refresh Resources\" to query player resources",
     "no_model_detected": "No character models detected",
     "select_model": "Select a model to add:",

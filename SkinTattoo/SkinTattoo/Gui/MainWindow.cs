@@ -177,6 +177,7 @@ public partial class MainWindow : Window, IDisposable
         var loading = initPhase != InitPhase.Done;
 
         previewService.ApplyPendingSwaps();
+        TickPendingAdd();
 
         if (previewService.ExternalDirty)
         {

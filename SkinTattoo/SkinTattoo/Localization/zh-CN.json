@@ -302,6 +302,8 @@
     "viewport_scroll": "滚轮:缩放贴花  Ctrl+滚轮:缩放相机",
     "loading": "加载中…",
     "loading_sub": "正在加载模型与贴花，请稍候",
+    "char_redrawing": "角色重绘中…",
+    "char_redrawing_sub": "完成后自动刷新资源树",
     "no_resources": "点击「刷新资源」查询玩家资源",
     "no_model_detected": "未检测到角色模型",
     "select_model": "选择要添加的模型:",

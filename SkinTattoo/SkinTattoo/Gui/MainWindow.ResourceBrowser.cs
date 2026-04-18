@@ -54,6 +54,11 @@ public partial class MainWindow
             return;
         }
 
+        // While a redraw is in flight, lock interaction so the user can't spam-add
+        // while the resource tree is being rebuilt by Penumbra.
+        var busy = pendingAdd != null;
+        if (busy) ImGui.BeginDisabled();
+
         if (ImGui.Button(Strings.T("button.refresh_resources")))
             RefreshResources();
         ImGui.SameLine();
@@ -67,6 +72,7 @@ public partial class MainWindow
         if (!penumbra.IsAvailable)
         {
             ImGui.TextColored(new Vector4(1, 0.4f, 0.4f, 1), Strings.T("label.penumbra_disconnected"));
+            if (busy) ImGui.EndDisabled();
             ImGui.End();
             return;
         }
@@ -74,6 +80,8 @@ public partial class MainWindow
         if (cachedTrees == null || cachedTrees.Count == 0)
         {
             ImGui.TextDisabled(Strings.T("hint.no_resources"));
+            if (busy) ImGui.EndDisabled();
+            DrawResourceLoadingOverlay();
             ImGui.End();
             return;
         }
@@ -82,18 +90,63 @@ public partial class MainWindow
 
         ImGui.Separator();
 
-        using var scroll = ImRaii.Child("##CardScroll", new Vector2(-1, -1), false);
-        if (!scroll.Success) { ImGui.End(); return; }
-
-        for (var i = 0; i < cards.Count; i++)
+        using (var scroll = ImRaii.Child("##CardScroll", new Vector2(-1, -1), false))
         {
-            ImGui.PushID(i);
-            DrawMtrlCard(cards[i]);
-            ImGui.PopID();
-            if (i < cards.Count - 1) ImGui.Separator();
+            if (scroll.Success)
+            {
+                for (var i = 0; i < cards.Count; i++)
+                {
+                    ImGui.PushID(i);
+                    DrawMtrlCard(cards[i]);
+                    ImGui.PopID();
+                    if (i < cards.Count - 1) ImGui.Separator();
+                }
+            }
         }
 
+        if (busy) ImGui.EndDisabled();
+        DrawResourceLoadingOverlay();
+
         ImGui.End();
+    }
+
+    private void DrawResourceLoadingOverlay()
+    {
+        if (pendingAdd == null) return;
+
+        var wndPos = ImGui.GetWindowPos();
+        var cMin = wndPos + ImGui.GetWindowContentRegionMin();
+        var cMax = wndPos + ImGui.GetWindowContentRegionMax();
+        if (cMax.X <= cMin.X || cMax.Y <= cMin.Y) return;
+
+        var draw = ImGui.GetWindowDrawList();
+        draw.AddRectFilled(cMin, cMax, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.55f)));
+
+        var center = (cMin + cMax) * 0.5f;
+
+        const int dotCount = 10;
+        const float radius = 22f;
+        const float dotRadius = 3.5f;
+        var t = ImGui.GetTime();
+        var rotation = (float)(t * 4.0);
+        for (var i = 0; i < dotCount; i++)
+        {
+            var phase = i / (float)dotCount;
+            var angle = rotation + phase * MathF.PI * 2f;
+            var p = center + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * radius;
+            var brightness = 0.15f + 0.85f * phase;
+            draw.AddCircleFilled(p, dotRadius, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, brightness)));
+        }
+
+        var label = Strings.T("hint.char_redrawing");
+        var labelSize = ImGui.CalcTextSize(label);
+        var labelPos = center + new Vector2(-labelSize.X * 0.5f, radius + 10f);
+        draw.AddText(labelPos, ImGui.GetColorU32(new Vector4(0.95f, 0.95f, 0.95f, 1f)), label);
+
+        var sub = Strings.T("hint.char_redrawing_sub");
+        var subSize = ImGui.CalcTextSize(sub);
+        var subPos = new Vector2(center.X - subSize.X * 0.5f, labelPos.Y + labelSize.Y + 4f);
+        draw.AddText(subPos, ImGui.GetColorU32(new Vector4(0.75f, 0.75f, 0.8f, 1f)), sub);
     }
 
     // ── Card building ────────────────────────────────────────────────────────
@@ -559,9 +612,28 @@ public partial class MainWindow
 
     // ── Selection logic ──────────────────────────────────────────────────────
 
+    // Deferred state for an add-target operation that's waiting on a Penumbra
+    // redraw to finish. RedrawPlayer clears the resource tree while the character
+    // rebuilds, so we poll until GetPlayerTrees returns non-empty before running
+    // the actual group-build (which depends on tree data).
+    private sealed record PendingAddInfo(
+        ResourceNodeDto MtrlNode,
+        ResourceNodeDto? ParentMdl,
+        List<(string GamePath, string ActualPath)>? LiveMdls);
+
+    private PendingAddInfo? pendingAdd;
+    private DateTime pendingAddStartUtc;
+    private const double PendingAddTimeoutSec = 5.0;
+
     private void AddTargetGroupFromMtrl(ResourceNodeDto mtrlNode, ResourceNodeDto? parentMdl,
         List<(string GamePath, string ActualPath)>? liveMdls = null)
     {
+        if (string.IsNullOrEmpty(mtrlNode.GamePath))
+        {
+            DebugServer.AppendLog("[MainWindow] AddTargetGroupFromMtrl: mtrl has no GamePath, aborting");
+            return;
+        }
+
         // Only clear state and redraw when there are active Penumbra redirects.
         // This avoids unnecessary character reloads (flash) when rapidly adding
         // multiple groups before any preview has been triggered.
@@ -571,12 +643,49 @@ public partial class MainWindow
             previewService.ResetSwapState();
             penumbra.ClearRedirect();
             penumbra.RedrawPlayer();
+
+            // Resource tree is empty during redraw; defer the build until the
+            // game reports the rebuilt character's resources.
+            pendingAdd = new PendingAddInfo(mtrlNode, parentMdl, liveMdls);
+            pendingAddStartUtc = DateTime.UtcNow;
+            return;
         }
 
+        CompleteAddTargetGroup(mtrlNode, parentMdl, liveMdls);
+    }
+
+    /// <summary>
+    /// Poll for post-redraw resource tree readiness and resume the deferred add.
+    /// Called once per frame from MainWindow.Draw.
+    /// </summary>
+    private void TickPendingAdd()
+    {
+        if (pendingAdd == null) return;
+
+        var trees = penumbra.GetPlayerTrees();
+        if (trees != null && trees.Count > 0)
+        {
+            cachedTrees = trees;
+            var info = pendingAdd;
+            pendingAdd = null;
+            CompleteAddTargetGroup(info.MtrlNode, info.ParentMdl, info.LiveMdls);
+            return;
+        }
+
+        if ((DateTime.UtcNow - pendingAddStartUtc).TotalSeconds > PendingAddTimeoutSec)
+        {
+            DebugServer.AppendLog("[MainWindow] Pending add timed out waiting for redraw");
+            pendingAdd = null;
+        }
+    }
+
+    private void CompleteAddTargetGroup(ResourceNodeDto mtrlNode, ResourceNodeDto? parentMdl,
+        List<(string GamePath, string ActualPath)>? liveMdls)
+    {
         var mtrlGp = mtrlNode.GamePath;
         if (string.IsNullOrEmpty(mtrlGp))
         {
-            DebugServer.AppendLog("[MainWindow] AddTargetGroupFromMtrl: mtrl has no GamePath, aborting");
+            DebugServer.AppendLog("[MainWindow] CompleteAddTargetGroup: mtrl has no GamePath, aborting");
             return;
         }
 
