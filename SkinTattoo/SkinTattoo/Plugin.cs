@@ -155,17 +155,23 @@ public sealed class Plugin : IDalamudPlugin
                 {
                     foreach (var group in project.Groups)
                     {
-                        if (group.MeshSlots.Count == 0 && !string.IsNullOrEmpty(group.MtrlGamePath))
+                        // Only auto-upgrade groups that have no mesh config at all.
+                        // If a group already has a fallback AllMeshPaths (e.g. from
+                        // a non-standard body mod like Bibo+ where the resolver
+                        // originally failed), re-resolving could narrow the set of
+                        // mdls and cut off parts of the UV wireframe/mesh.
+                        if (group.MeshSlots.Count > 0) continue;
+                        if (group.AllMeshPaths.Count > 0) continue;
+                        if (string.IsNullOrEmpty(group.MtrlGamePath)) continue;
+
+                        var resolution = skinMeshResolver.Resolve(group.MtrlGamePath, trees);
+                        if (resolution.Success)
                         {
-                            var resolution = skinMeshResolver.Resolve(group.MtrlGamePath, trees);
-                            if (resolution.Success)
-                            {
-                                group.MeshSlots = resolution.MeshSlots;
-                                group.LiveTreeHash = resolution.LiveTreeHash;
-                                group.MeshGamePath = resolution.PrimaryMdlGamePath;
-                                group.MeshDiskPath = resolution.PrimaryMdlDiskPath;
-                                group.TargetMatIdx = resolution.MeshSlots[0].MatIdx;
-                            }
+                            group.MeshSlots = resolution.MeshSlots;
+                            group.LiveTreeHash = resolution.LiveTreeHash;
+                            group.MeshGamePath = resolution.PrimaryMdlGamePath;
+                            group.MeshDiskPath = resolution.PrimaryMdlDiskPath;
+                            group.TargetMatIdx = resolution.MeshSlots[0].MatIdx;
                         }
                     }
                 }
