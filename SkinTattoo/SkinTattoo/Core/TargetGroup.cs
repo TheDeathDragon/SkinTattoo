@@ -96,7 +96,8 @@ public class TargetGroup
     public bool HasEmissiveLayers()
     {
         foreach (var l in Layers)
-            if (l.IsVisible && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
+            if (l.IsVisible && l.TargetMap == TargetMap.Diffuse
+                && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
                 return true;
         return false;
     }
@@ -104,7 +105,8 @@ public class TargetGroup
     public bool HasPbrLayers()
     {
         foreach (var l in Layers)
-            if (l.IsVisible && l.RequiresRowPair && !string.IsNullOrEmpty(l.ImagePath))
+            if (l.IsVisible && l.TargetMap == TargetMap.Diffuse
+                && l.RequiresRowPair && !string.IsNullOrEmpty(l.ImagePath))
                 return true;
         return false;
     }

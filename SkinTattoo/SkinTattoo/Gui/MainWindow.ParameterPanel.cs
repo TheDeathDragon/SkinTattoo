@@ -12,6 +12,10 @@ namespace SkinTattoo.Gui;
 
 public partial class MainWindow
 {
+    // Layer index the "auto-detected normal map" notice is pinned to.
+    // Cleared on manual target change or a fresh auto-detect on a different layer.
+    private int autoNormalNoticeForIndex = -1;
+
     // ── Right Panel: Parameters ──────────────────────────────────────────────
 
     private void DrawParameterPanel()
@@ -67,6 +71,7 @@ public partial class MainWindow
             layer.ImagePath = imagePathBuf;
             AutoFitLayerScale(group, layer);
             lastEditedLayerIndex = idx;
+            TryAutoDetectNormalMap(layer);
             MarkPreviewDirty();
         }
         ImGui.SameLine();
@@ -92,6 +97,7 @@ public partial class MainWindow
                             lastEditedLayerIndex = capturedLi;
                             config.LastImageDir = System.IO.Path.GetDirectoryName(path);
                             config.Save();
+                            TryAutoDetectNormalMap(picked);
                             MarkPreviewDirty();
                         }
                     }
@@ -99,6 +105,36 @@ public partial class MainWindow
                 1, config.LastImageDir, false);
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.browse_image"));
+
+        const float labelW = 56f;
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text(Strings.T("target_map.label")); ImGui.SameLine(labelW);
+        ImGui.SetNextItemWidth(-1);
+        var tmIdx = (int)layer.TargetMap;
+        var tmNames = new[] { Strings.T("target_map.diffuse"), Strings.T("target_map.mask"), Strings.T("target_map.normal") };
+        if (ImGui.Combo("##targetMap", ref tmIdx, tmNames, tmNames.Length))
+        {
+            layer.TargetMap = (TargetMap)tmIdx;
+            autoNormalNoticeForIndex = -1;
+            MarkPreviewDirty(immediate: true);
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("target_map.tooltip"));
+
+        if (autoNormalNoticeForIndex == idx && layer.TargetMap == TargetMap.Normal)
+            ImGui.TextColored(new Vector4(0.5f, 0.85f, 1f, 1f), Strings.T("target_map.auto_normal_detected"));
+    }
+
+    private void TryAutoDetectNormalMap(DecalLayer layer)
+    {
+        autoNormalNoticeForIndex = -1;
+        if (layer.TargetMap != TargetMap.Diffuse) return;
+        if (string.IsNullOrEmpty(layer.ImagePath)) return;
+        if (!previewService.IsLikelyNormalMap(layer.ImagePath)) return;
+
+        layer.TargetMap = TargetMap.Normal;
+        var gi = project.SelectedGroupIndex;
+        if (gi >= 0 && gi < project.Groups.Count)
+            autoNormalNoticeForIndex = project.Groups[gi].SelectedLayerIndex;
     }
 
     private void DrawTransformSection(DecalLayer layer)
@@ -197,6 +233,11 @@ public partial class MainWindow
 
         ImGui.Spacing();
 
+        // Show Decal + Emissive only make sense for the Diffuse pipeline. Mask/Normal
+        // targets paint a different texture and participate in their own pass only.
+        bool isDiffuseTarget = layer.TargetMap == TargetMap.Diffuse;
+
+        if (isDiffuseTarget)
         {
             var was = layer.AffectsDiffuse;
             var v = was;
@@ -207,6 +248,7 @@ public partial class MainWindow
             }
         }
 
+        if (isDiffuseTarget)
         {
             var was = layer.AffectsEmissive;
             var v = was;

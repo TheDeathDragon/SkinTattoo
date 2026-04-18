@@ -197,6 +197,14 @@
     "linear": "Linear",
     "bidir": "Bidirectional"
   },
+  "target_map": {
+    "label": "Target",
+    "diffuse": "Diffuse",
+    "mask": "Mask",
+    "normal": "Normal",
+    "tooltip": "Which game texture the decal paints into.\nDiffuse — color, default\nMask — material mask, spec/roughness\nNormal — normal map, bump detail",
+    "auto_normal_detected": "PNG looks like a normal map — target set to Normal."
+  },
   "enum": {
     "blendmode": {
       "normal": "Normal",

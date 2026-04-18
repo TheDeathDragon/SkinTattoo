@@ -59,6 +59,16 @@ public class PreviewService : IDisposable
 {
     private readonly MeshExtractor meshExtractor;
     private readonly DecalImageLoader imageLoader;
+
+    /// <summary>Heuristic: filename hint (_n / _norm / "normal") plus RGB-clustering fallback.</summary>
+    public bool IsLikelyNormalMap(string imagePath)
+    {
+        var name = Path.GetFileNameWithoutExtension(imagePath).ToLowerInvariant();
+        if (name.EndsWith("_n") || name.Contains("_norm") || name.Contains("normal"))
+            return true;
+        var img = imageLoader.LoadImage(imagePath);
+        return img != null && DecalImageLoader.LooksLikeNormalMap(img.Value.Data);
+    }
     private readonly PenumbraBridge penumbra;
     private readonly TextureSwapService? textureSwap;
     private readonly EmissiveCBufferHook? emissiveHook;
@@ -610,7 +620,7 @@ public class PreviewService : IDisposable
             for (int i = 0; i < group.Layers.Count; i++)
             {
                 var l = group.Layers[i];
-                if (!l.IsVisible || !l.AffectsEmissive || l.AllocatedRowPair < 0) continue;
+                if (!l.IsVisible || l.TargetMap != TargetMap.Diffuse || !l.AffectsEmissive || l.AllocatedRowPair < 0) continue;
                 bool isTarget = (highlightLayerIndex < 0 || highlightLayerIndex == i);
                 tempLayers.Add(new DecalLayer
                 {
@@ -995,6 +1005,9 @@ public class PreviewService : IDisposable
                                 outputBuffer: normRgbaBuf);
                             if (normRgba != null)
                             {
+                                if (AnyTargetMapLayer(layers, TargetMap.Normal))
+                                    CpuUvComposite(layers, normRgba, baseTex.Width, baseTex.Height,
+                                        outputBuffer: normRgba, targetFilter: TargetMap.Normal, preserveAlpha: true);
                                 var normBgraBuf = EnsureBuf(ref scratch.NormBgra, byteCount);
                                 TextureSwapService.RgbaToBgra(normRgba, normBgraBuf, byteCount);
                                 previewDiskPaths.TryGetValue(job.NormGamePath ?? "", out var normDiskOut);
@@ -1052,6 +1065,9 @@ public class PreviewService : IDisposable
                                 outputBuffer: normRgbaBuf);
                             if (normRgba != null)
                             {
+                                if (AnyTargetMapLayer(layers, TargetMap.Normal))
+                                    CpuUvComposite(layers, normRgba, baseTex.Width, baseTex.Height,
+                                        outputBuffer: normRgba, targetFilter: TargetMap.Normal, preserveAlpha: true);
                                 var normBgraBuf = EnsureBuf(ref scratch.NormBgra, byteCount);
                                 TextureSwapService.RgbaToBgra(normRgba, normBgraBuf, byteCount);
                                 previewDiskPaths.TryGetValue(job.NormGamePath ?? "", out var normDiskOut);
@@ -1072,8 +1088,10 @@ public class PreviewService : IDisposable
                         }
                     }
 
+                    bool irisMaskHandled = false;
                     if (hasVisibleEmissive && !string.IsNullOrEmpty(job.MtrlGamePath) && job.MtrlGamePath!.Contains("_iri_"))
                     {
+                        irisMaskHandled = true;
                         var irisMtrlDisk = job.Group.OrigMtrlDiskPath ?? job.Group.MtrlDiskPath;
                         var maskGamePath = GetMaskGamePathFromMtrl(job.MtrlGamePath!, irisMtrlDisk);
                         if (!string.IsNullOrEmpty(maskGamePath))
@@ -1085,9 +1103,67 @@ public class PreviewService : IDisposable
                                 var maskRgba = CompositeIrisMask(layers, maskData, maskW, maskH);
                                 if (maskRgba != null)
                                 {
+                                    if (AnyTargetMapLayer(layers, TargetMap.Mask))
+                                        CpuUvComposite(layers, maskRgba, maskW, maskH,
+                                            outputBuffer: maskRgba, targetFilter: TargetMap.Mask);
                                     int maskBytes = maskW * maskH * 4;
                                     var maskBgra = EnsureBuf(ref scratch.MaskBgra, maskBytes);
                                     TextureSwapService.RgbaToBgra(maskRgba, maskBgra, maskBytes);
+                                    previewDiskPaths.TryGetValue(maskGamePath, out var maskDiskOut);
+                                    if (flushFiles && maskDiskOut != null)
+                                        WriteBgraTexFile(maskDiskOut, maskBgra, maskBytes, maskW, maskH);
+                                    texEntries.Add(new SwapBatchEntry(
+                                        maskGamePath, maskDiskOut, maskBgra, maskW, maskH));
+                                }
+                            }
+                        }
+                    }
+
+                    // User Normal-target layers without emissive: load base + paint RGB
+                    bool normWrittenThisCycle = job.IsSkinCt || (!ctQueued && hasVisibleEmissive);
+                    if (!normWrittenThisCycle && AnyTargetMapLayer(layers, TargetMap.Normal)
+                        && !string.IsNullOrEmpty(job.NormGamePath) && !string.IsNullOrEmpty(job.NormDiskPath))
+                    {
+                        var normRgbaBuf = EnsureBuf(ref scratch.NormRgba, byteCount);
+                        if (LoadRgbaResizedInto(job.NormDiskPath!, baseTex.Width, baseTex.Height, normRgbaBuf))
+                        {
+                            CpuUvComposite(layers, normRgbaBuf, baseTex.Width, baseTex.Height,
+                                outputBuffer: normRgbaBuf,
+                                targetFilter: TargetMap.Normal,
+                                preserveAlpha: true);
+                            var normBgraBuf = EnsureBuf(ref scratch.NormBgra, byteCount);
+                            TextureSwapService.RgbaToBgra(normRgbaBuf, normBgraBuf, byteCount);
+                            previewDiskPaths.TryGetValue(job.NormGamePath!, out var normDiskOut);
+                            if (flushFiles && normDiskOut != null)
+                                WriteBgraTexFile(normDiskOut, normBgraBuf, byteCount, baseTex.Width, baseTex.Height);
+                            texEntries.Add(new SwapBatchEntry(
+                                job.NormGamePath!, normDiskOut, normBgraBuf, baseTex.Width, baseTex.Height));
+                        }
+                    }
+
+                    // User Mask-target layers without iris: resolve mask via mtrl sampler + paint RGB
+                    if (!irisMaskHandled && AnyTargetMapLayer(layers, TargetMap.Mask)
+                        && !string.IsNullOrEmpty(job.MtrlGamePath))
+                    {
+                        var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(job.MtrlGamePath!)
+                                       ?? job.Group.OrigMtrlDiskPath ?? job.Group.MtrlDiskPath;
+                        var maskGamePath = GetMaskGamePathFromMtrl(job.MtrlGamePath!, mtrlDisk);
+                        if (!string.IsNullOrEmpty(maskGamePath))
+                        {
+                            var maskTex = LoadGameTexture(maskGamePath);
+                            if (maskTex != null)
+                            {
+                                var (maskData, maskW, maskH) = maskTex.Value;
+                                int maskBytes = maskW * maskH * 4;
+                                var maskWork = new byte[maskBytes];
+                                Buffer.BlockCopy(maskData, 0, maskWork, 0, maskBytes);
+                                var result = CpuUvComposite(layers, maskWork, maskW, maskH,
+                                    outputBuffer: maskWork,
+                                    targetFilter: TargetMap.Mask);
+                                if (result != null)
+                                {
+                                    var maskBgra = EnsureBuf(ref scratch.MaskBgra, maskBytes);
+                                    TextureSwapService.RgbaToBgra(maskWork, maskBgra, maskBytes);
                                     previewDiskPaths.TryGetValue(maskGamePath, out var maskDiskOut);
                                     if (flushFiles && maskDiskOut != null)
                                         WriteBgraTexFile(maskDiskOut, maskBgra, maskBytes, maskW, maskH);
@@ -1125,6 +1201,7 @@ public class PreviewService : IDisposable
         public float RotationDeg, Opacity;
         public BlendMode BlendMode;
         public ClipMode Clip;
+        public TargetMap TargetMap;
         public LayerFadeMask FadeMask;
         public float FadeMaskFalloff;
         public Vector3 DiffuseColor, SpecularColor, EmissiveColor, EmissiveColorB;
@@ -1147,6 +1224,7 @@ public class PreviewService : IDisposable
             ImagePath = l.ImagePath; UvCenter = l.UvCenter; UvScale = l.UvScale;
             RotationDeg = l.RotationDeg; Opacity = l.Opacity; BlendMode = l.BlendMode;
             Clip = l.Clip;
+            TargetMap = l.TargetMap;
             FadeMask = l.FadeMask; FadeMaskFalloff = l.FadeMaskFalloff;
             DiffuseColor = l.DiffuseColor; SpecularColor = l.SpecularColor;
             EmissiveColor = l.EmissiveColor; EmissiveColorB = l.EmissiveColorB; EmissiveIntensity = l.EmissiveIntensity;
@@ -1177,6 +1255,7 @@ public class PreviewService : IDisposable
             Opacity = Opacity,
             BlendMode = BlendMode,
             Clip = Clip,
+            TargetMap = TargetMap,
             FadeMask = FadeMask,
             FadeMaskFalloff = FadeMaskFalloff,
             DiffuseColor = DiffuseColor,
@@ -1206,7 +1285,8 @@ public class PreviewService : IDisposable
     private static bool HasEmissiveLayers(List<LayerSnapshot> layers)
     {
         foreach (var l in layers)
-            if (l.IsVisible && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
+            if (l.IsVisible && l.TargetMap == TargetMap.Diffuse
+                && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
                 return true;
         return false;
     }
@@ -1672,10 +1752,12 @@ public class PreviewService : IDisposable
             redirects[group.DiffuseGamePath!] = diffOut;
         }
 
-        // Emissive: only if there are visible emissive layers + mtrl path is known
+        // Emissive: only if there are visible emissive layers + mtrl path is known.
+        // Non-Diffuse target layers paint their own texture and are excluded from the
+        // emissive pipeline, which targets Diffuse decals' shape as the mask.
         bool hasEmissive = false;
         foreach (var l in visibleLayers)
-            if (l.AffectsEmissive) { hasEmissive = true; break; }
+            if (l.TargetMap == TargetMap.Diffuse && l.AffectsEmissive) { hasEmissive = true; break; }
 
         if (hasEmissive && !string.IsNullOrEmpty(group.MtrlGamePath))
         {
@@ -1689,7 +1771,7 @@ public class PreviewService : IDisposable
                 alloc.TryAllocate(); // reserve row 0
                 foreach (var layer in visibleLayers)
                 {
-                    if (layer.AffectsEmissive)
+                    if (layer.TargetMap == TargetMap.Diffuse && layer.AffectsEmissive)
                         alloc.TryAllocate(layer);
                 }
 
@@ -1770,7 +1852,71 @@ public class PreviewService : IDisposable
             }
         }
 
+        ApplyUserNormalOverlayForExport(group, visibleLayers, w, h, stagingDir, redirects);
+        ApplyUserMaskOverlayForExport(group, visibleLayers, stagingDir, redirects);
+
         return redirects;
+    }
+
+    private void ApplyUserNormalOverlayForExport(TargetGroup group, List<DecalLayer> layers,
+        int w, int h, string stagingDir, Dictionary<string, string> redirects)
+    {
+        if (!AnyTargetMapLayer(layers, TargetMap.Normal)) return;
+        if (string.IsNullOrEmpty(group.NormGamePath)) return;
+
+        byte[]? buf = null;
+        if (redirects.TryGetValue(group.NormGamePath!, out var existingGame))
+        {
+            var existingDisk = StagingPathFor(stagingDir, existingGame);
+            if (File.Exists(existingDisk)) buf = LoadRgbaResized(existingDisk, w, h);
+        }
+        buf ??= LoadRgbaResized(group.OrigNormDiskPath ?? group.NormDiskPath ?? group.NormGamePath!, w, h);
+        if (buf == null) return;
+
+        var result = CpuUvComposite(layers, buf, w, h,
+            outputBuffer: buf, targetFilter: TargetMap.Normal, preserveAlpha: true);
+        if (result == null) return;
+
+        var normOut = WriteStagingTex(stagingDir, group.NormGamePath!, result, w, h);
+        redirects[group.NormGamePath!] = normOut;
+    }
+
+    private void ApplyUserMaskOverlayForExport(TargetGroup group, List<DecalLayer> layers,
+        string stagingDir, Dictionary<string, string> redirects)
+    {
+        if (!AnyTargetMapLayer(layers, TargetMap.Mask)) return;
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return;
+
+        var mtrlDisk = group.OrigMtrlDiskPath ?? group.MtrlDiskPath;
+        var maskGamePath = GetMaskGamePathFromMtrl(group.MtrlGamePath!, mtrlDisk);
+        if (string.IsNullOrEmpty(maskGamePath)) return;
+
+        byte[]? buf = null;
+        int mw = 0, mh = 0;
+        if (redirects.TryGetValue(maskGamePath!, out var existingGame))
+        {
+            var existingDisk = StagingPathFor(stagingDir, existingGame);
+            if (File.Exists(existingDisk))
+            {
+                var img = imageLoader.LoadImage(existingDisk);
+                if (img != null) { buf = (byte[])img.Value.Data.Clone(); mw = img.Value.Width; mh = img.Value.Height; }
+            }
+        }
+        if (buf == null)
+        {
+            var img = LoadGameTexture(maskGamePath!);
+            if (img == null) return;
+            buf = (byte[])img.Value.Data.Clone();
+            mw = img.Value.Width;
+            mh = img.Value.Height;
+        }
+
+        var result = CpuUvComposite(layers, buf, mw, mh,
+            outputBuffer: buf, targetFilter: TargetMap.Mask);
+        if (result == null) return;
+
+        var maskOut = WriteStagingTex(stagingDir, maskGamePath!, result, mw, mh);
+        redirects[maskGamePath!] = maskOut;
     }
 
     /// <summary>Map a game path to a staging-rooted disk path (mirrors game tree).</summary>
@@ -1944,6 +2090,7 @@ public class PreviewService : IDisposable
         foreach (var l in group.Layers)
         {
             if (string.IsNullOrEmpty(l.ImagePath)) continue;
+            if (l.TargetMap != TargetMap.Diffuse) continue;
             if (l.AffectsEmissive) hasEmissiveConfigured = true;
             if (l.RequiresRowPair) hasPbrConfigured = true;
         }
@@ -2021,7 +2168,8 @@ public class PreviewService : IDisposable
                 }
                 foreach (var layer in group.Layers)
                 {
-                    if (layer.IsVisible && layer.AffectsEmissive && layer.AllocatedRowPair < 0)
+                    if (layer.IsVisible && layer.TargetMap == TargetMap.Diffuse
+                        && layer.AffectsEmissive && layer.AllocatedRowPair < 0)
                         alloc.TryAllocate(layer);
                 }
 
@@ -2031,7 +2179,7 @@ public class PreviewService : IDisposable
                 // Diagnostic: dump row pair allocations and CT emissive values
                 foreach (var layer in group.Layers)
                 {
-                    if (layer.IsVisible && layer.AffectsEmissive)
+                    if (layer.IsVisible && layer.TargetMap == TargetMap.Diffuse && layer.AffectsEmissive)
                         DebugServer.AppendLog($"[SkinCT] Layer '{layer.Name}' rowPair={layer.AllocatedRowPair} em=({layer.EmissiveColor.X:F2},{layer.EmissiveColor.Y:F2},{layer.EmissiveColor.Z:F2})*{layer.EmissiveIntensity:F1}");
                 }
 
@@ -2139,6 +2287,123 @@ public class PreviewService : IDisposable
                 }
             }
         }
+
+        ApplyUserNormalOverlay(group, w, h, redirects);
+        ApplyUserMaskOverlay(group, redirects);
+    }
+
+    private static bool AnyTargetMapLayer(List<DecalLayer> layers, TargetMap target)
+    {
+        foreach (var l in layers)
+            if (l.IsVisible && l.TargetMap == target && !string.IsNullOrEmpty(l.ImagePath))
+                return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Load a texture (disk or game sqpack) into a fresh RGBA buffer resized to (w,h).
+    /// Returns null on failure.
+    /// </summary>
+    private byte[]? LoadRgbaResized(string diskOrGamePath, int w, int h)
+    {
+        (byte[] Data, int Width, int Height)? img;
+        if (File.Exists(diskOrGamePath))
+            img = imageLoader.LoadImage(diskOrGamePath);
+        else
+            img = LoadGameTexture(diskOrGamePath);
+        if (img == null) return null;
+        var (data, iw, ih) = img.Value;
+        if (iw == w && ih == h) return (byte[])data.Clone();
+        return ResizeBilinear(data, iw, ih, w, h);
+    }
+
+    /// <summary>In-buffer variant of <see cref="LoadRgbaResized"/>. Returns false on failure.</summary>
+    private bool LoadRgbaResizedInto(string diskOrGamePath, int w, int h, byte[] output)
+    {
+        (byte[] Data, int Width, int Height)? img;
+        if (File.Exists(diskOrGamePath))
+            img = imageLoader.LoadImage(diskOrGamePath);
+        else
+            img = LoadGameTexture(diskOrGamePath);
+        if (img == null) return false;
+        var (data, iw, ih) = img.Value;
+        int needLen = w * h * 4;
+        if (iw == w && ih == h)
+            Buffer.BlockCopy(data, 0, output, 0, Math.Min(needLen, data.Length));
+        else
+            Buffer.BlockCopy(ResizeBilinear(data, iw, ih, w, h), 0, output, 0, needLen);
+        return true;
+    }
+
+    /// <summary>
+    /// Paint user Normal-target layers' RGB onto the group's normal output.
+    /// Preserves alpha (which may hold emissive mask or ColorTable row index).
+    /// Chains on top of any existing normal redirect so alpha work from emissive
+    /// pipelines survives.
+    /// </summary>
+    private void ApplyUserNormalOverlay(TargetGroup group, int w, int h,
+        Dictionary<string, string> redirects)
+    {
+        if (!AnyTargetMapLayer(group.Layers, TargetMap.Normal)) return;
+        if (string.IsNullOrEmpty(group.NormGamePath)) return;
+
+        byte[]? buf = null;
+        if (redirects.TryGetValue(group.NormGamePath!, out var existing) && File.Exists(existing))
+            buf = LoadRgbaResized(existing, w, h);
+        buf ??= LoadRgbaResized(group.OrigNormDiskPath ?? group.NormDiskPath ?? group.NormGamePath!, w, h);
+        if (buf == null) return;
+
+        var result = CpuUvComposite(group.Layers, buf, w, h,
+            outputBuffer: buf,
+            targetFilter: TargetMap.Normal,
+            preserveAlpha: true);
+        if (result == null) return;
+
+        var safeName = MakeSafeFileName(group.DiffuseGamePath!);
+        var normPath = Path.Combine(outputDir, $"preview_{safeName}_n.tex");
+        WriteBgraTexFile(normPath, result, w, h);
+        redirects[group.NormGamePath!] = normPath;
+    }
+
+    /// <summary>
+    /// Paint user Mask-target layers' RGB onto the material's mask texture.
+    /// Looks up the mask game path via the material's g_SamplerMask binding.
+    /// Chains on top of any existing mask redirect (e.g. iris emissive mask).
+    /// </summary>
+    private void ApplyUserMaskOverlay(TargetGroup group, Dictionary<string, string> redirects)
+    {
+        if (!AnyTargetMapLayer(group.Layers, TargetMap.Mask)) return;
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return;
+
+        var mtrlDisk = group.OrigMtrlDiskPath ?? group.MtrlDiskPath;
+        var maskGamePath = GetMaskGamePathFromMtrl(group.MtrlGamePath!, mtrlDisk);
+        if (string.IsNullOrEmpty(maskGamePath)) return;
+
+        byte[]? buf = null;
+        int mw = 0, mh = 0;
+        if (redirects.TryGetValue(maskGamePath!, out var existing) && File.Exists(existing))
+        {
+            var img = imageLoader.LoadImage(existing);
+            if (img != null) { buf = (byte[])img.Value.Data.Clone(); mw = img.Value.Width; mh = img.Value.Height; }
+        }
+        if (buf == null)
+        {
+            var img = LoadGameTexture(maskGamePath!);
+            if (img == null) return;
+            buf = (byte[])img.Value.Data.Clone();
+            mw = img.Value.Width;
+            mh = img.Value.Height;
+        }
+
+        var result = CpuUvComposite(group.Layers, buf, mw, mh,
+            outputBuffer: buf,
+            targetFilter: TargetMap.Mask);
+        if (result == null) return;
+
+        var safeName = MakeSafeFileName(group.DiffuseGamePath!);
+        var maskPath = Path.Combine(outputDir, $"preview_{safeName}_mask.tex");
+        WriteBgraTexFile(maskPath, result, mw, mh);
+        redirects[maskGamePath!] = maskPath;
     }
 
     private static string MakeSafeFileName(string name)
@@ -2206,7 +2471,7 @@ public class PreviewService : IDisposable
         bool anyEmissive = false;
         foreach (var layer in layers)
         {
-            if (!layer.IsVisible || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
+            if (!layer.IsVisible || layer.TargetMap != TargetMap.Diffuse || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
 
             var decalImage = imageLoader.LoadImage(layer.ImagePath);
             if (decalImage == null) continue;
@@ -2326,7 +2591,7 @@ public class PreviewService : IDisposable
         bool anyPainted = false;
         foreach (var layer in layers)
         {
-            if (!layer.IsVisible || !layer.AffectsEmissive || layer.AllocatedRowPair < 0) continue;
+            if (!layer.IsVisible || layer.TargetMap != TargetMap.Diffuse || !layer.AffectsEmissive || layer.AllocatedRowPair < 0) continue;
             if (string.IsNullOrEmpty(layer.ImagePath)) continue;
 
             var decalImage = imageLoader.LoadImage(layer.ImagePath);
@@ -2419,7 +2684,7 @@ public class PreviewService : IDisposable
         bool any = false;
         foreach (var layer in layers)
         {
-            if (!layer.IsVisible || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
+            if (!layer.IsVisible || layer.TargetMap != TargetMap.Diffuse || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
 
             var decalImage = imageLoader.LoadImage(layer.ImagePath);
             if (decalImage == null) continue;
@@ -2637,7 +2902,7 @@ public class PreviewService : IDisposable
         var color = Vector3.Zero;
         foreach (var layer in layers)
         {
-            if (!layer.IsVisible || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
+            if (!layer.IsVisible || layer.TargetMap != TargetMap.Diffuse || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
             color += layer.EmissiveColor * layer.EmissiveIntensity;
         }
         return color;
@@ -2654,7 +2919,7 @@ public class PreviewService : IDisposable
     {
         foreach (var l in layers)
         {
-            if (!l.IsVisible || !l.AffectsEmissive || string.IsNullOrEmpty(l.ImagePath)) continue;
+            if (!l.IsVisible || l.TargetMap != TargetMap.Diffuse || !l.AffectsEmissive || string.IsNullOrEmpty(l.ImagePath)) continue;
             if (l.AnimMode == EmissiveAnimMode.None) continue;
             return (l.AnimMode, l.AnimSpeed, l.AnimAmplitude, l.EmissiveColorB * l.EmissiveIntensity);
         }
@@ -2956,7 +3221,9 @@ public class PreviewService : IDisposable
 
     private byte[]? CpuUvComposite(List<DecalLayer> layers, byte[] baseRgba, int w, int h,
         bool ignoreAffectsDiffuseFilter = false, byte[]? outputBuffer = null,
-        DirtyTracker? tracker = null)
+        DirtyTracker? tracker = null,
+        TargetMap targetFilter = TargetMap.Diffuse,
+        bool preserveAlpha = false)
     {
         // outputBuffer lets the caller pass a per-group reusable buffer; otherwise allocate.
         var output = outputBuffer != null && outputBuffer.Length >= baseRgba.Length
@@ -2968,7 +3235,11 @@ public class PreviewService : IDisposable
         foreach (var layer in layers)
         {
             if (!layer.IsVisible || string.IsNullOrEmpty(layer.ImagePath)) continue;
-            if (!ignoreAffectsDiffuseFilter && !layer.AffectsDiffuse) continue;
+            if (!ignoreAffectsDiffuseFilter)
+            {
+                if (layer.TargetMap != targetFilter) continue;
+                if (targetFilter == TargetMap.Diffuse && !layer.AffectsDiffuse) continue;
+            }
 
             var rect = ComputeLayerBbox(layer.UvCenter, layer.UvScale, w, h);
             if (rect.IsEmpty) continue;
@@ -3124,7 +3395,7 @@ public class PreviewService : IDisposable
                     output[oIdx] = (byte)Math.Clamp((int)((rr * da + br * (1 - da)) * 255), 0, 255);
                     output[oIdx + 1] = (byte)Math.Clamp((int)((rg * da + bg * (1 - da)) * 255), 0, 255);
                     output[oIdx + 2] = (byte)Math.Clamp((int)((rb * da + bb * (1 - da)) * 255), 0, 255);
-                    output[oIdx + 3] = 255;
+                    if (!preserveAlpha) output[oIdx + 3] = 255;
                 }
             });
         }

@@ -54,6 +54,13 @@ public enum RippleDirMode
     Bidirectional = 2,
 }
 
+public enum TargetMap
+{
+    Diffuse = 0,
+    Mask = 1,
+    Normal = 2,
+}
+
 public class DecalLayer
 {
     public LayerKind Kind { get; set; } = LayerKind.Decal;
@@ -69,6 +76,10 @@ public class DecalLayer
     public BlendMode BlendMode { get; set; } = BlendMode.Normal;
     public ClipMode Clip { get; set; } = ClipMode.None;
     public bool IsVisible { get; set; } = true;
+
+    // Mask/Normal targets paint RGB only so normal.alpha stays free for the
+    // emissive mask / ColorTable row index written by CompositeEmissiveNorm etc.
+    public TargetMap TargetMap { get; set; } = TargetMap.Diffuse;
 
     public bool AffectsDiffuse { get; set; } = true;
     public bool AffectsSpecular { get; set; } = false;

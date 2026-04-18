@@ -197,6 +197,14 @@
     "linear": "线性",
     "bidir": "双向"
   },
+  "target_map": {
+    "label": "目标贴图",
+    "diffuse": "Diffuse",
+    "mask": "Mask",
+    "normal": "Normal",
+    "tooltip": "贴花画到哪张游戏贴图上。\nDiffuse — 颜色，默认\nMask — 材质遮罩，高光/粗糙度\nNormal — 法线贴图，凹凸细节",
+    "auto_normal_detected": "检测到这像法线贴图，目标已自动设为 Normal。"
+  },
   "enum": {
     "blendmode": {
       "normal": "正常",

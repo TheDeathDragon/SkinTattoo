@@ -26,6 +26,24 @@ public class DecalImageLoader
 
     public void ClearCache() => imageCache.Clear();
 
+    /// <summary>Heuristic: tangent-space normal maps cluster around (128, 128, 255).</summary>
+    public static bool LooksLikeNormalMap(byte[] rgba)
+    {
+        if (rgba == null || rgba.Length < 16) return false;
+        long sumR = 0, sumG = 0, sumB = 0, n = 0;
+        for (int i = 0; i + 3 < rgba.Length; i += 64)
+        {
+            if (rgba[i + 3] < 16) continue;
+            sumR += rgba[i]; sumG += rgba[i + 1]; sumB += rgba[i + 2]; n++;
+        }
+        if (n < 64) return false;
+        int avgR = (int)(sumR / n), avgG = (int)(sumG / n), avgB = (int)(sumB / n);
+        // Tight R/G + strong B rejects bluish photos (skies, shirts) that otherwise
+        // pass a loose B-dominance test.
+        return avgB >= 210 && avgB - avgR >= 40 && avgB - avgG >= 40
+               && avgR >= 100 && avgR <= 170 && avgG >= 100 && avgG <= 170;
+    }
+
     private Lumina.GameData GetLuminaForDisk()
     {
         if (luminaForDisk == null)
