@@ -1,6 +1,18 @@
 {
   "versions": [
     {
+      "version": "0.2.3",
+      "date": "2026-04-19",
+      "en": [
+        { "text": "Cross-project decal library: content-hash dedup, 96px thumbnail grid, right-click delete (idea from @Glorou via TextureOverlayer)", "links": [{ "label": "@Glorou", "url": "https://github.com/Glorou" }, { "label": "TextureOverlayer", "url": "https://github.com/Glorou/TextureOverlayer" }] },
+        { "text": "File picker auto-imports into the library — projects stay valid even when source PNGs are moved or renamed" }
+      ],
+      "zh": [
+        { "text": "新增跨项目贴花素材库：内容哈希去重，96px 缩略图网格，右键删除 (思路来自 @Glorou 的 TextureOverlayer)", "links": [{ "label": "@Glorou", "url": "https://github.com/Glorou" }, { "label": "TextureOverlayer", "url": "https://github.com/Glorou/TextureOverlayer" }] },
+        { "text": "选图对话框自动入库，源图被移动或改名后项目依然可用" }
+      ]
+    },
+    {
       "version": "0.2.2",
       "date": "2026-04-19",
       "en": [
