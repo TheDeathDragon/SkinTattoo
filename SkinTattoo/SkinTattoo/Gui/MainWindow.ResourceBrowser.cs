@@ -163,7 +163,8 @@ public partial class MainWindow
                 ScanForCards(topNode, null, cards);
 
         return cards.Values
-            .Where(c => c.ShaderName is "skin" or "iris")
+            .Where(c => c.ShaderName != null
+                        && (c.ShaderName.StartsWith("skin", StringComparison.Ordinal) || c.ShaderName == "iris"))
             .Where(c => !IsUnusedBodyFallback(c))
             .ToList();
     }
