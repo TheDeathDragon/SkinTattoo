@@ -8,6 +8,8 @@
 
 SkinTattoo 是一个 Dalamud 插件，可将图片贴花实时合成到《最终幻想14》角色的皮肤贴图上。完全在 UV 空间运算，通过 Penumbra 进行预览，不会修改游戏本体。目前还在开发中，有很多 Bug 是正常的，可以通过 GitHub Issue 或 [Discord](https://discord.gg/FPY94anSRN) 反馈。
 
+> **提前说明 — 这是一个 Vibe Coding 项目。** 绝大部分代码由 Claude Opus 模型与我设计、调试与验证下生成。作者本人并不是 Dalamud / FFXIV mod 领域的专家，主要靠 AI 完成实现细节。即便如此，作者仍会尽力跟进并修复反馈的问题，也会持续适配各种 mod 与边缘场景。请把它当作实验性插件使用。
+
 ## 功能截图
 
 <p align="center">

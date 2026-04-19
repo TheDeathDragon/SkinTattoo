@@ -8,6 +8,8 @@
 
 SkinTattoo is a Dalamud plugin that composites image decals onto Final Fantasy XIV character skin textures in real time. It operates entirely in UV space, previews through Penumbra, and does not modify the game installation. The plugin is still under active development; bugs are expected. Feedback is welcome via GitHub Issues or [Discord](https://discord.gg/FPY94anSRN).
 
+> **Heads up — vibe coding project.** Most of the code is written by Claude Opus under the author's design, debugging, and validation. The author isn't a Dalamud / FFXIV-modding expert and leans on the AI for the implementation details. That said, reported issues will still be investigated and fixed best-effort, and odd mods / edge cases will be supported as they come up. Treat the plugin as experimental.
+
 ## Screenshots
 
 <p align="center">
