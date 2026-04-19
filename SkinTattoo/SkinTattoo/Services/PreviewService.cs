@@ -697,7 +697,17 @@ public class PreviewService : IDisposable
         if (string.IsNullOrEmpty(group.MtrlGamePath)) return false;
         if (!skinCtMaterials.ContainsKey(group.MtrlGamePath!)) return false;
 
-        var ctBytes = MtrlFileWriter.BuildSkinColorTablePerLayer(group.Layers);
+        DecalLayer? normalEmLayer = null;
+        bool diffuseEmExists = false;
+        foreach (var l in group.Layers)
+        {
+            if (!l.IsVisible || !l.AffectsEmissive || string.IsNullOrEmpty(l.ImagePath)) continue;
+            if (l.TargetMap == TargetMap.Diffuse) { diffuseEmExists = true; }
+            else if (l.TargetMap == TargetMap.Normal && normalEmLayer == null) normalEmLayer = l;
+        }
+        var ctBytes = !diffuseEmExists && normalEmLayer != null
+            ? MtrlFileWriter.BuildSkinColorTableNormalEmissive(normalEmLayer)
+            : MtrlFileWriter.BuildSkinColorTablePerLayer(group.Layers);
         var ctHalfs = System.Runtime.InteropServices.MemoryMarshal
             .Cast<byte, Half>((ReadOnlySpan<byte>)ctBytes).ToArray();
         var mtrlDiskPath = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
@@ -1027,11 +1037,21 @@ public class PreviewService : IDisposable
                     bool hasPbrLayers = allocatedLayers.Count > 0;
                     bool ctQueued = false;
 
-                    // skin.shpk + patched ColorTable: build CT from scratch (no vanilla base),
-                    // composite row indices to normal.alpha, queue CT for GPU swap.
-                    if (job.IsSkinCt && hasPbrLayers && !string.IsNullOrEmpty(job.MtrlGamePath))
+                    DecalLayer? normalEmLayer = null;
+                    bool diffEmExists = false;
+                    foreach (var l in layers)
                     {
-                        var skinCtBytes = MtrlFileWriter.BuildSkinColorTablePerLayer(layers);
+                        if (!l.IsVisible || !l.AffectsEmissive || string.IsNullOrEmpty(l.ImagePath)) continue;
+                        if (l.TargetMap == TargetMap.Diffuse) diffEmExists = true;
+                        else if (l.TargetMap == TargetMap.Normal && normalEmLayer == null) normalEmLayer = l;
+                    }
+
+                    if (job.IsSkinCt && !string.IsNullOrEmpty(job.MtrlGamePath)
+                        && (hasPbrLayers || (!diffEmExists && normalEmLayer != null)))
+                    {
+                        byte[] skinCtBytes = !diffEmExists && normalEmLayer != null
+                            ? MtrlFileWriter.BuildSkinColorTableNormalEmissive(normalEmLayer)
+                            : MtrlFileWriter.BuildSkinColorTablePerLayer(layers);
                         var skinCtHalfs = System.Runtime.InteropServices.MemoryMarshal
                             .Cast<byte, Half>((ReadOnlySpan<byte>)skinCtBytes).ToArray();
 
@@ -2238,13 +2258,16 @@ public class PreviewService : IDisposable
         var hasEmissive = group.HasEmissiveLayers();
         var hasPbr = group.HasPbrLayers() && MaterialSupportsPbr(group);
         bool isSkinMtrl = IsSkinMaterial(group);
-        // SkinCT (per-layer ColorTable) only when a Diffuse layer drives emissive;
-        // Normal-only emissive falls through to the legacy g_EmissiveColor path.
         bool hasDiffuseEmissive = false;
+        DecalLayer? normalEmissiveLayer = null;
         foreach (var l in group.Layers)
-            if (l.IsVisible && l.TargetMap == TargetMap.Diffuse && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
-            { hasDiffuseEmissive = true; break; }
-        bool useSkinColorTable = hasDiffuseEmissive && patchedSkinShpkPath != null && isSkinMtrl;
+        {
+            if (!l.IsVisible || !l.AffectsEmissive || string.IsNullOrEmpty(l.ImagePath)) continue;
+            if (l.TargetMap == TargetMap.Diffuse) { hasDiffuseEmissive = true; }
+            else if (l.TargetMap == TargetMap.Normal && normalEmissiveLayer == null) normalEmissiveLayer = l;
+        }
+        bool useSkinColorTable = (hasDiffuseEmissive || normalEmissiveLayer != null)
+                                 && patchedSkinShpkPath != null && isSkinMtrl;
 
         if (hasEmissive)
         {
@@ -2289,10 +2312,12 @@ public class PreviewService : IDisposable
                         alloc.TryAllocate(layer);
                 }
 
-                // 2) Build per-layer ColorTable
-                var ctBytes = MtrlFileWriter.BuildSkinColorTablePerLayer(group.Layers);
+                // 2) Build ColorTable: Normal-only emissive → ramp builder so alpha gradient
+                //    drives intensity smoothly; Diffuse-emissive → per-layer rows.
+                byte[] ctBytes = !hasDiffuseEmissive && normalEmissiveLayer != null
+                    ? MtrlFileWriter.BuildSkinColorTableNormalEmissive(normalEmissiveLayer)
+                    : MtrlFileWriter.BuildSkinColorTablePerLayer(group.Layers);
 
-                // Diagnostic: dump row pair allocations and CT emissive values
                 foreach (var layer in group.Layers)
                 {
                     if (layer.IsVisible && layer.TargetMap == TargetMap.Diffuse && layer.AffectsEmissive)
