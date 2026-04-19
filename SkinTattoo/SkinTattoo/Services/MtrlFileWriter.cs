@@ -353,6 +353,75 @@ public static class MtrlFileWriter
         return bytes;
     }
 
+    /// <summary>Build ColorTable for a single Normal-target emissive layer.
+    /// Row k (1..30) holds emissive scaled to k/30 so the patched shader's
+    /// normal.alpha → row UV mapping yields a smooth intensity ramp across the
+    /// full alpha range; row 0 stays unlit so alpha=0 pixels don't glow.</summary>
+    public static byte[] BuildSkinColorTableNormalEmissive(Core.DecalLayer layer)
+    {
+        var bytes = new byte[2048];
+
+        void WriteHalf(int row, int idx, float value)
+        {
+            int off = (row * 32 + idx) * 2;
+            BitConverter.TryWriteBytes(bytes.AsSpan(off, 2), (Half)value);
+        }
+
+        for (int row = 0; row < 32; row++)
+        {
+            WriteHalf(row, 0, 1f); WriteHalf(row, 1, 1f); WriteHalf(row, 2, 1f);
+            WriteHalf(row, 4, 1f); WriteHalf(row, 5, 1f); WriteHalf(row, 6, 1f);
+            WriteHalf(row, 16, 0.5f);
+        }
+
+        var em = layer.EmissiveColor * layer.EmissiveIntensity;
+        bool hasAnim = layer.AnimMode != Core.EmissiveAnimMode.None;
+        float animSpeed = hasAnim ? layer.AnimSpeed : 0f;
+        float animAmp   = hasAnim ? layer.AnimAmplitude : 0f;
+        float animMode = layer.AnimMode switch
+        {
+            Core.EmissiveAnimMode.Flicker  => 1f,
+            Core.EmissiveAnimMode.Gradient => 2f,
+            Core.EmissiveAnimMode.Ripple   => 3f,
+            _ => 0f,
+        };
+        var emB = layer.EmissiveColorB * layer.EmissiveIntensity;
+        bool isRipple = layer.AnimMode == Core.EmissiveAnimMode.Ripple;
+        float centerU = isRipple ? layer.UvCenter.X : 0f;
+        float centerV = isRipple ? layer.UvCenter.Y : 0f;
+        float freq    = isRipple ? layer.AnimFreq : 0f;
+        float dirMode = isRipple ? (float)(int)layer.AnimDirMode : 0f;
+        float angleRad = layer.AnimDirAngle * MathF.PI / 180f;
+        float dirX = isRipple ? MathF.Cos(angleRad) : 1f;
+        float dirY = isRipple ? MathF.Sin(angleRad) : 0f;
+        bool dualActive = layer.AnimMode == Core.EmissiveAnimMode.Gradient
+                          || (isRipple && layer.AnimDualColor);
+        float dualFlag = dualActive ? 1f : 0f;
+
+        for (int row = 1; row <= 30; row++)
+        {
+            float t = row / 30f;
+            WriteHalf(row, 8,  em.X * t);
+            WriteHalf(row, 9,  em.Y * t);
+            WriteHalf(row, 10, em.Z * t);
+            WriteHalf(row, 12, animSpeed);
+            WriteHalf(row, 13, animAmp);
+            WriteHalf(row, 14, animMode);
+            WriteHalf(row, 17, emB.X * t);
+            WriteHalf(row, 18, emB.Y * t);
+            WriteHalf(row, 19, emB.Z * t);
+            WriteHalf(row, 20, centerU);
+            WriteHalf(row, 21, centerV);
+            WriteHalf(row, 22, freq);
+            WriteHalf(row, 23, dirMode);
+            WriteHalf(row, 24, dirX);
+            WriteHalf(row, 25, dirY);
+            WriteHalf(row, 26, dualFlag);
+        }
+
+        return bytes;
+    }
+
     // New shader package name for patched skin.shpk. Must match PreviewService.SkinShpkGamePath filename.
     // When this mtrl is loaded the engine sees a new path and triggers a cache miss -> Penumbra redirect.
     private const string SkinCtShaderPackageName = "skin_ct.shpk";

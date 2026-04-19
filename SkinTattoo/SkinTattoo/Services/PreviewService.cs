@@ -85,6 +85,13 @@ public class PreviewService : IDisposable
         var img = imageLoader.LoadImage(imagePath);
         return img != null && DecalImageLoader.LooksLikeNormalMap(img.Value.Data);
     }
+
+    public bool IsLikelyEmissiveMask(string imagePath)
+    {
+        if (string.IsNullOrEmpty(imagePath)) return false;
+        var img = imageLoader.LoadImage(imagePath);
+        return img != null && DecalImageLoader.LooksLikeEmissiveMask(img.Value.Data);
+    }
     private readonly PenumbraBridge penumbra;
     private readonly TextureSwapService? textureSwap;
     private readonly EmissiveCBufferHook? emissiveHook;
@@ -1323,7 +1330,7 @@ public class PreviewService : IDisposable
     private static bool HasEmissiveLayers(List<LayerSnapshot> layers)
     {
         foreach (var l in layers)
-            if (l.IsVisible && l.TargetMap == TargetMap.Diffuse
+            if (l.IsVisible && (l.TargetMap == TargetMap.Diffuse || l.TargetMap == TargetMap.Normal)
                 && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
                 return true;
         return false;
@@ -1790,18 +1797,20 @@ public class PreviewService : IDisposable
             redirects[group.DiffuseGamePath!] = diffOut;
         }
 
-        // Emissive: only if there are visible emissive layers + mtrl path is known.
-        // Non-Diffuse target layers paint their own texture and are excluded from the
-        // emissive pipeline, which targets Diffuse decals' shape as the mask.
         bool hasEmissive = false;
+        bool hasDiffuseEmissive = false;
         foreach (var l in visibleLayers)
-            if (l.TargetMap == TargetMap.Diffuse && l.AffectsEmissive) { hasEmissive = true; break; }
+        {
+            if (!l.AffectsEmissive) continue;
+            if (l.TargetMap == TargetMap.Diffuse) { hasEmissive = true; hasDiffuseEmissive = true; break; }
+            if (l.TargetMap == TargetMap.Normal) hasEmissive = true;
+        }
 
         if (hasEmissive && !string.IsNullOrEmpty(group.MtrlGamePath))
         {
             bool isSkinMtrl = IsSkinMaterial(group);
 
-            if (isSkinMtrl && patchedSkinShpkPath != null && File.Exists(patchedSkinShpkPath))
+            if (hasDiffuseEmissive && isSkinMtrl && patchedSkinShpkPath != null && File.Exists(patchedSkinShpkPath))
             {
                 // skin.shpk + ColorTable export: per-layer emissive via embedded CT
                 var alloc = new RowPairAllocator();
@@ -1840,6 +1849,31 @@ public class PreviewService : IDisposable
                 Directory.CreateDirectory(Path.GetDirectoryName(shpkOut)!);
                 File.Copy(patchedSkinShpkPath, shpkOut, overwrite: true);
                 redirects[SkinShpkGamePath] = ToForwardSlash(SkinShpkGamePath);
+            }
+            else if (!hasDiffuseEmissive && isSkinMtrl && patchedSkinShpkPath != null && File.Exists(patchedSkinShpkPath))
+            {
+                // Normal-only emissive: shader-driven animation via patched skin.shpk;
+                // normal.alpha (baked by ApplyUserNormalOverlayForExport) drives the row ramp.
+                var normalLayer = visibleLayers.FirstOrDefault(l =>
+                    l.IsVisible && l.TargetMap == TargetMap.Normal && l.AffectsEmissive
+                    && !string.IsNullOrEmpty(l.ImagePath));
+                if (normalLayer != null)
+                {
+                    var ctBytes = MtrlFileWriter.BuildSkinColorTableNormalEmissive(normalLayer);
+                    var emissiveColor = normalLayer.EmissiveColor * normalLayer.EmissiveIntensity;
+                    var mtrlSource = group.OrigMtrlDiskPath ?? group.MtrlDiskPath ?? group.MtrlGamePath!;
+                    var mtrlOut = StagingPathFor(stagingDir, group.MtrlGamePath!);
+                    Directory.CreateDirectory(Path.GetDirectoryName(mtrlOut)!);
+                    if (TryBuildEmissiveMtrlWithColorTable(mtrlSource, mtrlOut, emissiveColor, ctBytes, out _))
+                    {
+                        redirects[group.MtrlGamePath!] = ToForwardSlash(group.MtrlGamePath!);
+                    }
+
+                    var shpkOut = StagingPathFor(stagingDir, SkinShpkGamePath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(shpkOut)!);
+                    File.Copy(patchedSkinShpkPath, shpkOut, overwrite: true);
+                    redirects[SkinShpkGamePath] = ToForwardSlash(SkinShpkGamePath);
+                }
             }
             else
             {
@@ -1914,6 +1948,8 @@ public class PreviewService : IDisposable
         var result = CpuUvComposite(layers, buf, w, h,
             outputBuffer: buf, targetFilter: TargetMap.Normal, preserveAlpha: true);
         if (result == null) return;
+
+        OverlayNormalEmissiveAlpha(layers, result, w, h);
 
         var normOut = WriteStagingTex(stagingDir, group.NormGamePath!, result, w, h);
         redirects[group.NormGamePath!] = normOut;
@@ -2202,7 +2238,13 @@ public class PreviewService : IDisposable
         var hasEmissive = group.HasEmissiveLayers();
         var hasPbr = group.HasPbrLayers() && MaterialSupportsPbr(group);
         bool isSkinMtrl = IsSkinMaterial(group);
-        bool useSkinColorTable = hasEmissive && patchedSkinShpkPath != null && isSkinMtrl;
+        // SkinCT (per-layer ColorTable) only when a Diffuse layer drives emissive;
+        // Normal-only emissive falls through to the legacy g_EmissiveColor path.
+        bool hasDiffuseEmissive = false;
+        foreach (var l in group.Layers)
+            if (l.IsVisible && l.TargetMap == TargetMap.Diffuse && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
+            { hasDiffuseEmissive = true; break; }
+        bool useSkinColorTable = hasDiffuseEmissive && patchedSkinShpkPath != null && isSkinMtrl;
 
         if (hasEmissive)
         {
@@ -2215,6 +2257,11 @@ public class PreviewService : IDisposable
         {
             skinCtMaterials[group.MtrlGamePath!] = 1;
             DebugServer.AppendLog($"[SkinCT] Using ColorTable path for {group.Name}");
+        }
+        else if (!string.IsNullOrEmpty(group.MtrlGamePath))
+        {
+            // Drop stale marker when user switches Diffuse-emissive → Normal-only emissive.
+            skinCtMaterials.TryRemove(group.MtrlGamePath!, out _);
         }
 
         if ((hasEmissive || hasPbr) && !string.IsNullOrEmpty(group.MtrlGamePath))
@@ -2441,11 +2488,75 @@ public class PreviewService : IDisposable
             return;
         }
 
+        OverlayNormalEmissiveAlpha(group.Layers, result, w, h);
+
         var safeName = MakeSafeFileName(group.DiffuseGamePath!);
         var normPath = Path.Combine(outputDir, $"preview_{safeName}_n.tex");
         WriteBgraTexFile(normPath, result, w, h);
         redirects[group.NormGamePath!] = normPath;
         DebugServer.AppendLog($"[NormOverlay] {group.Name}: wrote {group.NormGamePath} -> {normPath}");
+    }
+
+    private void OverlayNormalEmissiveAlpha(List<DecalLayer> layers, byte[] buf, int w, int h)
+    {
+        bool anyEmissiveNormal = false;
+        foreach (var l in layers)
+            if (l.IsVisible && l.TargetMap == TargetMap.Normal && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
+            { anyEmissiveNormal = true; break; }
+        if (!anyEmissiveNormal) return;
+
+        int needLen = w * h * 4;
+        for (int i = 3; i < needLen; i += 4) buf[i] = 0;
+
+        foreach (var layer in layers)
+        {
+            if (!layer.IsVisible || layer.TargetMap != TargetMap.Normal || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
+
+            var decalImage = imageLoader.LoadImage(layer.ImagePath);
+            if (decalImage == null) continue;
+
+            var (decalData, decalW, decalH) = decalImage.Value;
+            var center = layer.UvCenter;
+            var scale = layer.UvScale;
+            var opacity = layer.Opacity;
+            var rotRad = layer.RotationDeg * (MathF.PI / 180f);
+            var cosR = MathF.Cos(rotRad);
+            var sinR = MathF.Sin(rotRad);
+
+            GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
+
+            var layerLocal = layer;
+            ParallelRows(pyMin, pyMax, py =>
+            {
+                for (int px = pxMin; px <= pxMax; px++)
+                {
+                    float u = (px + 0.5f) / w;
+                    float v = (py + 0.5f) / h;
+                    float lu = (u - center.X) / scale.X;
+                    float lv = (v - center.Y) / scale.Y;
+                    float ru = lu * cosR + lv * sinR;
+                    float rv = -lu * sinR + lv * cosR;
+                    if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
+                    switch (layerLocal.Clip)
+                    {
+                        case ClipMode.ClipLeft when ru < 0f: continue;
+                        case ClipMode.ClipRight when ru >= 0f: continue;
+                        case ClipMode.ClipTop when rv < 0f: continue;
+                        case ClipMode.ClipBottom when rv >= 0f: continue;
+                    }
+
+                    float du = (ru + 0.5f) * decalW - 0.5f;
+                    float dv = (rv + 0.5f) * decalH - 0.5f;
+                    SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
+                    da *= opacity;
+                    if (da < 0.001f) continue;
+
+                    int oIdx = (py * w + px) * 4;
+                    byte emByte = (byte)Math.Clamp((int)(da * 255), 0, 255);
+                    if (emByte > buf[oIdx + 3]) buf[oIdx + 3] = emByte;
+                }
+            });
+        }
     }
 
     /// <summary>
@@ -2638,6 +2749,58 @@ public class PreviewService : IDisposable
 
                     int oIdx = (py * w + px) * 4;
                     byte emByte = (byte)Math.Clamp((int)(maskValue * 255), 0, 255);
+                    output[oIdx + 3] = (byte)Math.Max(output[oIdx + 3], emByte);
+                }
+            });
+
+            anyEmissive = true;
+        }
+
+        foreach (var layer in layers)
+        {
+            if (!layer.IsVisible || layer.TargetMap != TargetMap.Normal || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
+
+            var decalImage = imageLoader.LoadImage(layer.ImagePath);
+            if (decalImage == null) continue;
+
+            var (decalData, decalW, decalH) = decalImage.Value;
+            var center = layer.UvCenter;
+            var scale = layer.UvScale;
+            var opacity = layer.Opacity;
+            var rotRad = layer.RotationDeg * (MathF.PI / 180f);
+            var cosR = MathF.Cos(rotRad);
+            var sinR = MathF.Sin(rotRad);
+
+            GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
+
+            var layerLocal = layer;
+            ParallelRows(pyMin, pyMax, py =>
+            {
+                for (int px = pxMin; px <= pxMax; px++)
+                {
+                    float u = (px + 0.5f) / w;
+                    float v = (py + 0.5f) / h;
+                    float lu = (u - center.X) / scale.X;
+                    float lv = (v - center.Y) / scale.Y;
+                    float ru = lu * cosR + lv * sinR;
+                    float rv = -lu * sinR + lv * cosR;
+                    if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
+                    switch (layerLocal.Clip)
+                    {
+                        case ClipMode.ClipLeft when ru < 0f: continue;
+                        case ClipMode.ClipRight when ru >= 0f: continue;
+                        case ClipMode.ClipTop when rv < 0f: continue;
+                        case ClipMode.ClipBottom when rv >= 0f: continue;
+                    }
+
+                    float du = (ru + 0.5f) * decalW - 0.5f;
+                    float dv = (rv + 0.5f) * decalH - 0.5f;
+                    SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
+                    da *= opacity;
+                    if (da < 0.001f) continue;
+
+                    int oIdx = (py * w + px) * 4;
+                    byte emByte = (byte)Math.Clamp((int)(da * 255), 0, 255);
                     output[oIdx + 3] = (byte)Math.Max(output[oIdx + 3], emByte);
                 }
             });
@@ -2991,7 +3154,8 @@ public class PreviewService : IDisposable
         var color = Vector3.Zero;
         foreach (var layer in layers)
         {
-            if (!layer.IsVisible || layer.TargetMap != TargetMap.Diffuse || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
+            if (!layer.IsVisible || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
+            if (layer.TargetMap != TargetMap.Diffuse && layer.TargetMap != TargetMap.Normal) continue;
             color += layer.EmissiveColor * layer.EmissiveIntensity;
         }
         return color;
@@ -3008,7 +3172,8 @@ public class PreviewService : IDisposable
     {
         foreach (var l in layers)
         {
-            if (!l.IsVisible || l.TargetMap != TargetMap.Diffuse || !l.AffectsEmissive || string.IsNullOrEmpty(l.ImagePath)) continue;
+            if (!l.IsVisible || !l.AffectsEmissive || string.IsNullOrEmpty(l.ImagePath)) continue;
+            if (l.TargetMap != TargetMap.Diffuse && l.TargetMap != TargetMap.Normal) continue;
             if (l.AnimMode == EmissiveAnimMode.None) continue;
             return (l.AnimMode, l.AnimSpeed, l.AnimAmplitude, l.EmissiveColorB * l.EmissiveIntensity);
         }

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
+using BCnEncoder.Decoder;
+using BCnEncoder.Shared;
 using Dalamud.Plugin.Services;
 using Lumina.Data.Files;
 using SkinTattoo.Http;
@@ -25,6 +27,21 @@ public class DecalImageLoader
     }
 
     public void ClearCache() => imageCache.Clear();
+
+    /// <summary>Alpha looks like a baked-in emissive mask (≥10% transparent + ≥0.1% lit).</summary>
+    public static bool LooksLikeEmissiveMask(byte[] rgba)
+    {
+        if (rgba == null || rgba.Length < 16) return false;
+        int total = rgba.Length / 4;
+        int zero = 0, nonzero = 0;
+        for (int i = 3; i < rgba.Length; i += 4)
+        {
+            if (rgba[i] == 0) zero++;
+            else nonzero++;
+        }
+        if (zero == 0 || nonzero == 0) return false;
+        return (float)zero / total >= 0.10f && (float)nonzero / total >= 0.001f;
+    }
 
     /// <summary>Heuristic: tangent-space normal maps cluster around (128, 128, 255).</summary>
     public static bool LooksLikeNormalMap(byte[] rgba)
@@ -141,15 +158,140 @@ public class DecalImageLoader
         if (data.Length < 128 || data[0] != 'D' || data[1] != 'D' || data[2] != 'S' || data[3] != ' ')
             throw new InvalidDataException("Invalid DDS file");
 
+        var headerSize = BitConverter.ToInt32(data, 4);
+        if (headerSize != 124)
+            throw new InvalidDataException($"Unexpected DDS header size: {headerSize}");
+
         var height = BitConverter.ToInt32(data, 12);
         var width = BitConverter.ToInt32(data, 16);
 
-        var pixelDataSize = width * height * 4;
-        if (data.Length < 128 + pixelDataSize)
-            throw new InvalidDataException("DDS file too small for declared dimensions");
+        var pfFlags = BitConverter.ToUInt32(data, 80);
+        var bitCount = BitConverter.ToInt32(data, 88);
+        var rMask = BitConverter.ToUInt32(data, 92);
+        var gMask = BitConverter.ToUInt32(data, 96);
+        var bMask = BitConverter.ToUInt32(data, 100);
 
+        const uint DDPF_ALPHAPIXELS = 0x1;
+        const uint DDPF_FOURCC = 0x4;
+        const uint DDPF_RGB = 0x40;
+        const uint DDPF_LUMINANCE = 0x20000;
+
+        var dataOffset = 128;
+        CompressionFormat? bc = null;
+        bool isBgra = false;
+        bool hasAlpha = false;
+
+        if ((pfFlags & DDPF_FOURCC) != 0)
+        {
+            var fourCC = new string(new[] { (char)data[84], (char)data[85], (char)data[86], (char)data[87] });
+            if (fourCC == "DX10")
+            {
+                if (data.Length < 148)
+                    throw new InvalidDataException("DDS file truncated (missing DX10 header)");
+                dataOffset = 148;
+                var dxgi = BitConverter.ToInt32(data, 128);
+                switch (dxgi)
+                {
+                    case 28: case 29:                       // R8G8B8A8_UNORM(_SRGB)
+                        isBgra = false; hasAlpha = true; break;
+                    case 87: case 91:                       // B8G8R8A8_UNORM(_SRGB)
+                        isBgra = true; hasAlpha = true; break;
+                    case 88:                                // B8G8R8X8_UNORM
+                        isBgra = true; hasAlpha = false; break;
+                    case 71: case 72: bc = CompressionFormat.Bc1; break;
+                    case 74: case 75: bc = CompressionFormat.Bc2; break;
+                    case 77: case 78: bc = CompressionFormat.Bc3; break;
+                    case 83: case 84: bc = CompressionFormat.Bc5; break;
+                    case 98: case 99: bc = CompressionFormat.Bc7; break;
+                    default: throw new NotSupportedException($"Unsupported DXGI format: {dxgi}");
+                }
+            }
+            else
+            {
+                switch (fourCC)
+                {
+                    case "DXT1": bc = CompressionFormat.Bc1; break;
+                    case "DXT2":
+                    case "DXT3": bc = CompressionFormat.Bc2; break;
+                    case "DXT4":
+                    case "DXT5": bc = CompressionFormat.Bc3; break;
+                    case "ATI2":
+                    case "BC5U": bc = CompressionFormat.Bc5; break;
+                    case "BC7U":
+                    case "BC7L": bc = CompressionFormat.Bc7; break;
+                    default: throw new NotSupportedException($"Unsupported DDS FourCC: {fourCC}");
+                }
+            }
+        }
+        else if ((pfFlags & DDPF_RGB) != 0 && bitCount == 32)
+        {
+            if (rMask == 0x00FF0000 && gMask == 0x0000FF00 && bMask == 0x000000FF) isBgra = true;
+            else if (rMask == 0x000000FF && gMask == 0x0000FF00 && bMask == 0x00FF0000) isBgra = false;
+            else throw new NotSupportedException(
+                $"Unsupported 32-bit DDS bitmask: R={rMask:X8} G={gMask:X8} B={bMask:X8}");
+            hasAlpha = (pfFlags & DDPF_ALPHAPIXELS) != 0;
+        }
+        else if ((pfFlags & DDPF_LUMINANCE) != 0)
+        {
+            throw new NotSupportedException("Luminance DDS format is not supported");
+        }
+        else
+        {
+            throw new NotSupportedException(
+                $"Unsupported DDS pixel format: flags=0x{pfFlags:X} bitCount={bitCount}");
+        }
+
+        var pixelDataSize = width * height * 4;
         var pixels = new byte[pixelDataSize];
-        Array.Copy(data, 128, pixels, 0, pixelDataSize);
+
+        if (bc.HasValue)
+        {
+            var blockBytes = bc.Value == CompressionFormat.Bc1 ? 8 : 16;
+            var blocksW = Math.Max(1, (width + 3) / 4);
+            var blocksH = Math.Max(1, (height + 3) / 4);
+            var compressedSize = blocksW * blocksH * blockBytes;
+            if (data.Length < dataOffset + compressedSize)
+                throw new InvalidDataException(
+                    $"DDS file truncated: need {compressedSize} compressed bytes, have {data.Length - dataOffset}");
+
+            using var stream = new MemoryStream(data, dataOffset, compressedSize);
+            var decoder = new BcDecoder();
+            var rgba = decoder.DecodeRaw(stream, width, height, bc.Value);
+            for (int i = 0; i < rgba.Length; i++)
+            {
+                var c = rgba[i];
+                pixels[i * 4 + 0] = c.r;
+                pixels[i * 4 + 1] = c.g;
+                pixels[i * 4 + 2] = c.b;
+                pixels[i * 4 + 3] = c.a;
+            }
+        }
+        else
+        {
+            if (data.Length < dataOffset + pixelDataSize)
+                throw new InvalidDataException("DDS file too small for declared dimensions");
+
+            if (isBgra)
+            {
+                for (int i = 0; i < pixelDataSize; i += 4)
+                {
+                    pixels[i + 0] = data[dataOffset + i + 2];
+                    pixels[i + 1] = data[dataOffset + i + 1];
+                    pixels[i + 2] = data[dataOffset + i + 0];
+                    pixels[i + 3] = hasAlpha ? data[dataOffset + i + 3] : (byte)255;
+                }
+            }
+            else
+            {
+                Array.Copy(data, dataOffset, pixels, 0, pixelDataSize);
+                if (!hasAlpha)
+                {
+                    for (int i = 3; i < pixelDataSize; i += 4)
+                        pixels[i] = 255;
+                }
+            }
+        }
+
         return (pixels, width, height);
     }
 }

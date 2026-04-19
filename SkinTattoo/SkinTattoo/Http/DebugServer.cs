@@ -625,6 +625,7 @@ internal sealed class ApiController : WebApiController
         opacity = l.Opacity,
         blendMode = l.BlendMode.ToString(),
         clip = l.Clip.ToString(),
+        targetMap = l.TargetMap.ToString(),
         isVisible = l.IsVisible,
         allocatedRowPair = l.AllocatedRowPair,
 
@@ -698,6 +699,9 @@ internal sealed class ApiController : WebApiController
             if (root.TryGetProperty("affectsEmissive", out v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False)
                 layer.AffectsEmissive = v.GetBoolean();
 
+            if (root.TryGetProperty("allocatedRowPair", out v) && v.ValueKind == JsonValueKind.Number)
+                layer.AllocatedRowPair = v.GetInt32();
+
             if (root.TryGetProperty("emissiveIntensity", out v) && v.ValueKind == JsonValueKind.Number)
                 layer.EmissiveIntensity = v.GetSingle();
 
@@ -722,6 +726,12 @@ internal sealed class ApiController : WebApiController
             {
                 if (Enum.TryParse<ClipMode>(v.GetString(), ignoreCase: true, out var cm))
                     layer.Clip = cm;
+            }
+
+            if (root.TryGetProperty("targetMap", out v) && v.ValueKind == JsonValueKind.String)
+            {
+                if (Enum.TryParse<TargetMap>(v.GetString(), ignoreCase: true, out var tm))
+                    layer.TargetMap = tm;
             }
 
             if (root.TryGetProperty("affectsSpecular", out v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False)

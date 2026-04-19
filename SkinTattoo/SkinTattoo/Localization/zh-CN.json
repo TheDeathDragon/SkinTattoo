@@ -222,6 +222,13 @@
     "tooltip": "贴花画到哪张游戏贴图上。\nDiffuse — 颜色，默认\nMask — 材质遮罩，高光/粗糙度\nNormal — 法线贴图，凹凸细节",
     "auto_normal_detected": "检测到这像法线贴图，目标已自动设为 Normal。"
   },
+  "emissive_normal": {
+    "detected": "已检测到 Normal alpha 发光遮罩，发光由该层控制",
+    "manual_enable_btn": "启用发光",
+    "manual_enable_tip": "把 Normal 贴图的 alpha 通道作为发光遮罩",
+    "disable_btn": "关闭发光",
+    "diffuse_locked": "本组发光由 Normal 层接管，已禁用此处的发光选项"
+  },
   "enum": {
     "blendmode": {
       "normal": "正常",

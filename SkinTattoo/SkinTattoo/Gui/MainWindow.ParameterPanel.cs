@@ -107,7 +107,7 @@ public partial class MainWindow
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.browse_image"));
 
-        const float labelW = 56f;
+        const float labelW = 80f;
         ImGui.AlignTextToFramePadding();
         ImGui.Text(Strings.T("target_map.label")); ImGui.SameLine(labelW);
         ImGui.SetNextItemWidth(-1);
@@ -146,7 +146,11 @@ public partial class MainWindow
     private void TryAutoDetectNormalMap(DecalLayer layer)
     {
         autoNormalNoticeForIndex = -1;
-        if (layer.TargetMap != TargetMap.Diffuse) return;
+        if (layer.TargetMap != TargetMap.Diffuse)
+        {
+            TryAutoDetectEmissiveMask(layer);
+            return;
+        }
         if (string.IsNullOrEmpty(layer.ImagePath)) return;
         if (!previewService.IsLikelyNormalMap(layer.ImagePath)) return;
 
@@ -154,13 +158,36 @@ public partial class MainWindow
         var gi = project.SelectedGroupIndex;
         if (gi >= 0 && gi < project.Groups.Count)
             autoNormalNoticeForIndex = project.Groups[gi].SelectedLayerIndex;
+        TryAutoDetectEmissiveMask(layer);
+    }
+
+    private void TryAutoDetectEmissiveMask(DecalLayer layer)
+    {
+        if (layer.TargetMap != TargetMap.Normal) return;
+        if (string.IsNullOrEmpty(layer.ImagePath)) return;
+        if (layer.AffectsEmissive) return;
+        if (previewService.IsLikelyEmissiveMask(layer.ImagePath))
+            layer.AffectsEmissive = true;
+    }
+
+    private static void DrawInfoIcon(string tooltip)
+    {
+        ImGui.PushFont(UiBuilder.IconFont);
+        ImGui.TextDisabled(FontAwesomeIcon.InfoCircle.ToIconString());
+        ImGui.PopFont();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.PushTextWrapPos(ImGui.GetFontSize() * 28f);
+            ImGui.SetTooltip(tooltip);
+            ImGui.PopTextWrapPos();
+        }
     }
 
     private void DrawTransformSection(DecalLayer layer)
     {
         if (!ImGui.CollapsingHeader(Strings.T("section.transform"), ImGuiTreeNodeFlags.DefaultOpen)) return;
 
-        const float labelW = 56f;
+        const float labelW = 80f;
         var cx = layer.UvCenter.X;
         var cy = layer.UvCenter.Y;
 
@@ -235,7 +262,7 @@ public partial class MainWindow
     {
         if (!ImGui.CollapsingHeader(Strings.T("section.render"), ImGuiTreeNodeFlags.DefaultOpen)) return;
 
-        const float labelW = 56f;
+        const float labelW = 80f;
 
         ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.opacity")); ImGui.SameLine(labelW);
         ImGui.SetNextItemWidth(-1);
@@ -267,9 +294,12 @@ public partial class MainWindow
 
         ImGui.Spacing();
 
-        // Show Decal + Emissive only make sense for the Diffuse pipeline. Mask/Normal
-        // targets paint a different texture and participate in their own pass only.
         bool isDiffuseTarget = layer.TargetMap == TargetMap.Diffuse;
+        bool isNormalTarget = layer.TargetMap == TargetMap.Normal;
+        bool groupHasNormalEmissive = false;
+        foreach (var l in group.Layers)
+            if (l != layer && l.IsVisible && l.TargetMap == TargetMap.Normal && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
+            { groupHasNormalEmissive = true; break; }
 
         if (isDiffuseTarget)
         {
@@ -282,8 +312,13 @@ public partial class MainWindow
             }
         }
 
-        if (isDiffuseTarget)
+        bool showEmissiveCheckbox = isDiffuseTarget;
+        bool showEmissiveControls = false;
+
+        if (showEmissiveCheckbox)
         {
+            bool disabled = groupHasNormalEmissive;
+            if (disabled) ImGui.BeginDisabled();
             var was = layer.AffectsEmissive;
             var v = was;
             if (ImGui.Checkbox(Strings.T("checkbox.emissive"), ref v))
@@ -297,11 +332,45 @@ public partial class MainWindow
                 else if (!v && was)
                 {
                     layer.AffectsEmissive = false;
+                    previewService.ReleaseRowPairIfUnused(group, layer);
                     previewService.InvalidateEmissiveForGroup(group);
                     MarkPreviewDirty(immediate: true);
                 }
             }
-            if (layer.AffectsEmissive)
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                ImGui.SameLine();
+                DrawInfoIcon(Strings.T("emissive_normal.diffuse_locked"));
+            }
+            showEmissiveControls = layer.AffectsEmissive && !disabled;
+        }
+        else if (isNormalTarget && layer.AffectsEmissive)
+        {
+            if (ImGui.Button(Strings.T("emissive_normal.disable_btn") + "##disableNormEm"))
+            {
+                layer.AffectsEmissive = false;
+                previewService.InvalidateEmissiveForGroup(group);
+                MarkPreviewDirty(immediate: true);
+            }
+            ImGui.SameLine();
+            DrawInfoIcon(Strings.T("emissive_normal.detected"));
+            showEmissiveControls = true;
+        }
+        else if (isNormalTarget)
+        {
+            if (ImGui.Button(Strings.T("emissive_normal.manual_enable_btn") + "##enableNormEm"))
+            {
+                layer.AffectsEmissive = true;
+                previewService.InvalidateEmissiveForGroup(group);
+                MarkPreviewDirty(immediate: true);
+            }
+            ImGui.SameLine();
+            DrawInfoIcon(Strings.T("emissive_normal.manual_enable_tip"));
+        }
+
+        if (showEmissiveControls)
+        {
             {
                 var emColor = layer.EmissiveColor;
                 if (ImGui.ColorEdit3("##emColor", ref emColor,
@@ -316,8 +385,9 @@ public partial class MainWindow
                 if (ImGui.DragFloat("##emI", ref emI, 0.05f, 0.1f, 10f, "%.2f"))
                 { layer.EmissiveIntensity = emI; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
 
-                ImGui.AlignTextToFramePadding(); ImGui.TextDisabled(Strings.T("label.anim_mode")); ImGui.SameLine();
-                ImGui.SetNextItemWidth(80f);
+                const float animLabelW = 80f;
+                ImGui.AlignTextToFramePadding(); ImGui.TextDisabled(Strings.T("label.anim_mode")); ImGui.SameLine(animLabelW);
+                ImGui.SetNextItemWidth(-1);
                 var animIdx = (int)layer.AnimMode;
                 var animNames = new[] { Strings.T("anim.none"), Strings.T("anim.pulse"), Strings.T("anim.flicker"), Strings.T("anim.gradient"), Strings.T("anim.ripple") };
                 if (ImGui.Combo("##animMode", ref animIdx, animNames, animNames.Length))
@@ -328,14 +398,13 @@ public partial class MainWindow
                 }
                 if (layer.AnimMode != EmissiveAnimMode.None)
                 {
-                    ImGui.SameLine();
-                    ImGui.TextDisabled(Strings.T("label.speed")); ImGui.SameLine();
+                    ImGui.AlignTextToFramePadding(); ImGui.TextDisabled(Strings.T("label.speed")); ImGui.SameLine(animLabelW);
                     ImGui.SetNextItemWidth(-1);
                     var sp = layer.AnimSpeed;
                     if (ImGui.DragFloat("##animSpeed", ref sp, 0.05f, 0.05f, 10f, "%.2f Hz"))
                     { layer.AnimSpeed = sp; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
 
-                    ImGui.AlignTextToFramePadding(); ImGui.TextDisabled(Strings.T("label.amplitude")); ImGui.SameLine();
+                    ImGui.AlignTextToFramePadding(); ImGui.TextDisabled(Strings.T("label.amplitude")); ImGui.SameLine(animLabelW);
                     ImGui.SetNextItemWidth(-1);
                     var am = layer.AnimAmplitude;
                     if (ImGui.SliderFloat("##animAmp", ref am, 0f, 1f, "%.2f"))
@@ -394,7 +463,7 @@ public partial class MainWindow
         ImGui.Spacing();
         DrawSectionLabel(Strings.T("section.fade"));
 
-        const float fadeLabW = 56f;
+        const float fadeLabW = 80f;
 
         ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.shape")); ImGui.SameLine(fadeLabW);
         ImGui.SetNextItemWidth(-1);

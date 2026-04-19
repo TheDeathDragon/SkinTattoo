@@ -96,7 +96,7 @@ public class TargetGroup
     public bool HasEmissiveLayers()
     {
         foreach (var l in Layers)
-            if (l.IsVisible && l.TargetMap == TargetMap.Diffuse
+            if (l.IsVisible && (l.TargetMap == TargetMap.Diffuse || l.TargetMap == TargetMap.Normal)
                 && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
                 return true;
         return false;
