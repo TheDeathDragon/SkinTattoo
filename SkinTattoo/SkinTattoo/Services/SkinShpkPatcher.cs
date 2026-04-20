@@ -118,7 +118,18 @@ public static class SkinShpkPatcher
 
         var withDecls = PatchShexAddDeclarations(shexData, 5, 10);
         if (withDecls == null) return false;
-        var withReplacement = PatchShexReplaceEmissive(withDecls);
+
+        // Gloss-mask re-injection must run BEFORE emissive-replace: the latter overwrites
+        // the emissive init pair we rely on to detect which temp register holds normal.alpha.
+        // If the pattern doesn't match, skip silently -- ColorTable emissive still works.
+        var withGlossMask = PatchShexInjectGlossMask(withDecls);
+        if (withGlossMask == null)
+        {
+            Log($"PS[{psIndex}] gloss-mask pattern not found, continuing without seam fix");
+            withGlossMask = withDecls;
+        }
+
+        var withReplacement = PatchShexReplaceEmissive(withGlossMask);
         if (withReplacement == null)
         {
             Log($"PS[{psIndex}] emissive pattern not found");
@@ -135,10 +146,12 @@ public static class SkinShpkPatcher
 
         // Stage 1: inject pulse modulation `r0.xyz *= 1 + amp * sin(2pi * speed * LoopTime)`
         // before the final `mul o0.xyz, r0.xyzx, cb1[3].xxxx` output instruction.
+        // Pulse anchor is hardcoded to r1.xyzw sample; non-r1 emissive-dest variants
+        // (~24/32 SceneKey combos) won't match -- per-layer color still works, animations off.
         var withPulse = PatchShexInjectPulseModulation(withCb0Ext);
         if (withPulse == null)
         {
-            Log($"PS[{psIndex}] output mul not found, skip pulse injection");
+            Log($"PS[{psIndex}] pulse anchor not matched (non-r1 dest), static emissive only");
             withPulse = withCb0Ext;
         }
 
@@ -390,63 +403,106 @@ public static class SkinShpkPatcher
         return result;
     }
 
-    // mul r1.xyz, cb0[3].xyzx, cb0[3].xyzx (9 tokens)
-    private static readonly byte[] EmissivePattern1 = ToLeBytes(
-        0x09000038, 0x00100072, 0x00000001,
+    // Invariant tail of `mul rX.xyz, cb0[3].xyzx, cb0[3].xyzx` (last 6 of 9 tokens).
+    // Only the first 3 tokens (opcode + dest operand + dest reg) vary by SceneKey.
+    private static readonly byte[] EmissiveInitCb3Tail = ToLeBytes(
         0x00208246, 0x00000000, 0x00000003,
         0x00208246, 0x00000000, 0x00000003);
 
-    // mul r1.xyz, r0.zzzz, r1.xyzx (7 tokens)
-    private static readonly byte[] EmissivePattern2 = ToLeBytes(
-        0x07000038, 0x00100072, 0x00000001,
-        0x00100AA6, 0x00000000, 0x00100246, 0x00000001);
+    private static byte[] BuildColorTableReplacement(uint destReg, uint normalReg, int normalComp)
+    {
+        uint madSrcNorm = 0x0010000Au | ((uint)normalComp << 4);  // TEMP + select_1 + component
+        return ToLeBytes(
+            // mad rDest.y, rNormal.<normalComp>, 0.9375, 0.015625
+            0x09000032,
+            0x00100022, destReg,
+            madSrcNorm, normalReg,
+            0x00004001, 0x3F700000,
+            0x00004001, 0x3C800000,
+            // mov rDest.x, 0.3125
+            0x05000036,
+            0x00100012, destReg,
+            0x00004001, 0x3EA00000,
+            // sample rDest.xyzw, rDest.xyxx, t10, s5
+            0x8B000045, 0x800000C2, 0x00155543,
+            0x001000F2, destReg,
+            0x00100046, destReg,
+            0x00107E46, 0x0000000A,
+            0x00106000, 0x00000005);
+    }
 
-    // Replacement: mad + mov + sample (25 tokens)
-    private static readonly byte[] ReplacementTokens = ToLeBytes(
-        // mad r1.y, r0.z, l(0.9375), l(0.015625)
-        0x09000032, 0x00100022, 0x00000001,
-        0x0010002A, 0x00000000,
-        0x00004001, 0x3F700000, // 0.9375f
-        0x00004001, 0x3C800000, // 0.015625f
-        // mov r1.x, l(0.3125)
-        0x05000036, 0x00100012, 0x00000001,
-        0x00004001, 0x3EA00000, // 0.3125f
-        // sample_indexable(texture2d)(float4) r1.xyzw, r1.xyxx, t10.xyzw, s5
-        0x8B000045, 0x800000C2, 0x00155543,
-        0x001000F2, 0x00000001,
-        0x00100046, 0x00000001,
-        0x00107E46, 0x0000000A,
-        0x00106000, 0x00000005);
-
+    /// <summary>Register-agnostic emissive-to-ColorTable replacement. Detects the init pair
+    /// `mul rX.xyz, cb0[3]*cb0[3]` + `mul rX.xyz, rS.zzzz, rX.xyzx` and writes the ColorTable
+    /// sample parameterized by (dest, normal, normalComp). Covers all 32 Emissive pass[2] PSes;
+    /// the previous hardcoded-r1 version only matched 8/32 (one SceneKey band).</summary>
     private static byte[]? PatchShexReplaceEmissive(byte[] shexData)
     {
-        int idx = FindPattern(shexData, EmissivePattern1);
-        if (idx < 0)
+        int initPos = -1;
+        uint destReg = 0;
+        uint normalReg = 0;
+        int normalComp = 0;
+
+        int pos = 8;
+        while (pos + 36 <= shexData.Length)
         {
-            Log("Could not find emissive mul cb0[3]*cb0[3] pattern");
+            uint tok = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(pos));
+            int opcode = (int)(tok & 0x7FF);
+            int length = (int)((tok >> 24) & 0x7F);
+            if (length == 0) length = 1;
+            int blen = length * 4;
+            if (pos + blen > shexData.Length) break;
+
+            if (opcode == 0x38 && blen == 36 && MatchesAt(shexData, pos + 12, EmissiveInitCb3Tail))
+            {
+                uint destOp = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(pos + 4));
+                if (destOp != 0x00100072u) { pos += blen; continue; }
+                destReg = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(pos + 8));
+
+                // Second MUL (7 tokens) carries the normal-alpha source operand.
+                int next = pos + blen;
+                if (next + 28 > shexData.Length) break;
+                uint tok2 = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(next));
+                if ((tok2 & 0x7FF) != 0x38 || ((tok2 >> 24) & 0x7F) * 4 != 28) { pos += blen; continue; }
+                uint src0Op = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(next + 12));
+                uint src0Reg = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(next + 16));
+                int numComp = (int)(src0Op & 0x3);
+                int selMode = (int)((src0Op >> 2) & 0x3);
+                int opType = (int)((src0Op >> 12) & 0xFF);
+                if (numComp != 2 || selMode != 1 || opType != 0) { pos += blen; continue; }
+                // Require uniform swizzle (zzzz or wwww) to confirm single-component broadcast.
+                int swiz = (int)((src0Op >> 4) & 0xFF);
+                int c0 = swiz & 3;
+                int c1 = (swiz >> 2) & 3;
+                int c2 = (swiz >> 4) & 3;
+                int c3 = (swiz >> 6) & 3;
+                if (c0 != c1 || c1 != c2 || c2 != c3) { pos += blen; continue; }
+
+                normalReg = src0Reg;
+                normalComp = c0;
+                initPos = pos;
+                break;
+            }
+            pos += blen;
+        }
+
+        if (initPos < 0)
+        {
+            Log("Could not find emissive init (cb0[3]*cb0[3] pattern)");
             return null;
         }
 
-        int idx2 = idx + EmissivePattern1.Length;
-        if (!MatchesAt(shexData, idx2, EmissivePattern2))
-        {
-            Log("Second emissive mul pattern mismatch");
-            return null;
-        }
-
-        int originalSize = EmissivePattern1.Length + EmissivePattern2.Length; // 64 bytes
-        int newSize = ReplacementTokens.Length; // 100 bytes
-        int tokenDelta = (newSize - originalSize) / 4; // +9 tokens
+        byte[] replacement = BuildColorTableReplacement(destReg, normalReg, normalComp);
+        const int originalSize = 16 * 4;   // 9-token + 7-token MULs
+        int newSize = replacement.Length;  // 25 tokens
+        int tokenDelta = (newSize - originalSize) / 4;
 
         var result = new byte[shexData.Length + newSize - originalSize];
-        shexData.AsSpan(0, idx).CopyTo(result);
-        ReplacementTokens.CopyTo(result.AsSpan(idx));
-        shexData.AsSpan(idx + originalSize).CopyTo(result.AsSpan(idx + newSize));
+        shexData.AsSpan(0, initPos).CopyTo(result);
+        replacement.CopyTo(result.AsSpan(initPos));
+        shexData.AsSpan(initPos + originalSize).CopyTo(result.AsSpan(initPos + newSize));
 
-        // Update token count
         uint oldCount = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4));
         BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(4), (uint)(oldCount + tokenDelta));
-
         return result;
     }
 
@@ -567,6 +623,143 @@ public static class SkinShpkPatcher
 
         uint oldCount = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4));
         BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(4), (uint)(oldCount + payloadTokens));
+        return result;
+    }
+
+    /// <summary>Insert `mul rC.<comp>, rC.<comp>, rS.<normalComp>` just before the
+    /// `mul[_sat] rC.<comp>, rC.<comp>, v1.w` vertex-alpha multiplication so the main-surface
+    /// accumulator picks up normal.alpha again (Body PS gloss-mask behavior). See docs Ch5 Path A.
+    /// Returns null if either the emissive init pair or the vertex-alpha mul isn't found.</summary>
+    private static byte[]? PatchShexInjectGlossMask(byte[] shexData)
+    {
+        int emissive2Pos = -1;
+        int normalReg = 0;
+        int normalComp = 0;
+
+        // Scan for `mul rX.xyz, cb0[3]*cb0[3]` + `mul rX.xyz, rS.<swiz>, rX.xyzx` to extract
+        // rS (normal-alpha source register) and its broadcasted component.
+        int pos = 8;
+        while (pos + 4 <= shexData.Length)
+        {
+            uint tok = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(pos));
+            int opcode = (int)(tok & 0x7FF);
+            int length = (int)((tok >> 24) & 0x7F);
+            if (length == 0) length = 1;
+            int blen = length * 4;
+            if (pos + blen > shexData.Length) break;
+
+            if (opcode == 0x38 && blen == 36 && MatchesAt(shexData, pos + 12, EmissiveInitCb3Tail))
+            {
+                int nextPos = pos + blen;
+                if (nextPos + 28 <= shexData.Length)
+                {
+                    uint tok2 = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(nextPos));
+                    if ((tok2 & 0x7FF) == 0x38 && ((tok2 >> 24) & 0x7F) * 4 == 28)
+                    {
+                        uint src0Tok = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(nextPos + 12));
+                        uint src0Reg = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(nextPos + 16));
+                        int numComp = (int)(src0Tok & 0x3);
+                        int selMode = (int)((src0Tok >> 2) & 0x3);
+                        int opType = (int)((src0Tok >> 12) & 0xFF);
+                        if (numComp == 2 && selMode == 1 && opType == 0)
+                        {
+                            int swiz = (int)((src0Tok >> 4) & 0xFF);
+                            int c0 = swiz & 0x3;
+                            // Require uniform broadcast (.zzzz or .wwww) to confirm single-component source.
+                            if (c0 == ((swiz >> 2) & 0x3) && c0 == ((swiz >> 4) & 0x3) && c0 == ((swiz >> 6) & 0x3))
+                            {
+                                emissive2Pos = nextPos;
+                                normalReg = (int)src0Reg;
+                                normalComp = c0;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            pos += blen;
+        }
+
+        if (emissive2Pos < 0)
+            return null;
+
+        // Locate `mul[_sat] rC.<comp>, rC.<comp>, v1.w` (dest register == src0 register,
+        // both single-component; v1.w = INPUT reg 1, select_1, component w).
+        int targetPos = -1;
+        int destReg = 0;
+        int destComp = 0;
+        int scan = emissive2Pos + 28;
+        while (scan + 28 <= shexData.Length)
+        {
+            uint tok = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(scan));
+            int opcode = (int)(tok & 0x7FF);
+            int length = (int)((tok >> 24) & 0x7F);
+            if (length == 0) length = 1;
+            int blen = length * 4;
+            if (scan + blen > shexData.Length) break;
+
+            if (opcode == 0x38 && blen == 28)
+            {
+                uint src1Tok = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(scan + 20));
+                uint src1Reg = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(scan + 24));
+                int src1OpType = (int)((src1Tok >> 12) & 0xFF);
+                int src1SelMode = (int)((src1Tok >> 2) & 0x3);
+                int src1Comp = (int)((src1Tok >> 4) & 0x3);
+                if (src1OpType == 1 && src1SelMode == 2 && src1Comp == 3 && src1Reg == 1)
+                {
+                    uint destTok = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(scan + 4));
+                    uint destRegVal = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(scan + 8));
+                    uint src0Tok = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(scan + 12));
+                    uint src0Reg = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(scan + 16));
+
+                    int destNum = (int)(destTok & 0x3);
+                    int destMode = (int)((destTok >> 2) & 0x3);
+                    int destType = (int)((destTok >> 12) & 0xFF);
+                    int destMask = (int)((destTok >> 4) & 0xF);
+                    int src0Num = (int)(src0Tok & 0x3);
+                    int src0Mode = (int)((src0Tok >> 2) & 0x3);
+                    int src0Type = (int)((src0Tok >> 12) & 0xFF);
+                    int src0Comp = (int)((src0Tok >> 4) & 0x3);
+
+                    if (destNum == 2 && destMode == 0 && destType == 0
+                        && src0Num == 2 && src0Mode == 2 && src0Type == 0
+                        && destRegVal == src0Reg
+                        && (destMask == 1 || destMask == 2 || destMask == 4 || destMask == 8))
+                    {
+                        int dc = destMask switch { 1 => 0, 2 => 1, 4 => 2, _ => 3 };
+                        if (src0Comp == dc)
+                        {
+                            targetPos = scan;
+                            destReg = (int)destRegVal;
+                            destComp = dc;
+                            break;
+                        }
+                    }
+                }
+            }
+            scan += blen;
+        }
+
+        if (targetPos < 0)
+            return null;
+
+        int destMaskBit = 1 << destComp;
+        uint destOperand = 0x00100002u | (uint)(destMaskBit << 4);     // TEMP + mask mode + single-bit mask
+        uint srcDestSel = 0x0010000Au | (uint)(destComp << 4);         // TEMP + select_1 on dest's component
+        uint srcNormSel = 0x0010000Au | (uint)(normalComp << 4);       // TEMP + select_1 on normal's component
+        byte[] newInst = ToLeBytes(
+            0x07000038,
+            destOperand, (uint)destReg,
+            srcDestSel, (uint)destReg,
+            srcNormSel, (uint)normalReg);
+
+        var result = new byte[shexData.Length + newInst.Length];
+        shexData.AsSpan(0, targetPos).CopyTo(result);
+        newInst.CopyTo(result.AsSpan(targetPos));
+        shexData.AsSpan(targetPos).CopyTo(result.AsSpan(targetPos + newInst.Length));
+
+        uint oldCount = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4));
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(4), oldCount + 7);
         return result;
     }
 

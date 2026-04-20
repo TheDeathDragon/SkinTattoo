@@ -1,6 +1,16 @@
 {
   "versions": [
     {
+      "version": "0.2.5",
+      "date": "2026-04-20",
+      "en": [
+        { "text": "Fixed body gloss / sheen / oily-skin rendering when emissive is enabled" }
+      ],
+      "zh": [
+        { "text": "修复开启发光时身体油光 / 光泽 / 油皮的显示问题" }
+      ]
+    },
+    {
       "version": "0.2.4",
       "date": "2026-04-19",
       "en": [

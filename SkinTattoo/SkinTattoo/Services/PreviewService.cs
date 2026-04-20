@@ -3363,9 +3363,10 @@ public class PreviewService : IDisposable
 
         if (patchedSkinShpkPath == null || !File.Exists(patchedSkinShpkPath))
         {
-            // v6: Ripple direction modes (radial/linear/bidir) + dual-color ripple.
-            // Payload 220 → 276 tokens with new col 6 sample and dir dispatch.
-            var candidate = Path.Combine(outputDir, "skin_ct_v6.shpk");
+            // v8: register-agnostic emissive replace (32/32 PSes vs 8/32 before) + gloss-mask
+            //     re-injection. Pulse anchor still r1-only, so animations degrade to static
+            //     emissive on non-r1 dest SceneKey variants (~24/32 states).
+            var candidate = Path.Combine(outputDir, "skin_ct_v8.shpk");
             if (!File.Exists(candidate))
             {
                 // Runtime patch: read vanilla skin.shpk from SqPack and patch in memory
