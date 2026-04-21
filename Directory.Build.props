@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <DALAMUD_HOME Condition="'$(DALAMUD_HOME)' == ''">$(AppData)\XIVLauncher\addon\Hooks\dev</DALAMUD_HOME>
+    <DALAMUD_HOME Condition="'$(DALAMUD_HOME)' == ''">$(AppData)\XIVLauncherCN\addon\Hooks\dev</DALAMUD_HOME>
     <DalamudLibPath>$(DALAMUD_HOME)\</DalamudLibPath>
   </PropertyGroup>
 
