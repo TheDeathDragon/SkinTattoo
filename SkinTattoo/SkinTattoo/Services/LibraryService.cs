@@ -333,10 +333,21 @@ public sealed class LibraryService
         try
         {
             var json = File.ReadAllText(indexPath);
-            var model = JsonSerializer.Deserialize<LibraryIndexModel>(json);
-            List<LibraryEntry>? list = model?.Entries;
-            if (list == null || list.Count == 0)
+            // Legacy format (pre-folder): JSON root is a List<LibraryEntry>. New format
+            // wraps entries in LibraryIndexModel. Dispatch on the first non-whitespace char
+            // to avoid deserializing the wrong shape (which throws and wipes the index).
+            List<LibraryEntry>? list;
+            LibraryIndexModel? model = null;
+            var trimmed = json.AsSpan().TrimStart();
+            if (trimmed.Length > 0 && trimmed[0] == '[')
+            {
                 list = JsonSerializer.Deserialize<List<LibraryEntry>>(json);
+            }
+            else
+            {
+                model = JsonSerializer.Deserialize<LibraryIndexModel>(json);
+                list = model?.Entries;
+            }
             if (list == null) return;
             lock (sync)
             {

@@ -26,7 +26,7 @@
       "title": "3D 编辑器"
     },
     "library": {
-      "title": "贴花素材库"
+      "title": "图层素材库"
     }
   },
   "changelog": {
@@ -115,7 +115,7 @@
     "cancel": "取消"
   },
   "tooltip": {
-    "editor3d": "3D 贴花编辑器",
+    "editor3d": "3D 图层编辑器",
     "reset_layer": "重置当前图层参数",
     "clear_redirect": "还原贴图  -- 清除 Penumbra 重定向",
     "export_base_tex": "导出底图 PNG（用于 PS 编辑）",
@@ -129,10 +129,10 @@
     "auto_preview": "参数变化时自动更新游戏内预览",
     "update_preview": "更新预览",
     "add_group": "添加目标材质",
-    "delete_group": "按住 Ctrl+Shift 删除贴花组",
-    "add_layer": "添加贴花图层",
-    "delete_layer": "按住 Ctrl+Shift 删除图层",
-    "highlight_on": "高亮显示贴花",
+    "delete_group": "按住组合键删除图层组",
+    "add_layer": "添加图层",
+    "delete_layer": "按住组合键删除图层",
+    "highlight_on": "高亮显示图层",
     "highlight_off": "关闭高亮",
     "canvas_zoom": "画布缩放 (滚轮)",
     "uv_mesh_no_model": "需要先导入模型才能显示 UV 网格",
@@ -143,7 +143,7 @@
     "scale_unlocked": "大小（UV 独立）",
     "lock_ratio": "比例锁定",
     "unlock_ratio": "比例解锁",
-    "global_enable": "全局启用或禁用插件的贴花效果。\n关闭后会还原所有贴图到原始状态。",
+    "global_enable": "全局启用或禁用插件的图层效果。\n关闭后会还原所有贴图到原始状态。",
     "swap_interval": "拖拽调整参数时，将修改同步到游戏贴图的最小间隔（毫秒）。\n数值越小越实时，但在大分辨率下会占用更多主线程时间。\n3D 编辑器预览不受此限制，松手时总会立即同步。",
     "restore_default": "恢复默认值 ({0}ms)",
     "uv_aa": "开启后 UV 网格线框使用抗锯齿渲染，线条更平滑。\n关闭可显著提升线框渲染性能，适用于高面数模型。",
@@ -161,7 +161,11 @@
     "preview_current_layer": "仅显示当前选中图层的预览叠加；关闭后显示所有图层的叠加结果。",
     "canvas_map": "选择编辑器预览中显示的贴图类型。\n漫反射 — 颜色/反照率\n法线 — 法线贴图\n遮罩 — 材质遮罩（高光/粗糙度）",
     "canvas_show_base": "显示/隐藏当前贴图类型的基础贴图（叠加层背景）",
-    "open_library": "打开贴花素材库"
+    "open_library": "打开图层素材库",
+    "delete_modifier_help": "点击删除按钮（图层/组）时需要按住此组合键才能生效。设为「无」表示删除按钮可直接点击（危险）。",
+    "open_repo_help": "在浏览器中打开 GitHub 仓库主页",
+    "open_discord_help": "在浏览器中加入 Discord 社区",
+    "open_debug_help": "打开调试窗口查看插件运行日志和内部状态"
   },
   "label": {
     "diffuse": "贴图",
@@ -183,6 +187,13 @@
     "repo": "仓库",
     "discord": "Discord",
     "http_restart_notice": "修改 HTTP 开关或端口后需重启插件生效。",
+    "section_general": "通用",
+    "section_interface": "界面",
+    "section_performance": "性能",
+    "section_http": "HTTP 服务器",
+    "section_advanced": "高级设置",
+    "delete_modifier": "删除组合键",
+    "open_debug_window": "打开调试窗口",
     "penumbra_connected": "Penumbra 已连接",
     "penumbra_disconnected": "Penumbra 未连接",
     "center_x": "中心 X",
@@ -228,15 +239,15 @@
     "canvas_map": "预览贴图"
   },
   "section": {
-    "image": "贴花图片",
+    "image": "图层图片",
     "transform": "UV 位置",
     "render": "渲染",
-    "pbr": "贴花属性",
+    "pbr": "图层属性",
     "fade": "图层羽化"
   },
   "checkbox": {
     "enable_plugin": "启用 SkinTattoo",
-    "show_decal": "显示贴花",
+    "show_decal": "显示图层",
     "emissive": "发光",
     "auto_preview": "自动预览",
     "uv_aa": "抗锯齿##uvAA",
@@ -247,13 +258,17 @@
     "canvas_show_base": "显示基础贴图"
   },
   "menu": {
-    "copy_decal_group": "复制贴花组",
-    "paste_decal_group": "粘贴贴花组",
+    "copy_decal_group": "复制图层组",
+    "paste_decal_group": "粘贴图层组",
     "copy_diffuse_path": "复制贴图路径",
     "copy_normal_path": "复制法线路径",
     "copy_material_path": "复制材质路径",
     "copy_game_path": "复制游戏路径",
-    "copy_actual_path": "复制实际路径"
+    "copy_actual_path": "复制实际路径",
+    "duplicate_layer": "复制图层",
+    "highlight_on": "高亮显示图层",
+    "highlight_off": "关闭高亮",
+    "delete_layer": "删除图层"
   },
   "anim": {
     "none": "无",
@@ -277,7 +292,7 @@
     "diffuse": "Diffuse",
     "mask": "Mask",
     "normal": "Normal",
-    "tooltip": "贴花画到哪张游戏贴图上。\nDiffuse — 颜色，默认\nMask — 材质遮罩，高光/粗糙度\nNormal — 法线贴图，凹凸细节",
+    "tooltip": "图层画到哪张游戏贴图上。\nDiffuse — 颜色，默认\nMask — 材质遮罩，高光/粗糙度\nNormal — 法线贴图，凹凸细节",
     "auto_normal_detected": "检测到这像法线贴图，目标已自动设为 Normal。"
   },
   "emissive_normal": {
@@ -332,7 +347,7 @@
   },
   "error": {
     "no_mod_name": "请输入 Mod 名称",
-    "no_group_hint": "先添加一个贴花组",
+    "no_group_hint": "先添加一个图层组",
     "no_layer_selected": "选择或添加一个图层",
     "no_group_selected": "请至少选择一个图层组",
     "no_visible_layer": "选中的图层组没有可见图层",
@@ -349,34 +364,34 @@
     "uv_editor_modifiers": "UV 编辑器  -- 修饰键",
     "layer_target": "图层与目标",
     "editor3d_camera": "3D 编辑器  -- 相机",
-    "editor3d_decal": "3D 编辑器  -- 贴花",
+    "editor3d_decal": "3D 编辑器  -- 图层",
     "editor3d_models": "3D 编辑器  -- 模型管理",
     "canvas_scroll": "滚轮: 缩放画布",
     "canvas_pan": "中键拖动: 平移画布",
-    "canvas_move_decal": "左键拖动: 移动贴花位置",
-    "canvas_select": "左键点空白: 选择贴花图层",
-    "canvas_scale": "右键拖动: 缩放贴花",
+    "canvas_move_decal": "左键拖动: 移动图层位置",
+    "canvas_select": "左键点空白: 选择图层",
+    "canvas_scale": "右键拖动: 缩放图层",
     "mod_shift": "Shift + 左键拖动: 锁定 X 轴",
     "mod_ctrl": "Ctrl + 左键拖动: 锁定 Y 轴",
-    "mod_alt": "Alt + 右键拖动: 旋转贴花",
+    "mod_alt": "Alt + 右键拖动: 旋转图层",
     "delete_hint": "Ctrl+Shift + 删除按钮: 删除图层/目标",
-    "context_menu": "右键贴花组标题: 复制贴图 / 法线 / 材质路径",
+    "context_menu": "右键图层组标题: 复制贴图 / 法线 / 材质路径",
     "cam_rotate": "右键拖动: 旋转相机",
     "cam_pan": "中键拖动: 平移相机",
     "cam_zoom": "Ctrl + 滚轮: 相机缩放",
     "cam_reset": "重置相机按钮: 回到默认视角",
-    "decal_place": "左键点击模型: 将选中图层的贴花放到该位置",
-    "decal_scale": "滚轮: 缩放选中贴花 (非 Ctrl)",
+    "decal_place": "左键点击模型: 将选中图层放到该位置",
+    "decal_scale": "滚轮: 缩放选中图层 (非 Ctrl)",
     "model_add": "添加模型: 从玩家资源树追加额外模型",
     "model_manage": "管理模型: 勾选显隐 / 移除已添加模型"
   },
   "hint": {
-    "canvas_ops": "左键:移动贴花  右键:缩放贴花  中键:平移画布  滚轮:缩放画布",
+    "canvas_ops": "左键:移动图层  右键:缩放图层  中键:平移画布  滚轮:缩放画布",
     "canvas_mods": "Shift:锁定X移动  Ctrl:锁定Y移动  Alt:右键变旋转",
-    "viewport_ops": "左键:放置贴花  右键:旋转相机  中键:平移相机",
-    "viewport_scroll": "滚轮:缩放贴花  Ctrl+滚轮:缩放相机",
+    "viewport_ops": "左键:放置图层  右键:旋转相机  中键:平移相机",
+    "viewport_scroll": "滚轮:缩放图层  Ctrl+滚轮:缩放相机",
     "loading": "加载中…",
-    "loading_sub": "正在加载模型与贴花，请稍候",
+    "loading_sub": "正在加载模型与图层，请稍候",
     "char_redrawing": "角色重绘中…",
     "char_redrawing_sub": "完成后自动刷新资源树",
     "no_resources": "点击「刷新资源」查询玩家资源",
@@ -389,14 +404,14 @@
     "canvas_map_base_missing": "当前目标缺少基础贴图，仅显示叠加层。"
   },
   "dialog": {
-    "select_image": "选择贴花图片",
+    "select_image": "选择图层图片",
     "export_base_tex": "导出底图",
     "export_wireframe": "导出 UV 线框",
     "save_mod": "保存 Mod"
   },
   "layer": {
     "default": {
-      "name": "贴花 {0}"
+      "name": "图层 {0}"
     }
   },
   "tooltip_group": {

@@ -48,7 +48,7 @@ public class SavedLayer
     public int Kind { get; set; } = 0;
 
     // Which output texture the layer paints into. 0=Diffuse, 1=Mask, 2=Normal.
-    // Missing in older saves → deserializes to 0 (Diffuse), preserving legacy behavior.
+    // Missing in older saves -> deserializes to 0 (Diffuse), preserving legacy behavior.
     public int TargetMap { get; set; } = 0;
 
     public bool AffectsSpecular { get; set; }
@@ -127,6 +127,10 @@ public class Configuration : IPluginConfiguration
     public int UvViewTargetMap { get; set; } = 0;
     public bool UvCurrentDecalOnly { get; set; } = false;
     public bool UvShowBaseTexture { get; set; } = true;
+
+    // Modifier keys required to enable destructive actions (delete layer/group).
+    // Bit 0 = Ctrl, bit 1 = Shift, bit 2 = Alt. Default = Ctrl+Shift (3).
+    public int DeleteModifierKeys { get; set; } = 3;
 
     [NonSerialized]
     private IDalamudPluginInterface? pluginInterface;

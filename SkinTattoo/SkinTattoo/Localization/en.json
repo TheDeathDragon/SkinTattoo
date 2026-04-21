@@ -161,7 +161,11 @@
     "preview_current_layer": "Show only the selected layer in preview overlays; disable to show cumulative layers.",
     "canvas_map": "Which game texture map to display in the editor preview.\nDiffuse — color/albedo\nNormal — bump/normal map\nMask — material mask (spec/roughness)",
     "canvas_show_base": "Show/hide the selected map's base texture behind overlays",
-    "open_library": "Open layer library"
+    "open_library": "Open layer library",
+    "delete_modifier_help": "Hold this modifier combination to enable layer/group delete buttons. Set to 'None' to allow direct clicking (dangerous).",
+    "open_repo_help": "Open the GitHub repository in your browser",
+    "open_discord_help": "Join the Discord community in your browser",
+    "open_debug_help": "Open the debug window to view runtime logs and internal state"
   },
   "label": {
     "diffuse": "Diffuse",
@@ -183,6 +187,13 @@
     "repo": "Repository",
     "discord": "Discord",
     "http_restart_notice": "Changes to HTTP toggle or port require plugin restart.",
+    "section_general": "General",
+    "section_interface": "Interface",
+    "section_performance": "Performance",
+    "section_http": "HTTP Server",
+    "section_advanced": "Advanced",
+    "delete_modifier": "Delete modifier",
+    "open_debug_window": "Open debug window",
     "penumbra_connected": "Penumbra Connected",
     "penumbra_disconnected": "Penumbra Disconnected",
     "center_x": "Center X",

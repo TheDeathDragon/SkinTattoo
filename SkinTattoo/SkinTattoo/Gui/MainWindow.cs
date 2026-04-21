@@ -270,7 +270,7 @@ public partial class MainWindow : Window, IDisposable
 
         UpdateHighlight();
 
-        // ── Tab bar ──
+        // -- Tab bar --
         if (ImGui.BeginTabBar("##MainTabs", ImGuiTabBarFlags.None))
         {
             // Tab 0: Settings
@@ -329,7 +329,7 @@ public partial class MainWindow : Window, IDisposable
 
     }
 
-    // ── Highlight ──────────────────────────────────────────────────────────
+    // -- Highlight ----------------------------------------------------------
 
     private void UpdateHighlight()
     {
@@ -373,7 +373,7 @@ public partial class MainWindow : Window, IDisposable
         TryDirectEmissiveUpdate(group);
     }
 
-    // ── Mesh state tick ──────────────────────────────────────────────────────
+    // -- Mesh state tick ------------------------------------------------------
 
     /// <summary>
     /// Runs every frame from Draw. Detects selected-group change, in-place mesh
@@ -460,7 +460,7 @@ public partial class MainWindow : Window, IDisposable
         // pathKey will differ next frame -> TickMeshState reloads mesh.
     }
 
-    // ── Loading overlay ──────────────────────────────────────────────────────
+    // -- Loading overlay ------------------------------------------------------
 
     private void DrawLoadingOverlay()
     {
@@ -500,7 +500,7 @@ public partial class MainWindow : Window, IDisposable
         fg.AddText(subPos, ImGui.GetColorU32(new Vector4(0.75f, 0.75f, 0.8f, 1f)), sub);
     }
 
-    // ── Help tab ──────────────────────────────────────────────────────────────
+    // -- Help tab --------------------------------------------------------------
 
     private void DrawHelpTab()
     {
@@ -551,7 +551,7 @@ public partial class MainWindow : Window, IDisposable
         ImGui.BulletText(Strings.T("help.model_manage"));
     }
 
-    // ── Toolbar ──────────────────────────────────────────────────────────────
+    // -- Toolbar --------------------------------------------------------------
 
     private void DrawToolbar()
     {
@@ -670,7 +670,7 @@ public partial class MainWindow : Window, IDisposable
 
     }
 
-    // ── Layout ──────────────────────────────────────────────────────────────
+    // -- Layout --------------------------------------------------------------
 
     private unsafe void DrawThreePanelLayout(float totalWidth, float height)
     {
@@ -743,7 +743,7 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
-    // ── Auto-preview & helpers ──────────────────────────────────────────────
+    // -- Auto-preview & helpers ----------------------------------------------
 
     private void DrawActionsSection()
     {
@@ -893,7 +893,7 @@ public partial class MainWindow : Window, IDisposable
         if (charBase == null) return;
 
         // skin CT: rebuild per-layer CT from current layer state (includes per-layer animation).
-        // Do NOT fall through to HighlightEmissiveColor — it would overwrite
+        // Do NOT fall through to HighlightEmissiveColor -- it would overwrite
         // per-layer colors with a single combined color.
         if (previewService.RestoreSkinCtAfterHighlight(charBase, group))
             return;
@@ -980,7 +980,18 @@ public partial class MainWindow : Window, IDisposable
     public void Dispose()
     {
         InitializeRequested = null;
-        DisposeCanvasOverlayTexCache();
         DisposeDiskTexPreviewCache();
+    }
+
+    private bool IsDeleteModifierHeld()
+    {
+        var keys = config.DeleteModifierKeys;
+        if (keys == 0) return true;
+
+        var io = ImGui.GetIO();
+        if ((keys & 1) != 0 && !io.KeyCtrl) return false;
+        if ((keys & 2) != 0 && !io.KeyShift) return false;
+        if ((keys & 4) != 0 && !io.KeyAlt) return false;
+        return true;
     }
 }

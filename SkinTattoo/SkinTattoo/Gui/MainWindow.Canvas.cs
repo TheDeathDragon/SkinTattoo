@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
-using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
 using SkinTattoo.Core;
@@ -16,8 +15,6 @@ public partial class MainWindow
 {
     // UV mesh wireframe toggle
     private bool showUvWireframe;
-    private sealed record CanvasOverlayTexCacheEntry(IDalamudTextureWrap Wrap, DateTime Mtime, long Size);
-    private readonly Dictionary<string, CanvasOverlayTexCacheEntry> canvasOverlayTexCache = new(StringComparer.OrdinalIgnoreCase);
 
     private void SyncCanvasMapModeFromSelectedLayer()
     {
@@ -75,7 +72,7 @@ public partial class MainWindow
         return null;
     }
 
-    // ── Center Panel: Interactive UV Canvas ──────────────────────────────────
+    // -- Center Panel: Interactive UV Canvas ----------------------------------
     //
     // Coordinate system:
     //   "virtual UV" = square [0,1]x[0,1] representing maxDim x maxDim pixels
@@ -95,43 +92,30 @@ public partial class MainWindow
         var btnH = ImGui.GetFrameHeight();
         ImGui.AlignTextToFramePadding();
         ImGui.Text(Strings.T("label.uv_scale"));
-
-        var spacing = ImGui.GetStyle().ItemSpacing.X;
-        var contentMaxX = ImGui.GetWindowContentRegionMax().X;
-        bool TrySameLine(float nextItemWidth, float spacingX = -1f)
-        {
-            var gap = spacingX >= 0f ? spacingX : spacing;
-            var nextX = ImGui.GetCursorPosX() + gap + nextItemWidth;
-            if (nextX <= contentMaxX)
-            {
-                ImGui.SameLine(0f, gap);
-                return true;
-            }
-            return false;
-        }
-
-        const float minZoomSliderW = 140f;
-        if (!TrySameLine(minZoomSliderW))
-            ImGui.NewLine();
+        ImGui.SameLine();
 
         var fitBtnW = 44f;
         var uvMeshBtnW = ImGui.CalcTextSize(Strings.T("button.uv_mesh")).X + ImGui.GetStyle().FramePadding.X * 2;
         var colorBtnW = ImGui.GetFrameHeight();
+        var spacing = ImGui.GetStyle().ItemSpacing.X;
         var hasMesh = previewService.CurrentMesh != null;
 
-        var sliderW = MathF.Max(minZoomSliderW, MathF.Min(280f, ImGui.GetContentRegionAvail().X));
+        // Reserve space for buttons on the right
+        var rightBtns = fitBtnW + uvMeshBtnW + spacing * 2
+                        + (showUvWireframe ? colorBtnW + spacing : 0);
+        var sliderW = ImGui.GetContentRegionAvail().X - rightBtns;
         ImGui.SetNextItemWidth(sliderW);
         ImGui.SliderFloat("##zoom", ref canvasZoom, 0.1f, 5.0f, $"{canvasZoom * 100:F0}%%");
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.canvas_zoom"));
 
-        TrySameLine(fitBtnW);
+        ImGui.SameLine();
         if (ImGui.Button(Strings.T("button.fit"), new Vector2(fitBtnW, btnH)))
         {
             canvasZoom = 1.0f;
             canvasPan = Vector2.Zero;
         }
 
-        TrySameLine(uvMeshBtnW);
+        ImGui.SameLine();
         var activeColor = showUvWireframe && hasMesh
             ? new Vector4(0.4f, 0.8f, 1f, 1f)
             : new Vector4(0.5f, 0.5f, 0.5f, 1f);
@@ -149,7 +133,7 @@ public partial class MainWindow
 
         if (showUvWireframe)
         {
-            TrySameLine(colorBtnW);
+            ImGui.SameLine();
             var wc = new Vector4(config.UvWireframeColorR, config.UvWireframeColorG,
                 config.UvWireframeColorB, config.UvWireframeColorA);
             if (ImGui.ColorButton("##wireColor", wc, ImGuiColorEditFlags.AlphaPreview, new Vector2(colorBtnW, btnH)))
@@ -170,7 +154,6 @@ public partial class MainWindow
             }
         }
 
-        //ImGui.NewLine();
         ImGui.AlignTextToFramePadding();
         ImGui.Text(Strings.T("label.canvas_map"));
         ImGui.SameLine();
@@ -443,60 +426,12 @@ public partial class MainWindow
 
         try
         {
-            var shared = textureProvider.GetFromFile(imagePath).GetWrapOrDefault();
-            if (shared != null) return shared;
-        }
-        catch { }
-
-        if (imageLoader == null) return null;
-
-        FileInfo fi;
-        try
-        {
-            fi = new FileInfo(imagePath);
-            if (!fi.Exists) return null;
+            return textureProvider.GetFromFile(imagePath).GetWrapOrDefault();
         }
         catch
         {
             return null;
         }
-
-        var absPath = Path.GetFullPath(imagePath);
-        if (canvasOverlayTexCache.TryGetValue(absPath, out var hit)
-            && hit.Mtime == fi.LastWriteTimeUtc && hit.Size == fi.Length)
-            return hit.Wrap;
-
-        if (hit != null)
-        {
-            try { hit.Wrap.Dispose(); } catch { }
-            canvasOverlayTexCache.Remove(absPath);
-        }
-
-        var img = imageLoader.LoadImage(absPath, useCache: false);
-        if (!img.HasValue) return null;
-        var (data, w, h) = img.Value;
-        try
-        {
-            var wrap = textureProvider.CreateFromRaw(
-                RawImageSpecification.Rgba32(w, h),
-                data,
-                $"SkinTattoo/canvas/{Path.GetFileName(absPath)}");
-            canvasOverlayTexCache[absPath] = new CanvasOverlayTexCacheEntry(wrap, fi.LastWriteTimeUtc, fi.Length);
-            return wrap;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private void DisposeCanvasOverlayTexCache()
-    {
-        foreach (var e in canvasOverlayTexCache.Values)
-        {
-            try { e.Wrap.Dispose(); } catch { }
-        }
-        canvasOverlayTexCache.Clear();
     }
 
     private bool DrawBaseTexture(ImDrawListPtr drawList, Vector2 texOrigin, Vector2 texSize)

@@ -220,11 +220,11 @@ public class PreviewService : IDisposable
     // main-thread consumption finishes well before the next compose runs. The Rgba/PreviewRgba
     // ones get stored in compositeResults for the 3D editor to read async; in the rare case
     // where the 3D editor reads while a new compose is mid-write, we get at most one frame
-    // of torn pixels which self-heals on the next compose (≤33ms). The previous double-buffer
+    // of torn pixels which self-heals on the next compose (<=33ms). The previous double-buffer
     // strategy doubled resident memory (600MB+ at 4096^2), unacceptable.
     /// <summary>
     /// Per-buffer dirty-rect state: tracks the previous cycle's layer-union so we can
-    /// compute `dirty = current_union ∪ previous_union` and only repaint that region.
+    /// compute `dirty = current_union U previous_union` and only repaint that region.
     /// </summary>
     private class DirtyTracker
     {
@@ -342,75 +342,8 @@ public class PreviewService : IDisposable
         return LoadBaseTexture(group);
     }
 
-    /// <summary>
-    /// Composites a single layer (by index) onto the group's base diffuse and returns the result.
-    /// Used by the 3D editor "Current Layer Only" preview toggle.
-    /// All layer types (Diffuse/Normal/Mask target) are shown via their image regardless of
-    /// AffectsDiffuse, so the user can see placement for any map type on the 3D model.
-    /// Returns null if the group has no base texture or the index is out of range.
-    /// </summary>
-    public (byte[] Data, int Width, int Height)? ComputeSingleLayerPreview(TargetGroup? group, int layerIndex)
-    {
-        if (group == null) return null;
-        if (layerIndex < 0 || layerIndex >= group.Layers.Count) return null;
-
-        var baseTex = LoadBaseTexture(group);
-        var (baseData, w, h) = (baseTex.Data, baseTex.Width, baseTex.Height);
-
-        var layer = group.Layers[layerIndex].Clone();
-        var singleList = new List<DecalLayer> { layer };
-        var result = CpuUvComposite(singleList, baseData, w, h, ignoreAffectsDiffuseFilter: true);
-        if (result == null)
-            return (baseData, w, h);
-
-        return (result, w, h);
-    }
-
     /// <summary>Last update mode used.</summary>
     public string LastUpdateMode { get; private set; } = "none";
-
-    /// <summary>
-    /// Loads the raw base texture for the given map type (Diffuse/Normal/Mask) for a group.
-    /// Falls back to diffuse if the requested map path is unavailable.
-    /// Returns null only if no texture can be resolved at all.
-    /// </summary>
-    public (byte[] Data, int Width, int Height)? TryGetBaseTextureForMap(TargetGroup? group, TargetMap map)
-    {
-        if (group == null) return null;
-
-        if (map == TargetMap.Normal)
-        {
-            var normDisk = group.OrigNormDiskPath ?? group.NormDiskPath;
-            var normGame = group.NormGamePath;
-            if (!string.IsNullOrEmpty(normDisk) || !string.IsNullOrEmpty(normGame))
-            {
-                var img = !string.IsNullOrEmpty(normDisk) && File.Exists(normDisk)
-                    ? imageLoader.LoadImage(normDisk)
-                    : (!string.IsNullOrEmpty(normGame) ? LoadGameTexture(normGame) : null);
-                if (img != null)
-                    return (img.Value.Data, img.Value.Width, img.Value.Height);
-            }
-        }
-        else if (map == TargetMap.Mask)
-        {
-            if (!string.IsNullOrEmpty(group.MtrlGamePath))
-            {
-                var mtrlDisk = group.OrigMtrlDiskPath ?? group.MtrlDiskPath;
-                var maskGamePath = GetMaskGamePathFromMtrl(group.MtrlGamePath!, mtrlDisk);
-                if (!string.IsNullOrEmpty(maskGamePath))
-                {
-                    var img = LoadGameTexture(maskGamePath!);
-                    if (img != null)
-                        return (img.Value.Data, img.Value.Width, img.Value.Height);
-                }
-            }
-        }
-
-        // Diffuse or fallback
-        return TryGetBaseTexture(group);
-    }
-
-
 
     /// <summary>Whether emissive CBuffer offset is known for a group's mtrl.</summary>
     public bool HasEmissiveOffset(string? mtrlGamePath)
@@ -571,7 +504,7 @@ public class PreviewService : IDisposable
         else
         {
             // Diagnostic: explicit reason when we fall back to Full Redraw
-            DebugServer.AppendLog($"[UpdatePreview] → FULL (UseGpuSwap={config.UseGpuSwap} textureSwap={(textureSwap != null)} canSwap={CanSwapInPlace} denyReason={lastCanSwapDenyReason ?? "(none)"})");
+            DebugServer.AppendLog($"[UpdatePreview] -> FULL (UseGpuSwap={config.UseGpuSwap} textureSwap={(textureSwap != null)} canSwap={CanSwapInPlace} denyReason={lastCanSwapDenyReason ?? "(none)"})");
             UpdatePreviewFull(project);
         }
     }
@@ -1007,7 +940,7 @@ public class PreviewService : IDisposable
                 snapshots.Add(new LayerSnapshot(l));
 
             // Composite base MUST come from the vanilla/mod original, never from
-            // previewDiskPaths (our own prior output) — user Normal/Mask RGB
+            // previewDiskPaths (our own prior output) -- user Normal/Mask RGB
             // paints would accumulate on each async cycle and produce a trail.
             var normSource = group.OrigNormDiskPath ?? group.NormDiskPath ?? group.NormGamePath;
             jobs.Add((group, group.DiffuseGamePath, diffDisk,
@@ -1474,7 +1407,7 @@ public class PreviewService : IDisposable
         return rowPairAllocators.GetOrAdd(key, _ => new RowPairAllocator());
     }
 
-    // ── PBR Inspector accessors ──────────────────────────────────────────────
+    // -- PBR Inspector accessors ----------------------------------------------
 
     /// <summary>Vanilla ColorTable bytes for a group's mtrl, or null if not yet cached.</summary>
     public (Half[] Data, int Width, int Height)? GetVanillaColorTable(TargetGroup group)
@@ -1816,7 +1749,7 @@ public class PreviewService : IDisposable
             previewDiskPaths.TryRemove(group.MtrlGamePath!, out _);
             previewMtrlDiskPaths.TryRemove(group.MtrlGamePath!, out _);
             emissiveOffsets.TryRemove(group.MtrlGamePath!, out _);
-            // Keep skinCtMaterials — it persists until ResetSwapState so inplace
+            // Keep skinCtMaterials -- it persists until ResetSwapState so inplace
             // composite still routes through the CT path after re-init.
         }
         if (!string.IsNullOrEmpty(group.NormGamePath))
@@ -1829,7 +1762,7 @@ public class PreviewService : IDisposable
     }
 
     /// <summary>Force the next UpdatePreview to take the Full Redraw path across all groups.
-    /// Lighter than ResetSwapState — keeps row-pair allocators, vanilla CT cache, and
+    /// Lighter than ResetSwapState -- keeps row-pair allocators, vanilla CT cache, and
     /// emissive offsets intact, just drops the redirect-init markers so
     /// <see cref="CheckCanSwapInPlace"/> returns false next cycle.</summary>
     public void ForceFullRedrawNextCycle()
@@ -2108,7 +2041,7 @@ public class PreviewService : IDisposable
         return ToForwardSlash(gamePath);
     }
 
-    // ── Private: check if all groups can swap in-place ───────────────────────
+    // -- Private: check if all groups can swap in-place -----------------------
 
     // One-shot CanSwap=NO log gating  -- avoid spamming the log on every poll
     private string? lastCanSwapDenyReason;
@@ -2230,7 +2163,7 @@ public class PreviewService : IDisposable
         return true;
     }
 
-    // ── Private: shared helpers ──────────────────────────────────────────────
+    // -- Private: shared helpers ----------------------------------------------
 
     private (byte[] Data, int Width, int Height) LoadBaseTexture(TargetGroup group)
     {
@@ -2287,7 +2220,7 @@ public class PreviewService : IDisposable
         //
         // Must ignore IsVisible: when the user hides all emissive layers, HasEmissiveLayers()
         // returns false and the passthrough is skipped, breaking CanSwap on next drag. The
-        // group is still emissive-configured — Penumbra redirect, mtrl hook, and CT all
+        // group is still emissive-configured -- Penumbra redirect, mtrl hook, and CT all
         // remain active (emissive values just go to zero when nothing is visible).
         bool hasEmissiveConfigured = false;
         bool hasPbrConfigured = false;
@@ -2362,7 +2295,7 @@ public class PreviewService : IDisposable
         }
         else if (!string.IsNullOrEmpty(group.MtrlGamePath))
         {
-            // Drop stale marker when user switches Diffuse-emissive → Normal-only emissive.
+            // Drop stale marker when user switches Diffuse-emissive -> Normal-only emissive.
             skinCtMaterials.TryRemove(group.MtrlGamePath!, out _);
         }
 
@@ -2376,7 +2309,7 @@ public class PreviewService : IDisposable
             {
                 // skin.shpk + patched shader: per-layer emissive via ColorTable rows.
                 // 1) Allocate row pairs for each emissive layer.
-                // Reserve row pair 0 as "default no emissive" — non-decal areas
+                // Reserve row pair 0 as "default no emissive" -- non-decal areas
                 // have normal.alpha=0 which maps to row 0, so it must stay black.
                 var alloc = GetOrCreateAllocator(group);
                 if (!alloc.Scanned)
@@ -2391,8 +2324,8 @@ public class PreviewService : IDisposable
                         alloc.TryAllocate(layer);
                 }
 
-                // 2) Build ColorTable: Normal-only emissive → ramp builder so alpha gradient
-                //    drives intensity smoothly; Diffuse-emissive → per-layer rows.
+                // 2) Build ColorTable: Normal-only emissive -> ramp builder so alpha gradient
+                //    drives intensity smoothly; Diffuse-emissive -> per-layer rows.
                 byte[] ctBytes = !hasDiffuseEmissive && normalEmissiveLayer != null
                     ? MtrlFileWriter.BuildSkinColorTableNormalEmissive(normalEmissiveLayer)
                     : MtrlFileWriter.BuildSkinColorTablePerLayer(group.Layers);
@@ -2789,7 +2722,7 @@ public class PreviewService : IDisposable
             output[i] = 0;
         if (alphaMode == NormAlphaMode.RowIndex)
             for (int i = 1; i < needLen; i += 4)
-                output[i] = 255; // G=255 → rowBlend=0 → pure base row (no emissive) by default
+                output[i] = 255; // G=255 -> rowBlend=0 -> pure base row (no emissive) by default
 
         bool anyPainted = false;
         foreach (var layer in layers)
@@ -2884,7 +2817,7 @@ public class PreviewService : IDisposable
                     {
                         // alpha = discrete row index; G encodes smooth falloff so the shader
                         // can interpolate between emissive and base rows at decal edges.
-                        // G=0 → rowBlend=1 → full emissive row; G=255 → rowBlend=0 → base row.
+                        // G=0 -> rowBlend=1 -> full emissive row; G=255 -> rowBlend=0 -> base row.
                         output[oIdx + 3] = rowByteLocal;
                         output[oIdx + 1] = (byte)Math.Clamp((1f - maskValue) * 255f, 0, 255);
                     }
@@ -2986,7 +2919,7 @@ public class PreviewService : IDisposable
     /// shaders read `tablePair = round(g_SamplerIndex.r / 17)` and `rowBlend = 1 - g/255`,
     /// then `lerp(table[tablePair*2], table[tablePair*2+1], rowBlend)`. We write:
     ///   index.R = rowPair * 17  (selects which row pair this pixel uses)
-    ///   index.G = weight * 255  (weight=1 ⇒ G=255 ⇒ rowBlend=0 ⇒ reads layer override row)
+    ///   index.G = weight * 255  (weight=1 => G=255 => rowBlend=0 => reads layer override row)
     /// Vanilla B and A are preserved.
     /// </summary>
     private byte[]? CompositeIndexMap(List<DecalLayer> allocatedLayers, string indexDiskOrGamePath, int w, int h,
@@ -3132,7 +3065,7 @@ public class PreviewService : IDisposable
 
     // Picks the first visible emissive layer's animation params. For single-layer groups
     // (iris etc.) this is exact; for legacy multi-layer skin fallbacks it is a best-effort
-    // approximation — skin.shpk CT path handles per-layer anim directly and does not reach here.
+    // approximation -- skin.shpk CT path handles per-layer anim directly and does not reach here.
     private static (EmissiveAnimMode Mode, float Speed, float Amp, Vector3 ColorB) GetDominantEmissiveAnim(List<DecalLayer> layers)
     {
         foreach (var l in layers)
@@ -3303,9 +3236,10 @@ public class PreviewService : IDisposable
 
         if (patchedSkinShpkPath == null || !File.Exists(patchedSkinShpkPath))
         {
-            // v6: Ripple direction modes (radial/linear/bidir) + dual-color ripple.
-            // Payload 220 → 276 tokens with new col 6 sample and dir dispatch.
-            var candidate = Path.Combine(outputDir, "skin_ct_v6.shpk");
+            // v8: register-agnostic emissive replace (32/32 PSes vs 8/32 before) + gloss-mask
+            //     re-injection. Pulse anchor still r1-only, so animations degrade to static
+            //     emissive on non-r1 dest SceneKey variants (~24/32 states).
+            var candidate = Path.Combine(outputDir, "skin_ct_v8.shpk");
             if (!File.Exists(candidate))
             {
                 // Runtime patch: read vanilla skin.shpk from SqPack and patch in memory
@@ -3356,7 +3290,7 @@ public class PreviewService : IDisposable
 
         // Ensure EmissiveCBufferHook is enabled so skin-family materials flow through
         // the detour for one-shot ShaderPackage diagnostics (even if no CBuffer target
-        // is registered — skin CT materials skip SetTargetByPath entirely).
+        // is registered -- skin CT materials skip SetTargetByPath entirely).
         emissiveHook?.EnableForDiagnostics();
     }
 
@@ -3482,13 +3416,13 @@ public class PreviewService : IDisposable
         foreach (var (_, r) in applicable)
             currentUnion = DirtyRect.Union(currentUnion, r);
 
-        // dirty = current ∪ previous (or full on first init / no tracker)
+        // dirty = current U previous (or full on first init / no tracker)
         DirtyRect dirty = tracker == null
             ? DirtyRect.Full(w, h)
             : tracker.ComputeDirty(currentUnion, w, h);
 
         // Restore base pixels over the dirty region. Outside dirty, the output already
-        // equals base (since previous-cycle paint ⊆ previous_union ⊆ dirty), so no
+        // equals base (since previous-cycle paint subset_of previous_union subset_of dirty), so no
         // work needed there. This is the core CPU saving: 4096^2 -> dirty W*H bytes.
         if (!dirty.IsEmpty)
         {
@@ -3554,7 +3488,7 @@ public class PreviewService : IDisposable
                     // Previously this clipped the diffuse to the emissive feather-mask
                     // boundary (mv >= 0.5) so the diffuse couldn't extend past the
                     // emissive region. That caused the underlying decal to disappear
-                    // whenever the user combined "show decal" + emissive + a feather —
+                    // whenever the user combined "show decal" + emissive + a feather --
                     // and if emissive was black, nothing rendered at all.
                     // Now diffuse always paints the full decal shape; emissive coverage
                     // is independently controlled by the normal.a row-index composite.
