@@ -69,39 +69,43 @@ public partial class MainWindow
     private void DrawSettingsTab()
     {
         var topY = ImGui.GetCursorPosY();
-        DrawTopRightAboutCluster(topY);
 
-        using var scroll = ImRaii.Child("##SettingsScroll", new Vector2(-1, -1), false);
-        if (!scroll.Success) return;
-
-        DrawGeneralSection();
-
-        var shpkConflict = previewService.SkinShpkModConflict;
-        if (!string.IsNullOrEmpty(shpkConflict))
+        using (var scroll = ImRaii.Child("##SettingsScroll", new Vector2(-1, -1), false))
         {
-            ImGui.Spacing();
-            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
-            ImGui.TextWrapped("Detected another Mod modifying skin.shpk:");
-            ImGui.PopStyleColor();
-            ImGui.TextWrapped(shpkConflict);
-            ImGui.TextWrapped("When emissive is enabled, this plugin's skin.shpk will override that Mod's shader. " +
-                "If rendering issues occur, disable the conflicting Mod in Penumbra.");
+            if (scroll.Success)
+            {
+                DrawGeneralSection();
+
+                var shpkConflict = previewService.SkinShpkModConflict;
+                if (!string.IsNullOrEmpty(shpkConflict))
+                {
+                    ImGui.Spacing();
+                    ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
+                    ImGui.TextWrapped("Detected another Mod modifying skin.shpk:");
+                    ImGui.PopStyleColor();
+                    ImGui.TextWrapped(shpkConflict);
+                    ImGui.TextWrapped("When emissive is enabled, this plugin's skin.shpk will override that Mod's shader. " +
+                        "If rendering issues occur, disable the conflicting Mod in Penumbra.");
+                }
+
+                ImGui.Spacing();
+                ImGui.Spacing();
+
+                DrawInterfaceSection();
+                DrawPerformanceSection();
+                DrawAdvancedSection();
+            }
         }
 
-        ImGui.Spacing();
-        ImGui.Spacing();
-
-        DrawInterfaceSection();
-        DrawPerformanceSection();
-        DrawHttpSection();
-        DrawAdvancedSection();
+        // Draw the about cluster AFTER the scroll child so it always paints on top.
+        DrawTopRightAboutCluster(topY);
     }
 
     private void DrawGeneralSection()
     {
         var enabled = config.PluginEnabled;
-        if (UiHelpers.CheckboxWithHelp(Strings.T("checkbox.enable_plugin"), ref enabled,
-                Strings.T("tooltip.global_enable")))
+        if (UiHelpers.CheckboxWithTextAndHelp("##enablePlugin", Strings.T("checkbox.enable_plugin"),
+                Strings.T("tooltip.global_enable"), ref enabled))
         {
             config.PluginEnabled = enabled;
             config.Save();
@@ -131,21 +135,24 @@ public partial class MainWindow
         ImGui.Indent(8);
 
         var uvAA = config.UvWireframeAntiAlias;
-        if (UiHelpers.CheckboxWithHelp(Strings.T("checkbox.uv_aa"), ref uvAA, Strings.T("tooltip.uv_aa")))
+        if (UiHelpers.CheckboxWithTextAndHelp("##uvAA", Strings.T("checkbox.uv_aa"),
+                Strings.T("tooltip.uv_aa"), ref uvAA))
         {
             config.UvWireframeAntiAlias = uvAA;
             config.Save();
         }
 
         var uvCull = config.UvWireframeCulling;
-        if (UiHelpers.CheckboxWithHelp(Strings.T("checkbox.uv_cull"), ref uvCull, Strings.T("tooltip.uv_cull")))
+        if (UiHelpers.CheckboxWithTextAndHelp("##uvCull", Strings.T("checkbox.uv_cull"),
+                Strings.T("tooltip.uv_cull"), ref uvCull))
         {
             config.UvWireframeCulling = uvCull;
             config.Save();
         }
 
         var uvDedup = config.UvWireframeDedup;
-        if (UiHelpers.CheckboxWithHelp(Strings.T("checkbox.uv_dedup"), ref uvDedup, Strings.T("tooltip.uv_dedup")))
+        if (UiHelpers.CheckboxWithTextAndHelp("##uvDedup", Strings.T("checkbox.uv_dedup"),
+                Strings.T("tooltip.uv_dedup"), ref uvDedup))
         {
             config.UvWireframeDedup = uvDedup;
             config.Save();
@@ -224,21 +231,36 @@ public partial class MainWindow
         ImGui.Spacing();
     }
 
-    private void DrawHttpSection()
+    private void DrawAdvancedSection()
     {
-        if (!ImGui.CollapsingHeader(Strings.T("label.section_http")))
+        if (!ImGui.CollapsingHeader(Strings.T("label.section_advanced")))
             return;
 
         ImGui.Indent(8);
 
+        // -- Debug window --
+        if (ImGui.Button(Strings.T("label.open_debug_window")))
+        {
+            if (DebugWindowRef != null)
+                DebugWindowRef.IsOpen = true;
+        }
+        ImGui.SameLine();
+        UiHelpers.DrawInfoIcon();
+        UiHelpers.AddHoverText(Strings.T("tooltip.open_debug_help"));
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        // -- HTTP server --
         ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.7f, 0.7f, 0.7f, 1f));
         ImGui.TextWrapped(Strings.T("label.http_server_desc"));
         ImGui.PopStyleColor();
         ImGui.Spacing();
 
         var httpEnabled = config.HttpEnabled;
-        if (UiHelpers.CheckboxWithHelp(Strings.T("checkbox.http_enable"), ref httpEnabled,
-                Strings.T("tooltip.http_enable")))
+        if (UiHelpers.CheckboxWithTextAndHelp("##httpEn", Strings.T("checkbox.http_enable"),
+                Strings.T("tooltip.http_enable"), ref httpEnabled))
         {
             config.HttpEnabled = httpEnabled;
             config.Save();
@@ -265,42 +287,27 @@ public partial class MainWindow
         ImGui.Spacing();
     }
 
-    private void DrawAdvancedSection()
-    {
-        if (!ImGui.CollapsingHeader(Strings.T("label.section_advanced")))
-            return;
-
-        ImGui.Indent(8);
-
-        if (ImGui.Button(Strings.T("label.open_debug_window")))
-        {
-            if (DebugWindowRef != null)
-                DebugWindowRef.IsOpen = true;
-        }
-        UiHelpers.DrawHelpMarker(Strings.T("tooltip.open_debug_help"));
-
-        ImGui.Unindent(8);
-        ImGui.Spacing();
-    }
-
     private void DrawTopRightAboutCluster(float topY)
     {
-        var btnSize = ImGui.GetFrameHeight();
+        var pad = ImGui.GetStyle().FramePadding.X * 2f;
         var spacing = ImGui.GetStyle().ItemSpacing.X;
-        // 2 icon buttons stacked horizontally on the right.
-        var clusterWidth = btnSize * 2 + spacing;
+        const string ghLabel = "GitHub";
+        const string dcLabel = "Discord";
+        var ghW = ImGui.CalcTextSize(ghLabel).X + pad;
+        var dcW = ImGui.CalcTextSize(dcLabel).X + pad;
+        var clusterWidth = ghW + dcW + spacing;
         var rightX = ImGui.GetWindowContentRegionMax().X - clusterWidth;
         if (ImGui.GetScrollMaxY() > 0)
             rightX -= ImGui.GetStyle().ScrollbarSize;
         if (rightX < 0) return;
 
         ImGui.SetCursorPos(new Vector2(rightX, topY));
-        if (ImGuiComponents.IconButton(900, FontAwesomeIcon.Code))
+        if (ImGui.Button(ghLabel))
             OpenUrl(RepoUrl);
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.open_repo_help"));
 
         ImGui.SameLine();
-        if (ImGuiComponents.IconButton(901, FontAwesomeIcon.Comments))
+        if (ImGui.Button(dcLabel))
             OpenUrl(DiscordUrl);
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.open_discord_help"));
 

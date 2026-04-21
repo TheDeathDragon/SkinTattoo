@@ -72,7 +72,7 @@
     }
   },
   "tab": {
-    "settings": "设置",
+    "settings": "插件设置",
     "editor": "编辑器",
     "help": "操作说明",
     "changelog": "更新日志"
@@ -190,7 +190,6 @@
     "section_general": "通用",
     "section_interface": "界面",
     "section_performance": "性能",
-    "section_http": "HTTP 服务器",
     "section_advanced": "高级设置",
     "delete_modifier": "删除组合键",
     "open_debug_window": "打开调试窗口",
