@@ -84,6 +84,14 @@ public partial class MainWindow : Window, IDisposable
     private float copiedGroupSrcAspect;
     private TargetGroup? copiedGroupSource;
 
+    private const int HistoryMaxDepth = 100;
+    private const double HistoryCoalesceMs = 250;
+    private bool isReplayingHistory;
+    private SavedProjectSnapshot? historyBaselineSnapshot;
+    private string? historyBaselineSignature;
+    private DateTime historyLastCommitUtc = DateTime.MinValue;
+    private bool historyTrackerInitialized;
+
     // Init phase
     private enum InitPhase { Pending, Loading, Done }
     private InitPhase initPhase = InitPhase.Pending;
@@ -211,6 +219,233 @@ public partial class MainWindow : Window, IDisposable
         };
         previewCurrentLayerOnly = config.UvCurrentDecalOnly;
         showCanvasBaseTexture = config.UvShowBaseTexture;
+        EnsureHistoryState();
+    }
+
+    private void EnsureHistoryState()
+    {
+        config.UndoHistory ??= [];
+        config.RedoHistory ??= [];
+        TrimHistory(config.UndoHistory);
+        TrimHistory(config.RedoHistory);
+    }
+
+    private void InitializeHistoryTrackerIfNeeded()
+    {
+        if (historyTrackerInitialized) return;
+
+        EnsureHistoryState();
+        ResetHistoryTrackerBaseline(project.CreateSnapshot());
+        historyTrackerInitialized = true;
+    }
+
+    private void ResetHistoryTrackerBaseline(SavedProjectSnapshot? snapshot = null)
+    {
+        var baseline = snapshot ?? project.CreateSnapshot();
+        historyBaselineSnapshot = baseline;
+        historyBaselineSignature = ComputeSnapshotSignature(baseline);
+        historyLastCommitUtc = DateTime.UtcNow;
+    }
+
+    private static string ComputeSnapshotSignature(SavedProjectSnapshot snapshot)
+    {
+        var hash = new HashCode();
+
+        static void AddString(ref HashCode h, string? value)
+        {
+            h.Add(value ?? string.Empty, StringComparer.Ordinal);
+        }
+
+        hash.Add(snapshot.SelectedGroupIndex);
+        hash.Add(snapshot.TargetGroups.Count);
+
+        foreach (var group in snapshot.TargetGroups)
+        {
+            AddString(ref hash, group.Name);
+            AddString(ref hash, group.DiffuseGamePath);
+            AddString(ref hash, group.DiffuseDiskPath);
+            AddString(ref hash, group.NormGamePath);
+            AddString(ref hash, group.NormDiskPath);
+            AddString(ref hash, group.MtrlGamePath);
+            AddString(ref hash, group.MtrlDiskPath);
+            AddString(ref hash, group.MeshDiskPath);
+            AddString(ref hash, group.OrigDiffuseDiskPath);
+            AddString(ref hash, group.OrigNormDiskPath);
+            AddString(ref hash, group.OrigMtrlDiskPath);
+            hash.Add(group.SelectedLayerIndex);
+            hash.Add(group.MeshDiskPaths.Count);
+            foreach (var meshPath in group.MeshDiskPaths)
+                AddString(ref hash, meshPath);
+
+            hash.Add(group.Layers.Count);
+            foreach (var layer in group.Layers)
+            {
+                AddString(ref hash, layer.Name);
+                AddString(ref hash, layer.ImagePath);
+                AddString(ref hash, layer.ImageHash);
+                hash.Add(layer.UvCenterX);
+                hash.Add(layer.UvCenterY);
+                hash.Add(layer.UvScaleX);
+                hash.Add(layer.UvScaleY);
+                hash.Add(layer.RotationDeg);
+                hash.Add(layer.Opacity);
+                hash.Add(layer.BlendMode);
+                hash.Add(layer.IsVisible);
+                hash.Add(layer.AffectsDiffuse);
+                hash.Add(layer.AffectsEmissive);
+                hash.Add(layer.EmissiveColorR);
+                hash.Add(layer.EmissiveColorG);
+                hash.Add(layer.EmissiveColorB);
+                hash.Add(layer.EmissiveIntensity);
+                hash.Add(layer.AnimMode);
+                hash.Add(layer.AnimSpeed);
+                hash.Add(layer.AnimAmplitude);
+                hash.Add(layer.EmissiveColorB_R);
+                hash.Add(layer.EmissiveColorB_G);
+                hash.Add(layer.EmissiveColorB_B);
+                hash.Add(layer.AnimFreq);
+                hash.Add(layer.AnimDirMode);
+                hash.Add(layer.AnimDirAngle);
+                hash.Add(layer.AnimDualColor);
+                hash.Add(layer.EmissiveMask);
+                hash.Add(layer.EmissiveMaskFalloff);
+                hash.Add(layer.GradientAngleDeg);
+                hash.Add(layer.GradientScale);
+                hash.Add(layer.GradientOffset);
+                hash.Add(layer.Clip);
+                hash.Add(layer.Kind);
+                hash.Add(layer.TargetMap);
+                hash.Add(layer.AffectsSpecular);
+                hash.Add(layer.AffectsRoughness);
+                hash.Add(layer.AffectsMetalness);
+                hash.Add(layer.AffectsSheen);
+                hash.Add(layer.DiffuseColorR);
+                hash.Add(layer.DiffuseColorG);
+                hash.Add(layer.DiffuseColorB);
+                hash.Add(layer.SpecularColorR);
+                hash.Add(layer.SpecularColorG);
+                hash.Add(layer.SpecularColorB);
+                hash.Add(layer.Roughness);
+                hash.Add(layer.Metalness);
+                hash.Add(layer.SheenRate);
+                hash.Add(layer.SheenTint);
+                hash.Add(layer.SheenAperture);
+            }
+        }
+
+        return hash.ToHashCode().ToString();
+    }
+
+    private void TickHistoryTracker()
+    {
+        if (isReplayingHistory || initPhase != InitPhase.Done) return;
+
+        InitializeHistoryTrackerIfNeeded();
+
+        var currentSnapshot = project.CreateSnapshot();
+        var currentSignature = ComputeSnapshotSignature(currentSnapshot);
+        if (historyBaselineSignature == currentSignature)
+            return;
+
+        var now = DateTime.UtcNow;
+        var shouldPush = (now - historyLastCommitUtc).TotalMilliseconds > HistoryCoalesceMs
+                         || config.UndoHistory.Count == 0;
+
+        if (shouldPush && historyBaselineSnapshot != null)
+        {
+            EnsureHistoryState();
+            config.UndoHistory.Add(historyBaselineSnapshot);
+            TrimHistory(config.UndoHistory);
+            config.RedoHistory.Clear();
+            config.Save();
+        }
+
+        historyBaselineSnapshot = currentSnapshot;
+        historyBaselineSignature = currentSignature;
+        historyLastCommitUtc = now;
+    }
+
+    private static void TrimHistory(List<SavedProjectSnapshot> history)
+    {
+        if (history.Count <= HistoryMaxDepth) return;
+        history.RemoveRange(0, history.Count - HistoryMaxDepth);
+    }
+
+    private bool CanUndo => config.UndoHistory is { Count: > 0 };
+    private bool CanRedo => config.RedoHistory is { Count: > 0 };
+
+    private void Undo()
+    {
+        EnsureHistoryState();
+        if (config.UndoHistory.Count == 0) return;
+
+        var current = project.CreateSnapshot();
+        var index = config.UndoHistory.Count - 1;
+        var target = config.UndoHistory[index];
+        config.UndoHistory.RemoveAt(index);
+
+        config.RedoHistory.Add(current);
+        TrimHistory(config.RedoHistory);
+
+        isReplayingHistory = true;
+        try
+        {
+            project.ApplySnapshot(target, library);
+        }
+        finally
+        {
+            isReplayingHistory = false;
+        }
+
+        config.Save();
+        OnHistoryReplayed();
+    }
+
+    private void Redo()
+    {
+        EnsureHistoryState();
+        if (config.RedoHistory.Count == 0) return;
+
+        var current = project.CreateSnapshot();
+        var index = config.RedoHistory.Count - 1;
+        var target = config.RedoHistory[index];
+        config.RedoHistory.RemoveAt(index);
+
+        config.UndoHistory.Add(current);
+        TrimHistory(config.UndoHistory);
+
+        isReplayingHistory = true;
+        try
+        {
+            project.ApplySnapshot(target, library);
+        }
+        finally
+        {
+            isReplayingHistory = false;
+        }
+
+        config.Save();
+        OnHistoryReplayed();
+    }
+
+    private void OnHistoryReplayed()
+    {
+        ResetHistoryTrackerBaseline();
+
+        if (highlightActive)
+        {
+            highlightActive = false;
+            highlightGroupIndex = -1;
+            highlightLayerIndex = -1;
+            highlightFrameCounter = 0;
+        }
+
+        previewService.ClearTextureCache();
+        previewService.ResetSwapState();
+        previewService.NotifyMeshChanged();
+        previewService.ForceFullRedrawNextCycle();
+        SyncImagePathBuf();
+        MarkPreviewDirty(immediate: true);
     }
 
     private void SaveCanvasViewSettings()
@@ -252,6 +487,8 @@ public partial class MainWindow : Window, IDisposable
             lastMeshGroupRef = project.SelectedGroup;
             lastMeshPathKey = BuildMeshPathKey(project.SelectedGroup);
             previewDirty = false;
+            InitializeHistoryTrackerIfNeeded();
+            ResetHistoryTrackerBaseline();
         }
 
         var loading = initPhase != InitPhase.Done;
@@ -324,6 +561,8 @@ public partial class MainWindow : Window, IDisposable
 
             ImGui.EndTabBar();
         }
+
+        TickHistoryTracker();
 
     }
 
@@ -563,10 +802,28 @@ public partial class MainWindow : Window, IDisposable
         ImGui.SameLine();
         using (ImRaii.Disabled(project.SelectedLayer == null))
         {
-            if (UiHelpers.SquareIconButton(2, FontAwesomeIcon.Undo))
+            if (UiHelpers.SquareIconButton(2, FontAwesomeIcon.BorderNone))
                 ResetSelectedLayer();
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("tooltip.reset_layer"));
+
+        ImGui.SameLine();
+        using (ImRaii.Disabled(!CanUndo))
+        {
+            if (UiHelpers.SquareIconButton(201, FontAwesomeIcon.Undo))
+                Undo();
+        }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip(Strings.T("tooltip.undo"));
+
+        ImGui.SameLine();
+        using (ImRaii.Disabled(!CanRedo))
+        {
+            if (UiHelpers.SquareIconButton(202, FontAwesomeIcon.Redo))
+                Redo();
+        }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip(Strings.T("tooltip.redo"));
 
         ImGui.SameLine();
         if (UiHelpers.SquareIconButton(3, FontAwesomeIcon.Eraser))
@@ -633,7 +890,7 @@ public partial class MainWindow : Window, IDisposable
 
         using (ImRaii.Disabled(!penumbra.IsAvailable))
         {
-            if (UiHelpers.SquareIconButton(7, FontAwesomeIcon.Redo))
+            if (UiHelpers.SquareIconButton(7, FontAwesomeIcon.PaintBrush))
             {
                 previewService.ClearTextureCache();
                 previewService.ResetSwapState();

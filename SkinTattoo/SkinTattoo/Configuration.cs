@@ -91,6 +91,13 @@ public class SavedTargetGroup
 }
 
 [Serializable]
+public class SavedProjectSnapshot
+{
+    public List<SavedTargetGroup> TargetGroups { get; set; } = [];
+    public int SelectedGroupIndex { get; set; } = -1;
+}
+
+[Serializable]
 public class Configuration : IPluginConfiguration
 {
     public int Version { get; set; } = 4;
@@ -101,6 +108,8 @@ public class Configuration : IPluginConfiguration
 
     public List<SavedTargetGroup> TargetGroups { get; set; } = [];
     public int SelectedGroupIndex { get; set; } = -1;
+    public List<SavedProjectSnapshot> UndoHistory { get; set; } = [];
+    public List<SavedProjectSnapshot> RedoHistory { get; set; } = [];
 
     public bool MainWindowOpen { get; set; }
     public bool DebugWindowOpen { get; set; }

@@ -119,6 +119,8 @@
   "tooltip": {
     "editor3d": "3D Layer Editor",
     "reset_layer": "Reset current layer parameters",
+    "undo": "Undo",
+    "redo": "Redo",
     "clear_redirect": "Restore textures  --  clear Penumbra redirect",
     "export_base_tex": "Export base texture PNG (for external editing)",
     "export_uv_wireframe": "Export UV wireframe PNG (for overlay reference)",

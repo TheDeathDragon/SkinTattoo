@@ -119,6 +119,8 @@
   "tooltip": {
     "editor3d": "3D 图层编辑器",
     "reset_layer": "重置当前图层参数",
+    "undo": "撤销",
+    "redo": "重做",
     "clear_redirect": "还原贴图  -- 清除 Penumbra 重定向",
     "export_base_tex": "导出底图 PNG（用于 PS 编辑）",
     "export_uv_wireframe": "导出 UV 网格 PNG（用于 PS 叠加参考）",
