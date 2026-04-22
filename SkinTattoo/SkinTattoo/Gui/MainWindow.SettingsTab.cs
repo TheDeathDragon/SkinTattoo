@@ -250,6 +250,14 @@ public partial class MainWindow
                 DebugWindowRef.IsOpen = true;
         }
         ImGui.SameLine();
+        if (ImGui.Button(Strings.T("label.open_perf_window")))
+        {
+            if (PerformanceWindowRef != null)
+                PerformanceWindowRef.IsOpen = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(Strings.T("tooltip.open_perf_help"));
+        ImGui.SameLine();
         UiHelpers.DrawInfoIcon();
         UiHelpers.AddHoverText(Strings.T("tooltip.open_debug_help"));
 

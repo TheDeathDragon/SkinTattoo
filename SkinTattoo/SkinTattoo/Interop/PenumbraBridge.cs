@@ -145,10 +145,10 @@ public class PenumbraBridge : IDisposable
         }
     }
 
-    public Dictionary<ushort, ResourceTreeDto>? GetPlayerTrees()
+    public Dictionary<ushort, ResourceTreeDto>? GetPlayerTrees(bool withUiData = true)
     {
         if (!IsAvailable) return null;
-        try { return getPlayerResourceTrees.Invoke(withUiData: true); }
+        try { return getPlayerResourceTrees.Invoke(withUiData: withUiData); }
         catch (Exception ex)
         {
             log.Error(ex, "Failed to get player resource trees");

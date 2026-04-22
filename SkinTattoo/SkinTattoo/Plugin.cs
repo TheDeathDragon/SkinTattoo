@@ -47,6 +47,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WindowSystem windowSystem;
     private readonly MainWindow mainWindow;
     private readonly DebugWindow debugWindow;
+    private readonly PerformanceWindow performanceWindow;
     private readonly ModelEditorWindow modelEditorWindow;
     private readonly ModExportWindow modExportWindow;
     private readonly LibraryWindow libraryWindow;
@@ -98,12 +99,17 @@ public sealed class Plugin : IDalamudPlugin
 
         mainWindow = new MainWindow(project, previewService, penumbra, config, textureProvider, dataManager, skinMeshResolver, changelogService, keyState, libraryService, imageLoader);
         debugWindow = new DebugWindow();
+        performanceWindow = new PerformanceWindow(previewService, emissiveHook, libraryService, project)
+        {
+            HistoryCountsProvider = () => (mainWindow.UndoHistoryCount, mainWindow.RedoHistoryCount),
+        };
         modelEditorWindow = new ModelEditorWindow(project, previewService, penumbra, skinMeshResolver, pluginInterface.UiBuilder.DeviceHandle);
 
         modExportWindow = new ModExportWindow(project, modExportService, config);
         libraryWindow = new LibraryWindow(libraryService, textureProvider, config);
 
         mainWindow.DebugWindowRef = debugWindow;
+        mainWindow.PerformanceWindowRef = performanceWindow;
         mainWindow.ModelEditorWindowRef = modelEditorWindow;
         mainWindow.ModExportWindowRef = modExportWindow;
         mainWindow.LibraryWindowRef = libraryWindow;
@@ -116,6 +122,7 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem = new WindowSystem("SkinTattoo");
         windowSystem.AddWindow(mainWindow);
         windowSystem.AddWindow(debugWindow);
+        windowSystem.AddWindow(performanceWindow);
         windowSystem.AddWindow(modelEditorWindow);
         windowSystem.AddWindow(modExportWindow);
         windowSystem.AddWindow(libraryWindow);

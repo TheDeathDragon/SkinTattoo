@@ -62,9 +62,11 @@ public partial class MainWindow : Window, IDisposable
     // and live-tree swaps (character re-equipment) regardless of whether the 3D
     // editor is open.
     private TargetGroup? lastMeshGroupRef;
-    private string? lastMeshPathKey;
+    private int lastMeshPathHash;
     private DateTime lastLiveTreePollUtc = DateTime.MinValue;
-    private const double LiveTreePollIntervalSec = 1.0;
+    // 5s avoids churning Penumbra's GetPlayerTrees (big dict alloc) every second.
+    // Gear changes are rare and still get picked up within 5s.
+    private const double LiveTreePollIntervalSec = 5.0;
 
     // Panel widths (resizable)
     private float leftPanelWidth = -1;
@@ -173,6 +175,7 @@ public partial class MainWindow : Window, IDisposable
     ];
 
     public DebugWindow? DebugWindowRef { get; set; }
+    public PerformanceWindow? PerformanceWindowRef { get; set; }
     public ModelEditorWindow? ModelEditorWindowRef { get; set; }
     public ModExportWindow? ModExportWindowRef { get; set; }
     public LibraryWindow? LibraryWindowRef { get; set; }
@@ -370,6 +373,9 @@ public partial class MainWindow : Window, IDisposable
     private bool CanUndo => undoHistory.Count > 0;
     private bool CanRedo => redoHistory.Count > 0;
 
+    public int UndoHistoryCount => undoHistory.Count;
+    public int RedoHistoryCount => redoHistory.Count;
+
     private void Undo()
     {
         if (undoHistory.Count == 0) return;
@@ -517,7 +523,7 @@ public partial class MainWindow : Window, IDisposable
             initPhase = InitPhase.Done;
             // Seed the mesh tick so it doesn't re-fire the work init just did.
             lastMeshGroupRef = project.SelectedGroup;
-            lastMeshPathKey = BuildMeshPathKey(project.SelectedGroup);
+            lastMeshPathHash = BuildMeshPathHash(project.SelectedGroup);
             previewDirty = false;
             InitializeHistoryTrackerIfNeeded();
         }
@@ -662,15 +668,15 @@ public partial class MainWindow : Window, IDisposable
             if (lastMeshGroupRef != null && project.Groups.Contains(lastMeshGroupRef))
                 previewService.InvalidateEmissiveForGroup(lastMeshGroupRef);
             lastMeshGroupRef = group;
-            lastMeshPathKey = null;
+            lastMeshPathHash = 0;
             MarkPreviewDirty();
         }
 
-        var pathKey = BuildMeshPathKey(group);
-        if (pathKey != lastMeshPathKey)
+        var pathHash = BuildMeshPathHash(group);
+        if (pathHash != lastMeshPathHash)
         {
-            lastMeshPathKey = pathKey;
-            if (group != null && pathKey != null)
+            lastMeshPathHash = pathHash;
+            if (group != null && pathHash != 0)
             {
                 var captured = group;
                 Task.Run(() => previewService.LoadMeshForGroup(captured));
@@ -690,15 +696,35 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
-    private static string? BuildMeshPathKey(TargetGroup? group)
+    // int hash rather than string key so TickMeshState's per-frame identity check
+    // doesn't allocate. 0 means "no mesh state" (mapped from old null-string sentinel).
+    private static int BuildMeshPathHash(TargetGroup? group)
     {
-        if (group == null) return null;
+        if (group == null) return 0;
+        var hash = new HashCode();
         if (group.MeshSlots.Count > 0)
-            return "slots:" + string.Join("|",
-                group.MeshSlots.Select(s => s.GamePath + "#" + string.Join(",", s.MatIdx)));
-        if (group.VisibleMeshPaths.Count > 0)
-            return string.Join("|", group.VisibleMeshPaths);
-        return null;
+        {
+            hash.Add(1);
+            foreach (var slot in group.MeshSlots)
+            {
+                hash.Add(slot.GamePath, StringComparer.Ordinal);
+                foreach (var mi in slot.MatIdx) hash.Add(mi);
+            }
+            var h = hash.ToHashCode();
+            return h == 0 ? 1 : h;
+        }
+        if (!string.IsNullOrEmpty(group.MeshDiskPath) || group.MeshDiskPaths.Count > 0)
+        {
+            hash.Add(2);
+            if (!string.IsNullOrEmpty(group.MeshDiskPath))
+                hash.Add(group.MeshDiskPath, StringComparer.Ordinal);
+            foreach (var p in group.MeshDiskPaths)
+                if (!group.HiddenMeshPaths.Contains(p))
+                    hash.Add(p, StringComparer.Ordinal);
+            var h = hash.ToHashCode();
+            return h == 0 ? 1 : h;
+        }
+        return 0;
     }
 
     /// <summary>
@@ -714,7 +740,9 @@ public partial class MainWindow : Window, IDisposable
         if (group.MeshSlots.Count == 0) return;
         if (string.IsNullOrEmpty(group.LiveTreeHash)) return;
 
-        var trees = penumbra.GetPlayerTrees();
+        // Skip withUiData: the resolver only needs paths, not item names/icons.
+        // Skipping halves the allocation of the returned tree DTO graph.
+        var trees = penumbra.GetPlayerTrees(withUiData: false);
         if (trees == null) return;
 
         var newRes = skinMeshResolver.Resolve(group.MtrlGamePath!, trees);

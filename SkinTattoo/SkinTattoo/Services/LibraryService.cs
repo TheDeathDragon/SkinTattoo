@@ -46,6 +46,9 @@ public sealed class LibraryService
         public List<string> Folders { get; set; } = [];
     }
 
+    public int EntryCount { get { lock (sync) return entries.Count; } }
+    public int FolderCount { get { lock (sync) return folders.Count; } }
+
     public int ImportFolderTree(string sourceRoot)
     {
         if (string.IsNullOrWhiteSpace(sourceRoot) || !Directory.Exists(sourceRoot))

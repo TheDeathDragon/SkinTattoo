@@ -16,6 +16,9 @@
     "debug": {
       "title": "SkinTattoo Debug"
     },
+    "perf": {
+      "title": "SkinTattoo Performance"
+    },
     "resource": {
       "title": "Add Target Material"
     },
@@ -37,6 +40,58 @@
   },
   "changelog": {
     "empty": "No changelog entries available."
+  },
+  "perf": {
+    "section": {
+      "process": "Process (entire .NET process)",
+      "project": "Project state",
+      "preview": "Preview service caches",
+      "emissive_hook": "Emissive hook",
+      "library": "Library",
+      "debug": "Debug"
+    },
+    "managed_heap": "Managed heap",
+    "working_set": "Working set",
+    "private_bytes": "Private bytes",
+    "total_allocated": "Total allocated bytes (monotonic)",
+    "gc_gen0": "GC Gen0 count",
+    "gc_gen1": "GC Gen1 count",
+    "gc_gen2": "GC Gen2 count",
+    "groups": "Groups",
+    "layers": "Layers",
+    "undo": "Undo stack depth",
+    "redo": "Redo stack depth",
+    "baseline_info": "Baseline {0}s  |  allocated {1}  |  rate {2}",
+    "preview": {
+      "redirects": "Redirect paths",
+      "preview_disk": "Preview texture disk paths",
+      "preview_mtrl": "Preview mtrl disk paths",
+      "skin_ct": "Skin CT materials",
+      "base_tex_cache": "Base texture cache",
+      "composite_results": "Composite result cache",
+      "group_scratch": "Group scratch buffers",
+      "row_pairs": "Row-pair allocators",
+      "emissive_offsets": "Emissive CBuffer offset cache",
+      "last_applied_emissive": "Last applied emissive state",
+      "vanilla_ct": "Vanilla ColorTable cache",
+      "last_built_ct": "Last built ColorTable",
+      "mask_support": "Mask support cache",
+      "skin_shpk_ct": "skin.shpk CT decision cache",
+      "index_map": "Index map paths"
+    },
+    "hook": {
+      "enabled": "Enabled",
+      "targets": "Registered targets",
+      "offset_cache": "Offset cache",
+      "logged_misses": "Logged miss entries"
+    },
+    "library": {
+      "entries": "Entries",
+      "folders": "Folders"
+    },
+    "debug": {
+      "log_buffer": "Log buffer entries"
+    }
   },
   "library": {
     "search_hint": "Search filename...",
@@ -87,6 +142,9 @@
     "close": "Close",
     "browse": "Browse...",
     "refresh": "Refresh",
+    "force_gc": "Force GC",
+    "set_baseline": "Set baseline",
+    "clear_baseline": "Clear baseline",
     "refresh_resources": "Refresh Resources",
     "export_diagnostics": "Export All Diagnostics",
     "fit": "Fit",
@@ -169,7 +227,10 @@
     "delete_modifier_help": "Hold this modifier combination to enable layer/group delete buttons. Set to 'None' to allow direct clicking (dangerous).",
     "open_repo_help": "Open the GitHub repository in your browser",
     "open_discord_help": "Join the Discord community in your browser",
-    "open_debug_help": "Open the debug window to view runtime logs and internal state"
+    "open_debug_help": "Open the debug window to view runtime logs and internal state",
+    "open_perf_help": "Open performance monitor\nView process memory and plugin cache sizes",
+    "force_gc": "Trigger an immediate GC.Collect to reclaim managed objects\nUseful for diffing memory before/after to confirm leaks",
+    "set_baseline": "Pin the current snapshot as baseline\nAll values will then show delta against it"
   },
   "label": {
     "diffuse": "Diffuse",
@@ -197,6 +258,8 @@
     "section_advanced": "Advanced",
     "delete_modifier": "Delete modifier",
     "open_debug_window": "Open debug log",
+    "open_perf_window": "Performance",
+    "auto_refresh": "Auto refresh",
     "penumbra_connected": "Penumbra Connected",
     "penumbra_disconnected": "Penumbra Disconnected",
     "center_x": "Center X",

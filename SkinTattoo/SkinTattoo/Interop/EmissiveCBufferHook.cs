@@ -21,7 +21,6 @@ namespace SkinTattoo.Interop;
 public unsafe class EmissiveCBufferHook : IDisposable
 {
     private const uint CrcEmissiveColor = 0x38A64362;
-    private const uint CrcSamplerTable = 0x2005679F;
 
     private readonly IPluginLog log;
     private readonly Hook<OnRenderMaterialDelegate> hook;
@@ -39,11 +38,6 @@ public unsafe class EmissiveCBufferHook : IDisposable
     private readonly ConcurrentDictionary<nint, int> offsetCache = new();
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private readonly System.Collections.Generic.HashSet<string> loggedMisses = new(StringComparer.OrdinalIgnoreCase);
-
-    // Diagnostic: one-shot log per MaterialResourceHandle to dump ShaderPackage info
-    // for skin-family materials. Verifies whether the patched skin.shpk is actually bound
-    // to the face/body/iris mtrl during rendering.
-    private readonly ConcurrentDictionary<nint, byte> shpkDiagLogged = new();
 
     private bool enabled;
     private int errorCount;
@@ -65,18 +59,6 @@ public unsafe class EmissiveCBufferHook : IDisposable
             hook.Enable();
             enabled = true;
             DebugServer.AppendLog("[EmissiveHook] Enabled");
-        }
-    }
-
-    /// <summary>Force-enable hook without setting any target (diagnostics only).
-    /// Used to capture ShaderPackage info for skin-family materials during rendering.</summary>
-    public void EnableForDiagnostics()
-    {
-        if (!enabled)
-        {
-            hook.Enable();
-            enabled = true;
-            DebugServer.AppendLog("[EmissiveHook] Enabled (diagnostics)");
         }
     }
 
@@ -354,6 +336,15 @@ public unsafe class EmissiveCBufferHook : IDisposable
 
     public bool HasTargets => !targets.IsEmpty;
 
+    public record struct DiagStats(int Targets, int OffsetCache, int LoggedMisses, bool Enabled);
+
+    public DiagStats GetDiagStats()
+    {
+        int missCount;
+        lock (loggedMisses) missCount = loggedMisses.Count;
+        return new DiagStats(targets.Count, offsetCache.Count, missCount, enabled);
+    }
+
     private nint Detour(nint modelRenderer, nint outFlags, nint param, nint materialPtr, uint materialIndex)
     {
         if (materialPtr != 0)
@@ -362,11 +353,11 @@ public unsafe class EmissiveCBufferHook : IDisposable
             {
                 var material = (Material*)materialPtr;
                 var mrh = material->MaterialResourceHandle;
-                if (mrh != null)
+                if (mrh != null
+                    && !targets.IsEmpty
+                    && targets.TryGetValue((nint)mrh, out var data))
                 {
-                    LogSkinShpkDiag(mrh);
-                    if (!targets.IsEmpty && targets.TryGetValue((nint)mrh, out var data))
-                        PatchEmissive(material, mrh, ComputeModulatedColor(data));
+                    PatchEmissive(material, mrh, ComputeModulatedColor(data));
                 }
             }
             catch (Exception ex)
@@ -377,66 +368,6 @@ public unsafe class EmissiveCBufferHook : IDisposable
         }
 
         return hook.Original(modelRenderer, outFlags, param, materialPtr, materialIndex);
-    }
-
-    /// <summary>One-shot per-mrh diagnostic for skin-family materials. Reports ShaderPackage
-    /// resource counts + whether g_SamplerTable (patched skin.shpk marker) is declared.</summary>
-    private void LogSkinShpkDiag(MaterialResourceHandle* mrh)
-    {
-        var key = (nint)mrh;
-        if (shpkDiagLogged.ContainsKey(key)) return;
-
-        string fileName;
-        try { fileName = ((ResourceHandle*)mrh)->FileName.ToString(); }
-        catch { return; }
-        if (string.IsNullOrEmpty(fileName)) return;
-
-        var lower = fileName.ToLowerInvariant();
-        bool isSkinFamily = lower.Contains("_fac_") || lower.Contains("_bibo")
-                            || lower.Contains("_iri_") || lower.Contains("/body/")
-                            || lower.Contains("/face/")
-                            || lower.Contains("/preview_g") || lower.Contains("\\preview_g");
-        if (!isSkinFamily) return;
-
-        shpkDiagLogged[key] = 1;
-
-        var shpkHandle = mrh->ShaderPackageResourceHandle;
-        if (shpkHandle == null)
-        {
-            DebugServer.AppendLog($"[ShpkDiag] {fileName}: shpkHandle=null");
-            return;
-        }
-        var shpk = shpkHandle->ShaderPackage;
-        if (shpk == null)
-        {
-            DebugServer.AppendLog($"[ShpkDiag] {fileName}: shpk=null");
-            return;
-        }
-
-        bool hasSamplerTable = false;
-        var samplers = shpk->SamplersSpan;
-        for (int i = 0; i < samplers.Length; i++)
-            if (samplers[i].CRC == CrcSamplerTable) { hasSamplerTable = true; break; }
-
-        bool hasEmissive = false;
-        int emOff = -1, emSize = -1;
-        var elems = shpk->MaterialElementsSpan;
-        for (int i = 0; i < elems.Length; i++)
-            if (elems[i].CRC == CrcEmissiveColor)
-            {
-                hasEmissive = true; emOff = elems[i].Offset; emSize = elems[i].Size; break;
-            }
-
-        string shpkFileName = "?";
-        try { shpkFileName = ((ResourceHandle*)shpkHandle)->FileName.ToString(); } catch { }
-
-        DebugServer.AppendLog(
-            $"[ShpkDiag] {fileName} -> {shpkFileName} shpk=0x{(nint)shpk:X} " +
-            $"vs={shpk->VertexShaders.Vector.Count} ps={shpk->PixelShaders.Vector.Count} " +
-            $"smp={shpk->SamplerCount} tex={shpk->TextureCount} " +
-            $"matKeys={shpk->MaterialKeyCount} " +
-            $"g_SamplerTable={hasSamplerTable} " +
-            $"g_EmissiveColor={hasEmissive}(off={emOff},sz={emSize})");
     }
 
     private Vector3 ComputeModulatedColor(TargetData data)

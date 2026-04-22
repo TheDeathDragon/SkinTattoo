@@ -16,6 +16,9 @@
     "debug": {
       "title": "SkinTattoo 调试"
     },
+    "perf": {
+      "title": "SkinTattoo 性能监控"
+    },
     "resource": {
       "title": "添加目标材质"
     },
@@ -31,6 +34,58 @@
   },
   "changelog": {
     "empty": "暂无更新日志"
+  },
+  "perf": {
+    "section": {
+      "process": "进程（全局，含整个 .NET 进程）",
+      "project": "项目状态",
+      "preview": "预览服务缓存",
+      "emissive_hook": "自发光 Hook",
+      "library": "素材库",
+      "debug": "调试"
+    },
+    "managed_heap": "托管堆",
+    "working_set": "工作集",
+    "private_bytes": "私有内存",
+    "total_allocated": "累计分配字节（单调递增）",
+    "gc_gen0": "GC Gen0 次数",
+    "gc_gen1": "GC Gen1 次数",
+    "gc_gen2": "GC Gen2 次数",
+    "groups": "图层组",
+    "layers": "图层总数",
+    "undo": "撤销栈深度",
+    "redo": "重做栈深度",
+    "baseline_info": "对比基线 {0}s  |  新增分配 {1}  |  分配速率 {2}",
+    "preview": {
+      "redirects": "重定向路径",
+      "preview_disk": "预览贴图磁盘映射",
+      "preview_mtrl": "预览 mtrl 磁盘映射",
+      "skin_ct": "skin CT 材质集",
+      "base_tex_cache": "底图缓存",
+      "composite_results": "合成结果缓存",
+      "group_scratch": "合成暂存",
+      "row_pairs": "行对分配器",
+      "emissive_offsets": "自发光 CBuffer 偏移缓存",
+      "last_applied_emissive": "上次下发的自发光状态",
+      "vanilla_ct": "原版 ColorTable 缓存",
+      "last_built_ct": "最新构建的 ColorTable",
+      "mask_support": "mask 兼容性缓存",
+      "skin_shpk_ct": "skin.shpk CT 判定缓存",
+      "index_map": "索引映射路径"
+    },
+    "hook": {
+      "enabled": "启用状态",
+      "targets": "注册目标",
+      "offset_cache": "偏移缓存",
+      "logged_misses": "未命中日志条目"
+    },
+    "library": {
+      "entries": "条目数",
+      "folders": "文件夹数"
+    },
+    "debug": {
+      "log_buffer": "日志缓冲条数"
+    }
   },
   "library": {
     "search_hint": "搜索文件名...",
@@ -87,6 +142,9 @@
     "close": "关闭",
     "browse": "浏览...",
     "refresh": "刷新",
+    "force_gc": "强制 GC",
+    "set_baseline": "记为基线",
+    "clear_baseline": "清除基线",
     "refresh_resources": "刷新资源",
     "export_diagnostics": "导出全部诊断",
     "fit": "适应",
@@ -169,7 +227,10 @@
     "delete_modifier_help": "点击删除按钮（图层/组）时需要按住此组合键才能生效。设为「无」表示删除按钮可直接点击（危险）。",
     "open_repo_help": "在浏览器中打开 GitHub 仓库主页",
     "open_discord_help": "在浏览器中加入 Discord 社区",
-    "open_debug_help": "打开调试窗口查看插件运行日志和内部状态"
+    "open_debug_help": "打开调试窗口查看插件运行日志和内部状态",
+    "open_perf_help": "打开性能监控\n查看进程内存与插件各缓存的条目数",
+    "force_gc": "立即触发一次 GC.Collect 回收托管对象\n常用于对比前后内存以确认泄漏",
+    "set_baseline": "将当前快照记为基线\n之后所有数字会显示相对基线的增量"
   },
   "label": {
     "diffuse": "贴图",
@@ -197,6 +258,8 @@
     "section_advanced": "高级设置",
     "delete_modifier": "删除组合键",
     "open_debug_window": "打开调试日志",
+    "open_perf_window": "性能监控",
+    "auto_refresh": "自动刷新",
     "penumbra_connected": "Penumbra 已连接",
     "penumbra_disconnected": "Penumbra 未连接",
     "center_x": "中心 X",

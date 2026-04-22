@@ -314,6 +314,45 @@ public class PreviewService : IDisposable
     /// <summary>Number of paths currently initialized for GPU swap.</summary>
     public int InitializedPathCount => initializedRedirects.Count;
 
+    public record struct DiagStats(
+        int InitializedRedirects,
+        int PreviewDiskPaths,
+        int PreviewMtrlDiskPaths,
+        int SkinCtMaterials,
+        int BaseTextureCache,
+        int EmissiveOffsets,
+        int RowPairAllocators,
+        int GroupScratch,
+        int CompositeResults,
+        int VanillaColorTables,
+        int LastBuiltColorTables,
+        int MaskSupportCache,
+        int SkinShpkCtCache,
+        int LastAppliedEmissive,
+        int IndexMapGamePaths);
+
+    public DiagStats GetDiagStats()
+    {
+        int lastAppliedCount;
+        lock (lastAppliedEmissive) lastAppliedCount = lastAppliedEmissive.Count;
+        return new DiagStats(
+            initializedRedirects.Count,
+            previewDiskPaths.Count,
+            previewMtrlDiskPaths.Count,
+            skinCtMaterials.Count,
+            baseTextureCache.Count,
+            emissiveOffsets.Count,
+            rowPairAllocators.Count,
+            groupScratch.Count,
+            compositeResults.Count,
+            vanillaColorTables.Count,
+            lastBuiltColorTables.Count,
+            maskSupportCache.Count,
+            skinShpkCtCache.Count,
+            lastAppliedCount,
+            indexMapGamePaths.Count);
+    }
+
     // 3D editor integration: per-group composite results keyed by diffuseGamePath.
     // Dirty rect lets the main thread upload only the changed region (UpdateSubresource
     // with a ResourceRegion) instead of re-creating + re-uploading the whole 64MB texture.
@@ -514,20 +553,29 @@ public class PreviewService : IDisposable
     private DecalProject? activeProject;
 
     /// <summary>Call from Draw() every frame to apply completed async swaps.</summary>
+    // Throttle opportunistic re-arming. SetTargetByPath internally normalizes paths
+    // (Replace + ToLowerInvariant on the input plus every candidate's FileName.ToString)
+    // which allocates ~60+ strings per call on a full character. Running that every
+    // frame was burning ~70 MiB/s of short-lived allocations -> constant Gen0 GC hitches.
+    // 0.5 Hz is fast enough to re-arm after a Full Redraw while the user is waiting.
+    private DateTime lastMaintainUtc = DateTime.MinValue;
+    private const double MaintainIntervalSec = 2.0;
+
     public unsafe void ApplyPendingSwaps()
     {
-        // Opportunistic vanilla CT cache attempt  -- runs every frame but is idempotent
-        // and only fires for materials not yet cached. Catches the case where Full Redraw
-        // happened in an earlier frame and the GPU is now ready to read.
-        if (activeProject != null)
+        var maintainNow = DateTime.UtcNow;
+        var shouldMaintain = (maintainNow - lastMaintainUtc).TotalSeconds >= MaintainIntervalSec;
+        if (shouldMaintain) lastMaintainUtc = maintainNow;
+
+        // Opportunistic vanilla CT cache attempt  -- idempotent, only fires for materials
+        // not yet cached. Catches the case where Full Redraw happened in an earlier frame
+        // and the GPU is now ready to read.
+        if (shouldMaintain && activeProject != null)
             TryCacheVanillaColorTables(activeProject);
 
-        // Opportunistic EmissiveCBufferHook re-arming: on plugin open the first Full Redraw
-        // does not produce an in-place batch, and the player's CharacterBase may still be
-        // mid-redraw when any early SetTargetByPath fires. Running it every frame (cheap
-        // pointer scan; hook dedupes internally) guarantees pulse targets arm as soon as
-        // the fresh material handles exist -- no user wiggle required.
-        if (activeProject != null)
+        // Opportunistic EmissiveCBufferHook re-arming after Full Redraw. Throttled because
+        // SetTargetByPath is expensive (string normalization over all materials).
+        if (shouldMaintain && activeProject != null)
             MaintainEmissiveHookTargets(activeProject);
 
         var batch = Interlocked.Exchange(ref pendingBatch, null);
@@ -3283,10 +3331,6 @@ public class PreviewService : IDisposable
             catch (Exception ex) { DebugServer.AppendLog($"[ShpkPatch] Dump failed: {ex.Message}"); }
         }
 
-        // Ensure EmissiveCBufferHook is enabled so skin-family materials flow through
-        // the detour for one-shot ShaderPackage diagnostics (even if no CBuffer target
-        // is registered -- skin CT materials skip SetTargetByPath entirely).
-        emissiveHook?.EnableForDiagnostics();
     }
 
     /// <summary>
