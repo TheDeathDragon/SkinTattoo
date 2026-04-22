@@ -1,6 +1,20 @@
 {
   "versions": [
     {
+      "version": "0.2.7",
+      "date": "2026-04-22",
+      "en": [
+        { "text": "Added undo / redo" },
+        { "text": "Added performance monitor" },
+        { "text": "Fixed memory leak" }
+      ],
+      "zh": [
+        { "text": "添加了撤销和重做功能" },
+        { "text": "添加性能监控" },
+        { "text": "修复内存泄漏问题" }
+      ]
+    },
+    {
       "version": "0.2.6",
       "date": "2026-04-21",
       "en": [

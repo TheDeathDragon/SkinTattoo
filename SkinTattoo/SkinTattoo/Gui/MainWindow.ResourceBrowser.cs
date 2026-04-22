@@ -936,11 +936,6 @@ public partial class MainWindow
         config.Save();
     }
 
-    // -- Group mesh reload (resolver-aware, with legacy fallback) -------------
-
-    private void ReloadGroupMesh(TargetGroup group)
-        => previewService.LoadMeshForGroup(group);
-
     // -- Resource tree helpers ------------------------------------------------
 
     private void RefreshResources()

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -5,6 +6,7 @@ using Penumbra.Api.Enums;
 using Penumbra.Api.Helpers;
 using SkinTattoo.Core;
 using SkinTattoo.Http;
+using SkinTattoo.Interop;
 
 namespace SkinTattoo.Mesh;
 
@@ -19,6 +21,41 @@ public sealed class SkinMeshResolver
     public SkinMeshResolver(MeshExtractor meshExtractor)
     {
         this.meshExtractor = meshExtractor;
+    }
+
+    /// <summary>
+    /// Re-resolve against the current Penumbra resource tree and write fresh mesh slot
+    /// state into <paramref name="group"/>. Preserves manually-added MeshDiskPaths that
+    /// aren't covered by the resolver result. Returns false if the resolver couldn't
+    /// produce a valid resolution (in which case group fields are left untouched).
+    /// </summary>
+    public bool ReResolveInto(TargetGroup group, PenumbraBridge penumbra)
+    {
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return false;
+
+        var trees = penumbra.GetPlayerTrees(withUiData: false);
+        if (trees == null) return false;
+
+        var resolution = Resolve(group.MtrlGamePath!, trees);
+        if (!resolution.Success) return false;
+
+        var resolvedPaths = new HashSet<string>(
+            resolution.MeshSlots.Select(s => s.DiskPath ?? s.GamePath),
+            StringComparer.OrdinalIgnoreCase);
+        var manualExtras = group.MeshDiskPaths
+            .Where(p => !resolvedPaths.Contains(p))
+            .ToList();
+
+        group.MeshSlots = resolution.MeshSlots;
+        group.LiveTreeHash = resolution.LiveTreeHash;
+        group.MeshGamePath = resolution.PrimaryMdlGamePath;
+        group.MeshDiskPath = resolution.PrimaryMdlDiskPath;
+        group.TargetMatIdx = resolution.MeshSlots[0].MatIdx;
+        foreach (var extra in manualExtras)
+            if (!group.MeshDiskPaths.Contains(extra))
+                group.MeshDiskPaths.Add(extra);
+
+        return true;
     }
 
     public sealed class Resolution

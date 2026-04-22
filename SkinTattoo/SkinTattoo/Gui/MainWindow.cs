@@ -935,16 +935,13 @@ public partial class MainWindow : Window, IDisposable
         ImGui.SameLine();
 
         var group = project.SelectedGroup;
-        if (group != null && (!string.IsNullOrEmpty(group.MeshGamePath) || group.AllMeshPaths.Count > 0))
+        if (group != null && !string.IsNullOrEmpty(group.MtrlGamePath))
         {
             var meshIcon = previewService.CurrentMesh == null ? FontAwesomeIcon.Cube : FontAwesomeIcon.SyncAlt;
             if (UiHelpers.SquareIconButton(4, meshIcon))
-            {
-                ReloadGroupMesh(group);
-                previewService.NotifyMeshChanged();
-            }
+                previewService.ReResolveAndReloadMesh(group, skinMeshResolver);
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(previewService.CurrentMesh == null ? Strings.T("tooltip.load_mesh") : Strings.T("tooltip.reload_mesh"));
+                ImGui.SetTooltip(Strings.T("tooltip.re_resolve_tip"));
             ImGui.SameLine();
         }
 

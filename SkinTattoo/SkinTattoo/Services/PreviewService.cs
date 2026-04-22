@@ -475,6 +475,19 @@ public class PreviewService : IDisposable
     /// group switch, plugin startup project init) should funnel through here
     /// so the legacy paths can never accidentally drop slots.
     /// </summary>
+    /// <summary>Re-run the Penumbra resolver against the current character state,
+    /// update the group's mesh slot state, then reload the mesh and notify subscribers.
+    /// Unified entry point used by both the main toolbar refresh button and the 3D
+    /// editor's refresh button  -- resolves UV mismatches after gear/mod changes
+    /// without requiring the user to open the 3D editor.</summary>
+    public bool ReResolveAndReloadMesh(TargetGroup group, SkinMeshResolver resolver)
+    {
+        resolver.ReResolveInto(group, penumbra);
+        var ok = LoadMeshForGroup(group);
+        NotifyMeshChanged();
+        return ok;
+    }
+
     public bool LoadMeshForGroup(TargetGroup group)
     {
         if (group.MeshSlots.Count > 0)

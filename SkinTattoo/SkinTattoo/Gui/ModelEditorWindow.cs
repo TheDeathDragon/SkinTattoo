@@ -108,34 +108,7 @@ public class ModelEditorWindow : Window, IDisposable
         using (ImRaii.Disabled(!canReResolve))
         {
             if (ImGui.Button(Strings.T("button.re_resolve")))
-            {
-                var trees = penumbra.GetPlayerTrees();
-                var resolution = skinMeshResolver.Resolve(reGroup!.MtrlGamePath!, trees);
-                if (resolution.Success)
-                {
-                    // Preserve manually added MeshDiskPaths that aren't in the
-                    // resolver results (user may have added extra models).
-                    var resolvedPaths = new HashSet<string>(
-                        resolution.MeshSlots.Select(s => s.DiskPath ?? s.GamePath),
-                        StringComparer.OrdinalIgnoreCase);
-                    var manualExtras = reGroup.MeshDiskPaths
-                        .Where(p => !resolvedPaths.Contains(p))
-                        .ToList();
-
-                    reGroup.MeshSlots = resolution.MeshSlots;
-                    reGroup.LiveTreeHash = resolution.LiveTreeHash;
-                    reGroup.MeshGamePath = resolution.PrimaryMdlGamePath;
-                    reGroup.MeshDiskPath = resolution.PrimaryMdlDiskPath;
-                    reGroup.TargetMatIdx = resolution.MeshSlots[0].MatIdx;
-                    foreach (var extra in manualExtras)
-                        if (!reGroup.MeshDiskPaths.Contains(extra))
-                            reGroup.MeshDiskPaths.Add(extra);
-
-                    previewService.LoadMeshForGroup(reGroup);
-                    previewService.NotifyMeshChanged();
-                }
-                // Resolver failed: keep current models as-is (don't clear manual adds)
-            }
+                previewService.ReResolveAndReloadMesh(reGroup!, skinMeshResolver);
         }
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             ImGui.SetTooltip(Strings.T("tooltip.re_resolve_tip"));
