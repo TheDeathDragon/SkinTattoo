@@ -34,6 +34,7 @@
   },
   "tab": {
     "settings": "Settings",
+    "project": "Project",
     "editor": "Editor",
     "help": "Help",
     "changelog": "Changelog"
@@ -173,6 +174,11 @@
     "open_library": "Library"
     ,"confirm": "Confirm"
     ,"cancel": "Cancel"
+    ,"project_new": "New"
+    ,"project_rename": "Rename"
+    ,"project_load": "Load"
+    ,"project_import": "Import"
+    ,"project_export": "Export"
   },
   "tooltip": {
     "editor3d": "3D Layer Editor",
@@ -301,6 +307,95 @@
     "tex_normal_header": "Texture (Normal)",
     "copy_clipboard": "Copy to Clipboard (markdown)",
     "canvas_map": "Preview Map"
+  },
+  "project": {
+    "table": {
+      "name": "Project",
+      "groups": "Groups",
+      "layers": "Layers",
+      "modified": "Last Modified"
+    },
+    "badge": {
+      "loaded": "Loaded"
+    },
+    "button": {
+      "new": "New",
+      "rename": "Rename",
+      "load": "Load",
+      "delete": "Delete",
+      "import": "Import",
+      "export": "Export"
+    },
+    "delete": {
+      "confirm": "Delete project \"{0}\"?"
+    },
+    "rename": {
+      "prompt": "Enter a new project name"
+    },
+    "export": {
+      "options": {
+        "title": "Export options",
+        "include_images": "Include images in exported project"
+      }
+    },
+    "dialog": {
+      "import": "Import Project",
+      "export": "Export Project"
+    },
+    "tooltip": {
+      "new": "Create a new empty project",
+      "import": "Import a project file",
+      "load": "Load this project into the editor",
+      "export_row": "Export this project to a file",
+      "delete": "Delete this project",
+      "delete_requires_modifier": "Hold configured delete modifiers to enable delete",
+      "rename_inline": "Double-click to rename; Enter saves, Escape cancels"
+    },
+    "notify": {
+      "new": {
+        "title": "Project Created",
+        "content": "Started a new empty project"
+      },
+      "rename": {
+        "title": "Project Renamed",
+        "content": "Project folder renamed successfully"
+      },
+      "rename_failed": {
+        "title": "Rename Failed",
+        "content": "Could not rename project"
+      },
+      "delete": {
+        "title": "Project Deleted",
+        "content": "Deleted project: {0}"
+      },
+      "delete_failed": {
+        "title": "Delete Failed",
+        "content": "Could not delete project"
+      },
+      "load": {
+        "title": "Project Loaded",
+        "content": "Loaded project: {0}"
+      },
+      "import": {
+        "title": "Project Imported",
+        "content": "Imported project: {0}"
+      },
+      "import_failed": {
+        "title": "Import Failed",
+        "content": "Could not import project"
+      },
+      "export": {
+        "title": "Project Saved",
+        "content": "Saved project: {0}"
+      },
+      "export_with_path": {
+        "content": "Saved project to: {0}"
+      },
+      "export_failed": {
+        "title": "Save Failed",
+        "content": "Could not save project"
+      }
+    }
   },
   "section": {
     "image": "Layer Image",

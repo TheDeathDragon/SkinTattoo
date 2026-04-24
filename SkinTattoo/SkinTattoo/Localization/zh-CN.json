@@ -130,6 +130,7 @@
   },
   "tab": {
     "settings": "插件设置",
+    "project": "项目",
     "editor": "编辑器",
     "help": "操作说明",
     "changelog": "更新日志"
@@ -173,6 +174,11 @@
     "open_library": "素材库",
     "confirm": "确认",
     "cancel": "取消"
+    ,"project_new": "新建"
+    ,"project_rename": "重命名"
+    ,"project_load": "加载"
+    ,"project_import": "导入"
+    ,"project_export": "导出"
   },
   "tooltip": {
     "editor3d": "3D 图层编辑器",
@@ -301,6 +307,95 @@
     "tex_normal_header": "贴图 (Normal)",
     "copy_clipboard": "一键复制全部 (markdown)",
     "canvas_map": "预览贴图"
+  },
+  "project": {
+    "table": {
+      "name": "项目",
+      "groups": "组数",
+      "layers": "图层数",
+      "modified": "最后修改"
+    },
+    "badge": {
+      "loaded": "已加载"
+    },
+    "button": {
+      "new": "新建",
+      "rename": "重命名",
+      "load": "加载",
+      "delete": "删除",
+      "import": "导入",
+      "export": "导出"
+    },
+    "delete": {
+      "confirm": "删除项目 \"{0}\"？"
+    },
+    "rename": {
+      "prompt": "请输入新的项目名称"
+    },
+    "export": {
+      "options": {
+        "title": "导出选项",
+        "include_images": "在导出项目中包含图片"
+      }
+    },
+    "dialog": {
+      "import": "导入项目",
+      "export": "导出项目"
+    },
+    "tooltip": {
+      "new": "创建新的空白项目",
+      "import": "导入项目文件",
+      "load": "将此项目加载到编辑器",
+      "export_row": "将此项目导出为文件",
+      "delete": "删除此项目",
+      "delete_requires_modifier": "按住已配置的删除组合键后可删除",
+      "rename_inline": "双击重命名；Enter 保存，Escape 取消"
+    },
+    "notify": {
+      "new": {
+        "title": "项目已创建",
+        "content": "已开始新的空白项目"
+      },
+      "rename": {
+        "title": "项目已重命名",
+        "content": "项目文件夹重命名成功"
+      },
+      "rename_failed": {
+        "title": "重命名失败",
+        "content": "无法重命名项目"
+      },
+      "delete": {
+        "title": "项目已删除",
+        "content": "已删除项目：{0}"
+      },
+      "delete_failed": {
+        "title": "删除失败",
+        "content": "无法删除项目"
+      },
+      "load": {
+        "title": "项目已加载",
+        "content": "已加载项目：{0}"
+      },
+      "import": {
+        "title": "项目已导入",
+        "content": "已导入项目：{0}"
+      },
+      "import_failed": {
+        "title": "导入失败",
+        "content": "无法导入项目"
+      },
+      "export": {
+        "title": "项目已保存",
+        "content": "已保存项目：{0}"
+      },
+      "export_with_path": {
+        "content": "项目已保存到：{0}"
+      },
+      "export_failed": {
+        "title": "保存失败",
+        "content": "无法保存项目"
+      }
+    }
   },
   "section": {
     "image": "图层图片",
