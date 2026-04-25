@@ -65,13 +65,19 @@ public partial class MainWindow
 
     private void OnProjectTabOpened()
     {
-        if (string.IsNullOrWhiteSpace(currentProjectPath) && !string.IsNullOrWhiteSpace(config.LastProjectPath))
-            currentProjectPath = config.LastProjectPath;
-
         RefreshProjectListCache(force: true);
 
+        if (!string.IsNullOrWhiteSpace(config.LastProjectPath))
+        {
+            var normalizedLast = Path.GetFullPath(config.LastProjectPath);
+            var match = cachedProjectList.FirstOrDefault(p =>
+                Path.GetFullPath(p.ProjectPath).Equals(normalizedLast, StringComparison.OrdinalIgnoreCase));
+            if (match != null)
+                currentProjectPath = match.ProjectPath;
+        }
+
         if (!string.IsNullOrWhiteSpace(currentProjectPath)
-            && cachedProjectList.All(p => !p.ProjectPath.Equals(currentProjectPath, StringComparison.OrdinalIgnoreCase)))
+            && cachedProjectList.All(p => !ProjectPathEquals(p.ProjectPath, currentProjectPath)))
         {
             currentProjectPath = null;
             if (!string.IsNullOrWhiteSpace(config.LastProjectPath))
@@ -138,8 +144,11 @@ public partial class MainWindow
         DrawProjectActions();
         ImGui.Separator();
 
-        using var tablePadding = ImRaii.PushStyle(ImGuiStyleVar.CellPadding, new Vector2(10f, 10f));
-        if (ImGui.BeginTable("##ProjectTable", 7,
+        // 6 columns: [Open/Badge] [Name] [Groups] [Layers] [Modified] [Export/Delete]
+        var actionColW = ImGui.GetFrameHeight() * 2f + ImGui.GetStyle().ItemSpacing.X + 12f;
+
+        using var tablePadding = ImRaii.PushStyle(ImGuiStyleVar.CellPadding, new Vector2(8f, 8f));
+        if (ImGui.BeginTable("##ProjectTable", 6,
                 ImGuiTableFlags.RowBg
                 | ImGuiTableFlags.BordersOuter
                 | ImGuiTableFlags.BordersInnerV
@@ -147,57 +156,42 @@ public partial class MainWindow
                 | ImGuiTableFlags.ScrollY
                 | ImGuiTableFlags.SizingStretchProp))
         {
-
-            var iconText = FontAwesomeIcon.FileImport.ToIconString();
-            var iconSize = ImGui.CalcTextSize(iconText);
-
             ImGui.TableSetupScrollFreeze(0, 1);
-            ImGui.TableSetupColumn(string.Empty, ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize, 60f);
-            ImGui.TableSetupColumn(Strings.T("project.table.name"), ImGuiTableColumnFlags.WidthStretch, 1f);
-            ImGui.TableSetupColumn(Strings.T("project.table.groups"), ImGuiTableColumnFlags.WidthFixed, 64f);
-            ImGui.TableSetupColumn(Strings.T("project.table.layers"), ImGuiTableColumnFlags.WidthFixed, 64f);
-            ImGui.TableSetupColumn(Strings.T("project.table.modified"), ImGuiTableColumnFlags.WidthFixed, 170f);
-            ImGui.TableSetupColumn(string.Empty, ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize, iconSize.X + 10f);
-            ImGui.TableSetupColumn(string.Empty, ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize, iconSize.X + 10f);
+            ImGui.TableSetupColumn(string.Empty,                      ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize, 70f);
+            ImGui.TableSetupColumn(Strings.T("project.table.name"),   ImGuiTableColumnFlags.WidthStretch, 1f);
+            ImGui.TableSetupColumn(Strings.T("project.table.groups"), ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize, 52f);
+            ImGui.TableSetupColumn(Strings.T("project.table.layers"), ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize, 52f);
+            ImGui.TableSetupColumn(Strings.T("project.table.modified"), ImGuiTableColumnFlags.WidthFixed, 160f);
+            ImGui.TableSetupColumn(string.Empty,                      ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize, actionColW);
 
             ImGui.TableHeadersRow();
 
             for (var i = 0; i < cachedProjectList.Count; i++)
             {
                 var item = cachedProjectList[i];
+                var isLoaded = !string.IsNullOrWhiteSpace(currentProjectPath)
+                    && ProjectPathEquals(currentProjectPath, item.ProjectPath);
 
-                ImGui.TableNextRow(ImGuiTableRowFlags.None, 36f);
+                ImGui.TableNextRow(ImGuiTableRowFlags.None, 38f);
 
+                // Tint entire row green for the loaded project
+                if (isLoaded)
+                    ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0,
+                        ImGui.GetColorU32(new Vector4(0.10f, 0.32f, 0.12f, 0.35f)));
+
+                // Col 0: Open button or "loaded" badge
                 ImGui.TableNextColumn();
-                var isLoadedProject = !string.IsNullOrWhiteSpace(currentProjectPath)
-                    && currentProjectPath.Equals(item.ProjectPath, StringComparison.OrdinalIgnoreCase);
-                if (isLoadedProject)
-                {
-                    var badgeText = Strings.T("project.badge.loaded");
-                    var textSize = ImGui.CalcTextSize(badgeText);
-                    var framePad = ImGui.GetStyle().FramePadding;
-                    var badgeSize = new Vector2(textSize.X + framePad.X * 2f, ImGui.GetFrameHeight());
-                    var badgeMin = ImGui.GetCursorScreenPos();
-                    var badgeMax = badgeMin + badgeSize;
-                    var drawList = ImGui.GetWindowDrawList();
-
-                    drawList.AddRectFilled(badgeMin, badgeMax, ImGui.GetColorU32(new Vector4(0.14f, 0.42f, 0.20f, 0.95f)), 4f);
-                    drawList.AddRect(badgeMin, badgeMax, ImGui.GetColorU32(new Vector4(0.26f, 0.74f, 0.36f, 1f)), 4f);
-                    drawList.AddText(
-                        new Vector2(badgeMin.X + framePad.X, badgeMin.Y + (badgeSize.Y - textSize.Y) * 0.5f),
-                        ImGui.GetColorU32(new Vector4(0.90f, 1.00f, 0.90f, 1f)),
-                        badgeText);
-
-                    ImGui.Dummy(badgeSize);
-                }
+                if (isLoaded)
+                    DrawLoadedBadge();
                 else
                 {
-                    if (IconTextButton("projectLoad" + i, FontAwesomeIcon.FileImport, Strings.T("project.button.load")))
+                    if (IconTextButton("projectLoad" + i, FontAwesomeIcon.FolderOpen, Strings.T("project.button.load")))
                         LoadProjectFromPath(item.ProjectPath);
                     if (ImGui.IsItemHovered())
                         ImGui.SetTooltip(Strings.T("project.tooltip.load"));
                 }
 
+                // Col 1: Name (or inline rename input)
                 ImGui.TableNextColumn();
                 if (projectInlineRenameRow == i)
                 {
@@ -205,56 +199,55 @@ public partial class MainWindow
                     var commit = ImGui.InputText("##projInlineRename" + i, ref projectInlineRenameBuffer, 256,
                         ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll);
                     if (commit)
-                    {
                         CommitInlineRename(i);
-                    }
                     else if (ImGui.IsItemActive() && ImGui.IsKeyPressed(ImGuiKey.Escape))
-                    {
                         CancelInlineRename();
-                    }
                 }
                 else
                 {
-                    ImGui.TextUnformatted(item.Name);
+                    if (isLoaded)
+                        ImGui.TextColored(new Vector4(0.55f, 1.0f, 0.60f, 1f), item.Name);
+                    else
+                        ImGui.TextUnformatted(item.Name);
 
                     if (ImGui.IsItemHovered())
                     {
                         ImGui.SetMouseCursor(ImGuiMouseCursor.TextInput);
                         ImGui.SetTooltip(Strings.T("project.tooltip.rename_inline"));
                     }
-
                     if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
                         BeginInlineRename(i);
                 }
 
+                // Col 2: Group count
                 ImGui.TableNextColumn();
                 DrawCenteredText(item.GroupCount.ToString());
 
+                // Col 3: Layer count
                 ImGui.TableNextColumn();
                 DrawCenteredText(item.LayerCount.ToString());
 
-
+                // Col 4: Last modified
                 ImGui.TableNextColumn();
                 ImGui.TextUnformatted(item.LastModifiedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"));
 
+                // Col 5: inline Export/Delete actions
                 ImGui.TableNextColumn();
-                if (UiHelpers.SquareIconButton(8000 + i, FontAwesomeIcon.FileExport))
+                if (UiHelpers.SquareIconButton(7000 + i, FontAwesomeIcon.FileExport))
                     OpenExportOptionsForRow(i);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip(Strings.T("project.tooltip.export_row"));
 
-                ImGui.TableNextColumn();
+                ImGui.SameLine();
                 using (ImRaii.Disabled(!IsDeleteModifierHeld()))
                 {
-                    if (UiHelpers.SquareIconButton(9000 + i, FontAwesomeIcon.Trash))
+                    if (UiHelpers.SquareIconButton(8000 + i, FontAwesomeIcon.Trash))
                         TryBeginProjectDelete(i);
                 }
                 if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                {
                     ImGui.SetTooltip(IsDeleteModifierHeld()
                         ? Strings.T("project.tooltip.delete")
                         : Strings.T("project.tooltip.delete_requires_modifier"));
-                }
             }
 
             ImGui.EndTable();
@@ -262,6 +255,40 @@ public partial class MainWindow
 
         DrawProjectDeleteConfirmModal();
         DrawProjectExportOptionsModal();
+        fileDialog.Draw();
+    }
+
+    private static bool ProjectPathEquals(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+            return false;
+
+        try
+        {
+            return Path.GetFullPath(left).Equals(Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return left.Equals(right, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static void DrawLoadedBadge()
+    {
+        var badgeText = Strings.T("project.badge.loaded");
+        var textSize = ImGui.CalcTextSize(badgeText);
+        var framePad = ImGui.GetStyle().FramePadding;
+        var badgeSize = new Vector2(textSize.X + framePad.X * 2f, ImGui.GetFrameHeight());
+        var badgeMin = ImGui.GetCursorScreenPos();
+        var badgeMax = badgeMin + badgeSize;
+        var drawList = ImGui.GetWindowDrawList();
+        drawList.AddRectFilled(badgeMin, badgeMax, ImGui.GetColorU32(new Vector4(0.14f, 0.42f, 0.20f, 0.95f)), 4f);
+        drawList.AddRect(badgeMin, badgeMax, ImGui.GetColorU32(new Vector4(0.26f, 0.74f, 0.36f, 1f)), 4f);
+        drawList.AddText(
+            new Vector2(badgeMin.X + framePad.X, badgeMin.Y + (badgeSize.Y - textSize.Y) * 0.5f),
+            ImGui.GetColorU32(new Vector4(0.90f, 1.00f, 0.90f, 1f)),
+            badgeText);
+        ImGui.Dummy(badgeSize);
     }
 
     private void TryBeginProjectDelete(int row)
@@ -345,28 +372,19 @@ public partial class MainWindow
     private void DrawProjectActions()
     {
         using (ImRaii.PushStyle(ImGuiStyleVar.FramePadding, new Vector2(10, 6)))
-        using (ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(10, 8)))
-        using (ImRaii.Child("##ProjectActionsBar", new Vector2(-1, 48), true))
         {
             var newLabel = Strings.T("project.button.new");
             var importLabel = Strings.T("project.button.import");
-            var itemSpacing = ImGui.GetStyle().ItemSpacing.X;
+            var itemSpacingX = ImGui.GetStyle().ItemSpacing.X;
             var btnGroupW = CalcIconTextButtonWidth(FontAwesomeIcon.Plus, newLabel)
-                           + itemSpacing
+                           + itemSpacingX
                            + CalcIconTextButtonWidth(FontAwesomeIcon.FileImport, importLabel);
-            var windowW = ImGui.GetWindowWidth();
-            var windowPadX = ImGui.GetStyle().WindowPadding.X;
 
-            ImGui.AlignTextToFramePadding();
-            ImGui.TextUnformatted(Strings.T("tab.project"));
-
-            ImGui.SameLine(windowW - windowPadX - btnGroupW);
+            ImGui.SetCursorPosX(ImGui.GetContentRegionMax().X - btnGroupW);
 
             if (IconTextButton("projectNew", FontAwesomeIcon.Plus, newLabel))
                 CreateNewProject();
-
             ImGui.SameLine();
-
             if (IconTextButton("projectImport", FontAwesomeIcon.FileImport, importLabel))
                 OpenImportProjectDialog();
         }
@@ -547,19 +565,43 @@ public partial class MainWindow
             return;
         }
 
-        var exportName = Path.GetFileNameWithoutExtension(path);
+        var exportPath = Path.GetFullPath(path);
+        var exportName = Path.GetFileNameWithoutExtension(exportPath);
+        if (exportName.EndsWith(".proj", StringComparison.OrdinalIgnoreCase))
+            exportName = exportName[..^5];
         if (string.IsNullOrWhiteSpace(exportName))
             exportName = loaded.ProjectName;
 
-        var managedPath = projectFileService.GetUniqueProjectPath(exportName);
-        if (projectFileService.SaveProject(managedPath, exportName, loaded.Snapshot, exportIncludeImages))
-        {
-            MarkProjectListDirty();
-            NotifyProject(true, Strings.T("project.notify.export.title"), Strings.T("project.notify.export_with_path.content", path));
-        }
+        if (projectFileService.SaveProject(exportPath, exportName, loaded.Snapshot, exportIncludeImages))
+            NotifyProject(true, Strings.T("project.notify.export.title"), Strings.T("project.notify.export_with_path.content", exportPath));
         else
-        {
             NotifyProject(false, Strings.T("project.notify.export_failed.title"), Strings.T("project.notify.export_failed.content"));
+    }
+
+    private static string GetDownloadDirectory()
+    {
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var downloads = Path.Combine(profile, "Downloads");
+        return Directory.Exists(downloads)
+            ? downloads
+            : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+    }
+
+    private static string GetUniqueFilePath(string path)
+    {
+        if (!File.Exists(path))
+            return path;
+
+        var dir = Path.GetDirectoryName(path) ?? string.Empty;
+        var name = Path.GetFileNameWithoutExtension(path);
+        var ext = Path.GetExtension(path);
+        var n = 2;
+        while (true)
+        {
+            var candidate = Path.Combine(dir, $"{name} ({n}){ext}");
+            if (!File.Exists(candidate))
+                return candidate;
+            n++;
         }
     }
 
@@ -584,18 +626,13 @@ public partial class MainWindow
             if (pendingExportProjectRow >= 0 && pendingExportProjectRow < cachedProjectList.Count)
             {
                 var item = cachedProjectList[pendingExportProjectRow];
-                fileDialog.SaveFileDialog(
-                    Strings.T("project.dialog.export"),
-                    ".json",
-                    Path.GetFileName(item.ProjectPath),
-                    ".json",
-                    (ok, path) =>
-                    {
-                        if (!ok || string.IsNullOrWhiteSpace(path))
-                            return;
-                        ExportProjectRowToPath(pendingExportProjectRow, path);
-                    },
-                    projectFileService.ProjectsRoot);
+                var fileName = item.Name;
+                if (string.IsNullOrWhiteSpace(fileName))
+                    fileName = Path.GetFileName(Path.GetDirectoryName(item.ProjectPath) ?? string.Empty);
+                if (string.IsNullOrWhiteSpace(fileName))
+                    fileName = "project";
+                var targetPath = GetUniqueFilePath(Path.Combine(GetDownloadDirectory(), fileName + ".proj.json"));
+                ExportProjectRowToPath(pendingExportProjectRow, targetPath);
             }
 
             pendingExportProjectRow = -1;

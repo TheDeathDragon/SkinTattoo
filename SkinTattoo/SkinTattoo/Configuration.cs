@@ -112,6 +112,7 @@ public class Configuration : IPluginConfiguration
     public bool MainWindowOpen { get; set; }
     public bool DebugWindowOpen { get; set; }
     public bool ModelEditorWindowOpen { get; set; }
+    public string? LastProjectPath { get; set; }
     public string? LastImageDir { get; set; }
     public int LibraryViewMode { get; set; } = 1;
     public bool AutoPreview { get; set; } = true;
