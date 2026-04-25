@@ -112,6 +112,7 @@ public class Configuration : IPluginConfiguration
     public bool MainWindowOpen { get; set; }
     public bool DebugWindowOpen { get; set; }
     public bool ModelEditorWindowOpen { get; set; }
+    public string? LastProjectPath { get; set; }
     public string? LastImageDir { get; set; }
     public int LibraryViewMode { get; set; } = 1;
     public bool AutoPreview { get; set; } = true;
@@ -135,7 +136,7 @@ public class Configuration : IPluginConfiguration
     public bool UvCurrentDecalOnly { get; set; } = false;
     public bool UvShowBaseTexture { get; set; } = true;
     public bool UvShowWireframe { get; set; } = false;
-
+    public bool UvSyncViewerWithLayerTargetMap { get; set; } = false;
     // Modifier keys required to enable destructive actions (delete layer/group).
     // Bit 0 = Ctrl, bit 1 = Shift, bit 2 = Alt. Default = Ctrl+Shift (3).
     public int DeleteModifierKeys { get; set; } = 3;

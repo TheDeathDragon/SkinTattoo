@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
@@ -123,6 +124,21 @@ public partial class MainWindow
             TryAutoDetectNormalMap(layer);
             MarkPreviewDirty();
         }
+        if (ImGui.IsItemHovered() && !string.IsNullOrEmpty(layer.ImagePath))
+            ImGui.SetTooltip(layer.ImagePath);
+
+        if (!string.IsNullOrEmpty(layer.ImagePath))
+        {
+            string? displayName = null;
+            if (!string.IsNullOrEmpty(layer.ImageHash))
+                displayName = library?.Get(layer.ImageHash)?.OriginalName;
+
+            if (string.IsNullOrEmpty(displayName))
+                displayName = Path.GetFileName(layer.ImagePath);
+
+            if (!string.IsNullOrEmpty(displayName))
+                ImGui.TextDisabled(displayName);
+        }
 
         const float labelW = 80f;
         ImGui.AlignTextToFramePadding();
@@ -148,6 +164,7 @@ public partial class MainWindow
         {
             layer.TargetMap = tmValues[tmIdx];
             autoNormalNoticeForIndex = -1;
+            SyncCanvasMapToSelectedLayerIfEnabled();
             // Force next cycle through Penumbra so redirects for the new
             // target texture get mounted (inplace swap can't introduce a new
             // redirect key, only update existing ones).
@@ -204,6 +221,7 @@ public partial class MainWindow
         var gi = project.SelectedGroupIndex;
         if (gi >= 0 && gi < project.Groups.Count)
             autoNormalNoticeForIndex = project.Groups[gi].SelectedLayerIndex;
+        SyncCanvasMapToSelectedLayerIfEnabled();
         TryAutoDetectEmissiveMask(layer);
     }
 

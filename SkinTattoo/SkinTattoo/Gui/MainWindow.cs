@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
@@ -32,6 +33,7 @@ public partial class MainWindow : Window, IDisposable
     private readonly LibraryService? library;
     private readonly DecalImageLoader? imageLoader;
     private readonly IKeyState keyState;
+    private readonly ProjectFileService projectFileService;
     private readonly FileDialogManager fileDialog = new();
 
     private string imagePathBuf = string.Empty;
@@ -52,6 +54,22 @@ public partial class MainWindow : Window, IDisposable
     private bool previewCurrentLayerOnly;
     private bool showCanvasBaseTexture = true;
     public TargetMap CanvasMapMode { get; private set; } = TargetMap.Diffuse;
+
+    // Project management state
+    private string? currentProjectPath;
+    private bool suppressProjectAutoSave;
+    private bool projectTabFirstOpenHandled;
+    private int selectedProjectRow = -1;
+    private List<ProjectFileService.ProjectListItem> cachedProjectList = [];
+    private bool projectListCacheDirty = true;
+    private bool projectTabOpenLastFrame;
+    private int pendingDeleteProjectRow = -1;
+    private bool openProjectDeleteConfirmModal;
+    private int projectInlineRenameRow = -1;
+    private string projectInlineRenameBuffer = string.Empty;
+    private bool openProjectExportOptionsModal;
+    private bool exportIncludeImages = true;
+    private int pendingExportProjectRow = -1;
 
     // Cached base texture size
     private int lastBaseTexWidth;
@@ -208,6 +226,10 @@ public partial class MainWindow : Window, IDisposable
         this.keyState = keyState;
         this.library = library;
         this.imageLoader = imageLoader;
+        projectFileService = new ProjectFileService(
+            Plugin.Log,
+            Plugin.PluginInterface.GetPluginConfigDirectory(),
+            library);
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -357,6 +379,7 @@ public partial class MainWindow : Window, IDisposable
             undoHistory.Add(historyBaselineSnapshot);
             TrimHistory(undoHistory);
             redoHistory.Clear();
+            AutoSaveCurrentProjectIfNeeded(historyBaselineSnapshot);
         }
 
         historyBaselineSnapshot = project.CreateSnapshot();
@@ -494,6 +517,22 @@ public partial class MainWindow : Window, IDisposable
         config.Save();
     }
 
+    private void SyncCanvasMapToSelectedLayerIfEnabled()
+    {
+        if (!config.UvSyncViewerWithLayerTargetMap)
+            return;
+
+        var selectedLayer = project.SelectedLayer;
+        if (selectedLayer == null)
+            return;
+
+        if (CanvasMapMode == selectedLayer.TargetMap)
+            return;
+
+        CanvasMapMode = selectedLayer.TargetMap;
+        SaveCanvasViewSettings();
+    }
+
     public void OpenSettings()
     {
         IsOpen = true;
@@ -545,6 +584,8 @@ public partial class MainWindow : Window, IDisposable
         // -- Tab bar --
         if (ImGui.BeginTabBar("##MainTabs", ImGuiTabBarFlags.None))
         {
+            var projectTabOpen = false;
+
             // Tab 0: Settings
             var settingsFlags = requestSwitchToSettings
                 ? ImGuiTabItemFlags.SetSelected
@@ -557,8 +598,18 @@ public partial class MainWindow : Window, IDisposable
                 ImGui.EndTabItem();
             }
 
-            // Tab 1: Editor
-            if (ImGui.BeginTabItem(Strings.T("tab.editor") + "##mainTab1"))
+            // Tab 1: Project
+            if (ImGui.BeginTabItem(Strings.T("tab.project") + "##mainTab1"))
+            {
+                projectTabOpen = true;
+                if (!projectTabOpenLastFrame)
+                    OnProjectTabOpened();
+                DrawProjectTab();
+                ImGui.EndTabItem();
+            }
+
+            // Tab 2: Editor
+            if (ImGui.BeginTabItem(Strings.T("tab.editor") + "##mainTab2"))
             {
                 if (loading) ImGui.BeginDisabled();
 
@@ -582,21 +633,23 @@ public partial class MainWindow : Window, IDisposable
                 ImGui.EndTabItem();
             }
 
-            // Tab 2: Help
-            if (ImGui.BeginTabItem(Strings.T("tab.help") + "##mainTab2"))
+            // Tab 3: Help
+            if (ImGui.BeginTabItem(Strings.T("tab.help") + "##mainTab3"))
             {
                 DrawHelpTab();
                 ImGui.EndTabItem();
             }
 
-            // Tab 3: Changelog
-            if (ImGui.BeginTabItem(Strings.T("tab.changelog") + "##mainTab3"))
+            // Tab 4: Changelog
+            if (ImGui.BeginTabItem(Strings.T("tab.changelog") + "##mainTab4"))
             {
                 DrawChangelogTab();
                 ImGui.EndTabItem();
             }
 
             ImGui.EndTabBar();
+
+            projectTabOpenLastFrame = projectTabOpen;
         }
 
         HandleUndoRedoShortcuts();
@@ -1308,5 +1361,39 @@ public partial class MainWindow : Window, IDisposable
         if ((keys & 2) != 0 && !io.KeyShift) return false;
         if ((keys & 4) != 0 && !io.KeyAlt) return false;
         return true;
+    }
+
+    private void AutoSaveCurrentProjectIfNeeded(SavedProjectSnapshot snapshot)
+    {
+        if (suppressProjectAutoSave)
+            return;
+
+        if (string.IsNullOrWhiteSpace(currentProjectPath))
+        {
+            currentProjectPath = projectFileService.GetUniqueProjectPath(GetNextUntitledProjectName());
+            config.LastProjectPath = currentProjectPath;
+            config.Save();
+        }
+
+        var projectName = Path.GetFileName(Path.GetDirectoryName(currentProjectPath) ?? "Untitled");
+        projectFileService.SaveProject(currentProjectPath, projectName, snapshot);
+    }
+
+    private string GetNextUntitledProjectName()
+    {
+        var projects = projectFileService.ListProjects();
+        int max = 0;
+        foreach (var p in projects)
+        {
+            var name = p.Name;
+            if (name.StartsWith("Untitled ", StringComparison.OrdinalIgnoreCase)
+                && int.TryParse(name[9..], out var n)
+                && n > max)
+            {
+                max = n;
+            }
+        }
+
+        return $"Untitled {max + 1}";
     }
 }

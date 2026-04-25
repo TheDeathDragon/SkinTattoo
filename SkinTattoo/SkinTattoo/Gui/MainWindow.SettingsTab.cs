@@ -163,6 +163,16 @@ public partial class MainWindow
             config.Save();
         }
 
+        var uvSync = config.UvSyncViewerWithLayerTargetMap;
+        if (UiHelpers.CheckboxWithTextAndHelp("##uvSyncMap", Strings.T("checkbox.uv_sync_layer_target"),
+                Strings.T("tooltip.uv_sync_layer_target"), ref uvSync))
+        {
+            config.UvSyncViewerWithLayerTargetMap = uvSync;
+            if (uvSync)
+                SyncCanvasMapToSelectedLayerIfEnabled();
+            config.Save();
+        }
+
         ImGui.Spacing();
         DrawDeleteModifierSelector();
 

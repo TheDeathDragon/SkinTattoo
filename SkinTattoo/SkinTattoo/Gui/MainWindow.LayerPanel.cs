@@ -300,9 +300,7 @@ public partial class MainWindow
             if (ImGui.Selectable(layer.Name, false, ImGuiSelectableFlags.None,
                     new Vector2(nameW, selectableHeight)))
             {
-                project.SelectedGroupIndex = gi;
-                group.SelectedLayerIndex = li;
-                SyncImagePathBuf();
+                SelectLayer(gi, li);
             }
             ImGui.PopStyleColor(3);
 
@@ -524,5 +522,6 @@ public partial class MainWindow
         project.SelectedGroupIndex = groupIndex;
         g.SelectedLayerIndex = layerIndex;
         SyncImagePathBuf();
+        SyncCanvasMapToSelectedLayerIfEnabled();
     }
 }

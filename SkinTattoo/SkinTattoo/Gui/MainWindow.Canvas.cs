@@ -505,15 +505,13 @@ public partial class MainWindow
 
         for (var i = 0; i < group.Layers.Count; i++)
         {
+            var layer = group.Layers[i];
+            if (!layer.IsVisible || string.IsNullOrEmpty(layer.ImagePath)) continue;
+            if (layer.TargetMap != CanvasMapMode) continue;
+
             bool isCurrent = i == group.SelectedLayerIndex;
             if (previewCurrentLayerOnly && !isCurrent)
                 continue;
-
-            var layer = group.Layers[i];
-            if (!layer.IsVisible || string.IsNullOrEmpty(layer.ImagePath)) continue;
-            // "Current Layer Only" bypasses TargetMap filter -- the user explicitly asked
-            // to see this layer's placement, regardless of which map the canvas is showing.
-            if (!previewCurrentLayerOnly && layer.TargetMap != CanvasMapMode) continue;
 
             var isSelected = group.SelectedLayerIndex == i;
 
@@ -756,6 +754,7 @@ public partial class MainWindow
                         {
                             group.SelectedLayerIndex = i;
                             SyncImagePathBuf();
+                            SyncCanvasMapToSelectedLayerIfEnabled();
                             canvasDraggingLayer = true;
                             break;
                         }
