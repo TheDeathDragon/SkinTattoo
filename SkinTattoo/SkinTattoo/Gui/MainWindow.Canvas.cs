@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
 using SkinTattoo.Core;
@@ -15,6 +16,61 @@ public partial class MainWindow
 {
     // UV mesh wireframe toggle
     private bool showUvWireframe;
+
+    // GPU wrap cache for the canvas's vanilla / mod-source base texture. The canvas is
+    // a placement guide -- decal previews come from DrawLayerOverlays, not the staged
+    // preview file. Showing the staged file as the base produced visual doubling during
+    // drags: the live overlay leads the staged composite (file write throttled to 4 Hz,
+    // and even an in-memory composite via compositeResults lags one async cycle behind
+    // the live UvCenter), so user sees baked-old-pos + overlay-new-pos until the source
+    // catches up. Reading vanilla bytes via PreviewService.TryGetBaseTexture (Lumina /
+    // disk, NOT Penumbra-resolved) keeps the canvas base perfectly stable while the
+    // overlay is the sole decal preview -- always in lockstep with itself.
+    private sealed record CanvasBaseWrapEntry(IDalamudTextureWrap Wrap, byte[] Data, int Width, int Height);
+    private readonly Dictionary<string, CanvasBaseWrapEntry> canvasBaseWrapCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private IDalamudTextureWrap? GetCanvasBaseWrap(TargetGroup group, string? gamePath)
+    {
+        if (string.IsNullOrEmpty(gamePath)) return null;
+        var baseTex = previewService.TryGetBaseTexture(group);
+        if (baseTex == null) return null;
+        var (data, w, h) = baseTex.Value;
+        if (data == null || w <= 0 || h <= 0 || data.Length < w * h * 4) return null;
+
+        // Cache by reference identity: PreviewService.baseTextureCache returns the same
+        // byte[] ref until disk source changes, so ref equality is a cheap "still valid"
+        // check that survives across many canvas frames without re-uploading.
+        if (canvasBaseWrapCache.TryGetValue(gamePath, out var hit)
+            && ReferenceEquals(hit.Data, data) && hit.Width == w && hit.Height == h)
+            return hit.Wrap;
+
+        if (hit != null)
+        {
+            try { hit.Wrap.Dispose(); } catch { }
+            canvasBaseWrapCache.Remove(gamePath);
+        }
+
+        try
+        {
+            var wrap = textureProvider.CreateFromRaw(
+                RawImageSpecification.Rgba32(w, h),
+                data,
+                $"SkinTattoo/canvas/{Path.GetFileName(gamePath)}");
+            canvasBaseWrapCache[gamePath] = new CanvasBaseWrapEntry(wrap, data, w, h);
+            return wrap;
+        }
+        catch { return null; }
+    }
+
+    private void DisposeCanvasBaseWrapCache()
+    {
+        foreach (var entry in canvasBaseWrapCache.Values)
+        {
+            try { entry.Wrap.Dispose(); } catch { }
+        }
+        canvasBaseWrapCache.Clear();
+    }
 
     private static string? GuessMaskPathFromSibling(string? texPath)
     {
@@ -454,6 +510,19 @@ public partial class MainWindow
         {
             texDiskPath = group.DiffuseDiskPath;
             texGamePath = group.DiffuseGamePath;
+
+            // Use vanilla / mod-source diffuse as the canvas base; layer overlays carry
+            // the decal preview. See CanvasBaseWrapEntry comment above for the rationale.
+            var baseWrap = GetCanvasBaseWrap(group, texGamePath);
+            if (baseWrap != null)
+            {
+                lastBaseTexWidth = baseWrap.Width;
+                lastBaseTexHeight = baseWrap.Height;
+                drawList.AddImage(baseWrap.Handle,
+                    texOrigin, texOrigin + texSize,
+                    Vector2.Zero, Vector2.One);
+                return true;
+            }
         }
 
         if (string.IsNullOrEmpty(texDiskPath) && string.IsNullOrEmpty(texGamePath))

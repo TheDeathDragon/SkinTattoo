@@ -1,6 +1,20 @@
 {
   "versions": [
     {
+      "version": "0.2.8",
+      "date": "2026-04-25",
+      "en": [
+        { "text": "Fixed Normal-target emissive: seam, Diffuse/Normal mutex, real-time drag" },
+        { "text": "Fixed game not refreshing on decal delete and stale canvas bake" },
+        { "text": "Removed 'highlight layer' button" }
+      ],
+      "zh": [
+        { "text": "修复 Normal 贴图发光的接缝、Diffuse/Normal 互斥与拖动实时性" },
+        { "text": "修复删除贴花后游戏端不刷新和画布残留烘焙" },
+        { "text": "移除「高亮显示图层」按钮" }
+      ]
+    },
+    {
       "version": "0.2.7",
       "date": "2026-04-22",
       "en": [

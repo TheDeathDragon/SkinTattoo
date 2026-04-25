@@ -175,32 +175,10 @@ public static class MtrlFileWriter
 
         if (!foundEmissive)
         {
-            // Activate emissive shader variant: all 3 material keys must match
-            var requiredKeys = new (uint Cat, uint Val)[]
-            {
-                (CategorySkinType, ValueEmissive),
-                (CategoryDecalMode, ValueDecalEmissive),
-                (CategoryVertexColorMode, ValueVertexColorEmissive),
-            };
-            var keyList = new List<ShaderKey>(shaderKeys);
-            foreach (var (cat, val) in requiredKeys)
-            {
-                bool fk = false;
-                for (int i = 0; i < keyList.Count; i++)
-                {
-                    if (keyList[i].Category == cat)
-                    {
-                        var k = keyList[i]; k.Value = val; keyList[i] = k;
-                        fk = true; break;
-                    }
-                }
-                if (!fk)
-                    keyList.Add(new ShaderKey { Category = cat, Value = val });
-            }
-            shaderKeys = keyList.ToArray();
-            {
-            }
-
+            // Preserve the mtrl's existing shader keys -- the patched skin_ct.shpk injects
+            // the emissive sample inside the ValBody lighting PS tail, so flipping keys
+            // into ValEmissive is no longer needed (and would re-introduce the bibo body
+            // seam the ValBody path is designed to avoid).
             emissiveByteOffset = shaderValues.Count * 4;
             constants.Add(new Constant
             {
@@ -354,9 +332,16 @@ public static class MtrlFileWriter
     }
 
     /// <summary>Build ColorTable for a single Normal-target emissive layer.
-    /// Row k (1..30) holds emissive scaled to k/30 so the patched shader's
-    /// normal.alpha -> row UV mapping yields a smooth intensity ramp across the
-    /// full alpha range; row 0 stays unlit so alpha=0 pixels don't glow.</summary>
+    /// Ramp is authored inverted so that vanilla normal.alpha=255 (skin pixels outside the
+    /// decal) samples the low-emissive end of the table, not the bright end. Mapping:
+    ///   normal.alpha = 1.0 (vanilla skin)  -> CT UV.y ~ 0.953 -> rows 30/31 -> emissive 0
+    ///   normal.alpha = 0.0 (decal peak)    -> CT UV.y ~ 0.016 -> rows 0/1  -> emissive em
+    /// Rows in between form a linear falloff so decal mask translated to alpha drop produces
+    /// a smooth glow ramp. Without this inversion the CT's bright rows would fire on every
+    /// skin pixel (normal.alpha=255 on vanilla body textures), turning the whole body grey
+    /// from the unwanted self-illumination.
+    /// Animation params (cols 12-14, 17-19, 20-26) are duplicated across all rows so the
+    /// animation phase is consistent regardless of which row the shader samples.</summary>
     public static byte[] BuildSkinColorTableNormalEmissive(Core.DecalLayer layer)
     {
         var bytes = new byte[2048];
@@ -398,9 +383,16 @@ public static class MtrlFileWriter
                           || (isRipple && layer.AnimDualColor);
         float dualFlag = dualActive ? 1f : 0f;
 
-        for (int row = 1; row <= 30; row++)
+        // Inverted ramp: row 0/1 = full em, rows 2..29 linearly decay, rows 30/31 = 0.
+        // GPU linear-sampled row pair around the CT lookup produces a smooth intensity curve.
+        for (int row = 0; row < 32; row++)
         {
-            float t = row / 30f;
+            // t = 1 at rows 0-1, 0 at rows 30-31, linear between.
+            float t;
+            if (row <= 1) t = 1f;
+            else if (row >= 30) t = 0f;
+            else t = (30f - row) / 29f;
+
             WriteHalf(row, 8,  em.X * t);
             WriteHalf(row, 9,  em.Y * t);
             WriteHalf(row, 10, em.Z * t);
@@ -453,36 +445,40 @@ public static class MtrlFileWriter
             flags |= (5u << 8);
             BitConverter.TryWriteBytes(additionalData.AsSpan(0, 4), flags);
 
-            // Add emissive shader key + constant
             var shaderKeys = (Lumina.Data.Parsing.ShaderKey[])mtrl.ShaderKeys.Clone();
             var constants = new System.Collections.Generic.List<Lumina.Data.Parsing.Constant>(mtrl.Constants);
             var shaderValues = new System.Collections.Generic.List<float>(mtrl.ShaderValues);
 
-            // PS[19] EMISSIVE nodes require all 3 material keys to match specific values.
-            // Body mods (bibo) happen to have the right DecalMode/VertexColorMode,
-            // but face/tail/etc materials use defaults that route to non-emissive PS.
-            var requiredKeys = new (uint Cat, uint Val)[]
+            // Mode-dependent shader-key handling. ValBody_v13 keeps whatever the body mod
+            // author set (usually ValBody) so the whole g-buffer pipeline stays vanilla.
+            // ValEmissive_v11b forces (ValEmissive, ValDecalEmissive, ValVertexColorEmissive)
+            // so the node selector lands on PS[19]-family for both the g-buffer prepass and
+            // the lighting PS.
+            if (SkinShpkPatcher.Mode == SkinShpkPatcher.PatchMode.ValEmissive_v11b)
             {
-                (CategorySkinType, ValueEmissive),
-                (CategoryDecalMode, ValueDecalEmissive),
-                (CategoryVertexColorMode, ValueVertexColorEmissive),
-            };
-            var keyList = new System.Collections.Generic.List<Lumina.Data.Parsing.ShaderKey>(shaderKeys);
-            foreach (var (cat, val) in requiredKeys)
-            {
-                bool found = false;
-                for (int i = 0; i < keyList.Count; i++)
+                var requiredKeys = new (uint Cat, uint Val)[]
                 {
-                    if (keyList[i].Category == cat)
+                    (SkinShpkPatcher.CategorySkinType, SkinShpkPatcher.ValueEmissive),
+                    (SkinShpkPatcher.CategoryDecalMode, SkinShpkPatcher.ValueDecalEmissive),
+                    (SkinShpkPatcher.CategoryVertexColorMode, SkinShpkPatcher.ValueVertexColorEmissive),
+                };
+                var keyList = new System.Collections.Generic.List<Lumina.Data.Parsing.ShaderKey>(shaderKeys);
+                foreach (var (cat, val) in requiredKeys)
+                {
+                    bool found = false;
+                    for (int i = 0; i < keyList.Count; i++)
                     {
-                        var k = keyList[i]; k.Value = val; keyList[i] = k;
-                        found = true; break;
+                        if (keyList[i].Category == cat)
+                        {
+                            var k = keyList[i]; k.Value = val; keyList[i] = k;
+                            found = true; break;
+                        }
                     }
+                    if (!found)
+                        keyList.Add(new Lumina.Data.Parsing.ShaderKey { Category = cat, Value = val });
                 }
-                if (!found)
-                    keyList.Add(new Lumina.Data.Parsing.ShaderKey { Category = cat, Value = val });
+                shaderKeys = keyList.ToArray();
             }
-            shaderKeys = keyList.ToArray();
 
             bool foundEmissive = false;
             for (int i = 0; i < constants.Count; i++)

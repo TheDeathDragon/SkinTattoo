@@ -128,7 +128,7 @@ public class PreviewService : IDisposable
     public void NotifyMeshChanged() => MeshChanged?.Invoke();
 
     // GPU swap state tracking  -- ConcurrentDictionary because background composite Task and
-    // main thread (UpdatePreviewFull / EnsureEmissiveInitialized / ResetSwapState) can race.
+    // main thread (UpdatePreviewFull / ResetSwapState) can race.
     private readonly ConcurrentDictionary<string, byte> initializedRedirects =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> previewDiskPaths =
@@ -384,10 +384,6 @@ public class PreviewService : IDisposable
     /// <summary>Last update mode used.</summary>
     public string LastUpdateMode { get; private set; } = "none";
 
-    /// <summary>Whether emissive CBuffer offset is known for a group's mtrl.</summary>
-    public bool HasEmissiveOffset(string? mtrlGamePath)
-        => !string.IsNullOrEmpty(mtrlGamePath) && emissiveOffsets.TryGetValue(mtrlGamePath, out var off) && off > 0;
-
     public PreviewService(
         MeshExtractor meshExtractor,
         DecalImageLoader imageLoader,
@@ -537,16 +533,58 @@ public class PreviewService : IDisposable
     {
         activeProject = project;  // remember for opportunistic vanilla CT caching in ApplyPendingSwaps
 
-        // Clear stale composites for groups whose layers have all been removed.
-        // The preview pipeline skips groups with Layers.Count == 0, so without
-        // this the 3D editor would keep showing the old decal composite.
+        // Clear stale state for groups whose layers have all been removed.
+        // The preview pipeline skips groups with Layers.Count == 0 (Build skips, async
+        // CpuUvComposite returns null on empty layers), so without this cleanup:
+        //   - 3D editor keeps showing the old decal composite (compositeResults stale)
+        //   - Canvas falls back to the staged preview_*_d.tex on disk and shows the
+        //     deleted decal (previewDiskPaths still points at the file)
+        //   - CheckCanSwapInPlace passes the next drag because initializedRedirects
+        //     thinks the group is still mounted
+        bool releasedAnyRedirect = false;
         foreach (var group in project.Groups)
         {
-            if (group.Layers.Count == 0 && !string.IsNullOrEmpty(group.DiffuseGamePath))
+            if (group.Layers.Count != 0 || string.IsNullOrEmpty(group.DiffuseGamePath))
+                continue;
+
+            if (compositeResults.TryRemove(group.DiffuseGamePath, out _))
+                Interlocked.Increment(ref compositeVersion);
+
+            void ReleaseRedirect(string? gamePath)
             {
-                if (compositeResults.TryRemove(group.DiffuseGamePath, out _))
-                    Interlocked.Increment(ref compositeVersion);
+                if (string.IsNullOrEmpty(gamePath)) return;
+                if (previewDiskPaths.TryRemove(gamePath, out var diskPath))
+                {
+                    releasedAnyRedirect = true;
+                    if (!string.IsNullOrEmpty(diskPath) && File.Exists(diskPath))
+                        try { File.Delete(diskPath); } catch { /* file in use / readonly -- ignore */ }
+                }
+                initializedRedirects.TryRemove(gamePath, out _);
             }
+
+            ReleaseRedirect(group.DiffuseGamePath);
+            ReleaseRedirect(group.NormGamePath);
+            if (!string.IsNullOrEmpty(group.MtrlGamePath))
+            {
+                ReleaseRedirect(group.MtrlGamePath);
+                previewMtrlDiskPaths.TryRemove(group.MtrlGamePath, out _);
+                emissiveOffsets.TryRemove(group.MtrlGamePath, out _);
+                skinCtMaterials.TryRemove(group.MtrlGamePath, out _);
+            }
+        }
+
+        // If the cleanup just dropped any group's redirects, the project state changed in
+        // a way that requires Penumbra to remount (or unmount) -- the in-place GPU swap
+        // path can't touch Penumbra by itself, so route through Full Redraw which will
+        // either re-issue the shrunken temp mod set or call ClearRedirect on empty input.
+        // Without this, CheckCanSwapInPlace below would skip empty groups via `continue`,
+        // return true, and we'd land in StartAsyncInPlace with no jobs to do -- the old
+        // mount stays active and the game keeps showing the deleted decal.
+        if (releasedAnyRedirect)
+        {
+            DebugServer.AppendLog("[UpdatePreview] -> FULL (cleanup released redirects)");
+            UpdatePreviewFull(project);
+            return;
         }
 
         if (config.UseGpuSwap && textureSwap != null && CheckCanSwapInPlace(project))
@@ -702,51 +740,17 @@ public class PreviewService : IDisposable
         }
     }
 
-    /// <summary>Write highlight emissive color via ColorTable texture swap or CBuffer hook.</summary>
-    /// <param name="highlightLayerIndex">For skin CT: only highlight this layer, others keep original color. -1 = all.</param>
-    public unsafe void HighlightEmissiveColor(
+    /// Live emissive update for non-skin-CT (legacy CBuffer) materials. Skin CT materials
+    /// route through <see cref="TryWriteSkinCtDirect"/> instead because their per-layer
+    /// emissive lives in a ColorTable rather than a single CBuffer constant.
+    public unsafe void WriteEmissiveColorDirect(
         FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase,
-        TargetGroup group, Vector3 color, int highlightLayerIndex = -1)
+        TargetGroup group, Vector3 color)
     {
         if (textureSwap == null) return;
         if (string.IsNullOrEmpty(group.MtrlGamePath)) return;
 
         var mtrlDiskPath = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
-
-        // skin CT materials: build a CT where the target layer uses highlight color
-        // and all other layers keep their real emissive colors.
-        if (skinCtMaterials.ContainsKey(group.MtrlGamePath!))
-        {
-            var tempLayers = new List<DecalLayer>();
-            for (int i = 0; i < group.Layers.Count; i++)
-            {
-                var l = group.Layers[i];
-                if (!l.IsVisible || l.TargetMap != TargetMap.Diffuse || !l.AffectsEmissive || l.AllocatedRowPair < 0) continue;
-                bool isTarget = (highlightLayerIndex < 0 || highlightLayerIndex == i);
-                tempLayers.Add(new DecalLayer
-                {
-                    IsVisible = true, AffectsEmissive = true,
-                    AllocatedRowPair = l.AllocatedRowPair,
-                    EmissiveColor = isTarget ? color : l.EmissiveColor,
-                    EmissiveColorB = l.EmissiveColorB,
-                    EmissiveIntensity = isTarget ? 1f : l.EmissiveIntensity,
-                    AnimMode = l.AnimMode,
-                    AnimSpeed = l.AnimSpeed,
-                    AnimAmplitude = l.AnimAmplitude,
-                    AnimFreq = l.AnimFreq,
-                    AnimDirMode = l.AnimDirMode,
-                    AnimDirAngle = l.AnimDirAngle,
-                    AnimDualColor = l.AnimDualColor,
-                    UvCenter = l.UvCenter,
-                });
-            }
-            if (tempLayers.Count == 0) return;
-            var ctBytes = MtrlFileWriter.BuildSkinColorTablePerLayer(tempLayers);
-            var ctHalfs = System.Runtime.InteropServices.MemoryMarshal
-                .Cast<byte, Half>((ReadOnlySpan<byte>)ctBytes).ToArray();
-            textureSwap.ReplaceColorTableRaw(charBase, group.MtrlGamePath!, mtrlDiskPath, ctHalfs, 8, 32);
-            return;
-        }
 
         emissiveOffsets.TryGetValue(group.MtrlGamePath!, out var cbufOffset);
         textureSwap.UpdateEmissiveViaColorTable(charBase, group.MtrlGamePath!, mtrlDiskPath, color);
@@ -758,11 +762,10 @@ public class PreviewService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Restore the real per-layer ColorTable after highlight override on skin CT materials.
-    /// Returns true if this group uses skin CT and the swap was attempted.
-    /// </summary>
-    public unsafe bool RestoreSkinCtAfterHighlight(
+    /// Skin CT live update: rebuild the ColorTable from current layer state and swap it
+    /// onto the live material. Returns true when the group is on the skin CT path so the
+    /// caller knows to skip the legacy CBuffer fallback.
+    public unsafe bool TryWriteSkinCtDirect(
         FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase, TargetGroup group)
     {
         if (textureSwap == null) return false;
@@ -785,85 +788,6 @@ public class PreviewService : IDisposable
         var mtrlDiskPath = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
         textureSwap.ReplaceColorTableRaw(charBase, group.MtrlGamePath!, mtrlDiskPath, ctHalfs, 8, 32);
         return true;
-    }
-
-    /// <summary>
-    /// Ensure emissive mtrl redirect is initialized for a group (for highlight preview).
-    /// Does a one-time mtrl build + Penumbra redirect + player redraw if needed.
-    /// Returns true if emissive is ready for highlight.
-    /// </summary>
-    public bool EnsureEmissiveInitialized(TargetGroup group)
-    {
-        if (string.IsNullOrEmpty(group.MtrlGamePath)) return false;
-
-        // Already initialized?
-        if (emissiveOffsets.ContainsKey(group.MtrlGamePath!) && emissiveOffsets[group.MtrlGamePath!] > 0)
-            return true;
-
-        // Build emissive mtrl
-        var mtrlDisk = group.OrigMtrlDiskPath ?? group.MtrlDiskPath;
-        if (string.IsNullOrEmpty(mtrlDisk) && string.IsNullOrEmpty(group.MtrlGamePath)) return false;
-
-        var safeName = MakeSafeFileName(group.DiffuseGamePath!);
-        var mtrlOutPath = Path.Combine(outputDir, $"preview_{safeName}.mtrl");
-        var defaultColor = new Vector3(1f, 1f, 1f);
-
-        if (!TryBuildEmissiveMtrl(mtrlDisk ?? group.MtrlGamePath!, mtrlOutPath, defaultColor, out var emOffset))
-            return false;
-
-        var redirects = new Dictionary<string, string> { [group.MtrlGamePath!] = mtrlOutPath };
-        previewMtrlDiskPaths[group.MtrlGamePath!] = mtrlOutPath;
-        if (emOffset >= 0)
-            emissiveOffsets[group.MtrlGamePath!] = emOffset;
-        initializedRedirects.TryAdd(group.MtrlGamePath!, 0);
-        previewDiskPaths[group.MtrlGamePath!] = mtrlOutPath;
-
-        // Also build norm with full-white alpha mask so highlight covers entire decal area
-        if (!string.IsNullOrEmpty(group.NormGamePath) && !string.IsNullOrEmpty(group.NormDiskPath))
-        {
-            var normDisk = group.OrigNormDiskPath ?? group.NormDiskPath;
-            if (!string.IsNullOrEmpty(normDisk))
-            {
-                var baseTex = LoadBaseTexture(group);
-                var normResult = BuildFullAlphaNorm(normDisk, baseTex.Width, baseTex.Height);
-                if (normResult != null)
-                {
-                    var normPath = Path.Combine(outputDir, $"preview_{safeName}_n.tex");
-                    WriteBgraTexFile(normPath, normResult, baseTex.Width, baseTex.Height);
-                    redirects[group.NormGamePath!] = normPath;
-                    initializedRedirects.TryAdd(group.NormGamePath!, 0);
-                    previewDiskPaths[group.NormGamePath!] = normPath;
-                }
-            }
-        }
-
-        penumbra.SetTextureRedirects(redirects);
-        penumbra.RedrawPlayer();
-        return emOffset >= 0;
-    }
-
-    /// <summary>Build a normal map with alpha=255 everywhere (full emissive coverage for highlight).</summary>
-    private byte[]? BuildFullAlphaNorm(string normDiskPath, int w, int h)
-    {
-        byte[] baseNorm;
-        if (baseTextureCache.TryGetValue(normDiskPath, out var cachedNorm))
-        {
-            var (data, iw, ih) = cachedNorm;
-            baseNorm = (iw != w || ih != h) ? ResizeBilinear(data, iw, ih, w, h) : (byte[])data.Clone();
-        }
-        else
-        {
-            var normImg = File.Exists(normDiskPath) ? imageLoader.LoadImage(normDiskPath) : LoadGameTexture(normDiskPath);
-            if (normImg == null) return null;
-            baseTextureCache[normDiskPath] = normImg.Value;
-            var (data, iw, ih) = normImg.Value;
-            baseNorm = (iw != w || ih != h) ? ResizeBilinear(data, iw, ih, w, h) : (byte[])data.Clone();
-        }
-
-        // Set alpha to 255 everywhere for full highlight coverage
-        for (int i = 3; i < baseNorm.Length; i += 4)
-            baseNorm[i] = 255;
-        return baseNorm;
     }
 
     /// <summary>Force a full Penumbra redraw update (always flickers).</summary>
@@ -920,7 +844,17 @@ public class PreviewService : IDisposable
         LastUpdateMode = "full";
 
         if (redirects.Count > 0)
+        {
             penumbra.SetTextureRedirects(redirects);
+        }
+        else if (penumbra.HasActiveRedirects)
+        {
+            // AddTemporaryModAll's replace-all semantics short-circuits on empty input
+            // (PenumbraBridge.SetTextureRedirects returns immediately) so without an
+            // explicit clear the previous temp mod stays mounted -- the game keeps
+            // serving the old preview file even after every layer is deleted.
+            penumbra.ClearRedirect();
+        }
 
         penumbra.RedrawPlayer();
 
@@ -1134,20 +1068,46 @@ public class PreviewService : IDisposable
                         lastBuiltColorTables[job.MtrlGamePath!] = (skinCtHalfs, 8, 32);
                         ctQueued = true;
 
-                        // Normal map: row pair index in alpha channel
+                        // Normal map alpha encoding -- mirrors what Full Redraw produces in
+                        // ApplyUserNormalOverlay so a position drag updates the glow placement
+                        // in-place instead of waiting for a Full Redraw.
+                        //
+                        //   Diffuse-emissive layers (PerLayer CT) -> CompositeNorm RowIndex zeros
+                        //   alpha, then writes rowPair*17 inside each decal footprint. Patched
+                        //   skin.shpk reads alpha as the CT row UV.
+                        //
+                        //   Normal-only emissive (NormalEmissive CT) -> RowIndex would return null
+                        //   (no row pairs allocated for Normal-target layers) and alpha=0 globally
+                        //   would map to row 0/1 = full glow across the whole body. Instead load
+                        //   vanilla bytes (alpha ~ 255 -> row 30/31 = 0) then OverlayNormalEmissive
+                        //   Alpha drops alpha inside the decal so it ramps toward row 0/1.
                         if (!string.IsNullOrEmpty(job.NormGamePath) && !string.IsNullOrEmpty(job.NormSourcePath))
                         {
                             var normRgbaBuf = EnsureBuf(ref scratch.NormRgba, byteCount);
-                            var normRgba = CompositeNorm(
-                                layers, job.NormSourcePath!, baseTex.Width, baseTex.Height,
-                                NormAlphaMode.RowIndex, outputBuffer: normRgbaBuf);
-                            if (normRgba != null)
+                            bool baseLoaded = false;
+
+                            if (hasPbrLayers || diffEmExists)
+                            {
+                                var rowIdxResult = CompositeNorm(
+                                    layers, job.NormSourcePath!, baseTex.Width, baseTex.Height,
+                                    NormAlphaMode.RowIndex, outputBuffer: normRgbaBuf);
+                                baseLoaded = rowIdxResult != null;
+                            }
+                            if (!baseLoaded)
+                                baseLoaded = LoadRgbaResizedInto(
+                                    job.NormSourcePath!, baseTex.Width, baseTex.Height, normRgbaBuf);
+
+                            if (baseLoaded)
                             {
                                 if (AnyTargetMapLayer(layers, TargetMap.Normal))
-                                    CpuUvComposite(layers, normRgba, baseTex.Width, baseTex.Height,
-                                        outputBuffer: normRgba, targetFilter: TargetMap.Normal, preserveAlpha: true);
+                                    CpuUvComposite(layers, normRgbaBuf, baseTex.Width, baseTex.Height,
+                                        outputBuffer: normRgbaBuf, targetFilter: TargetMap.Normal, preserveAlpha: true);
+
+                                if (normalEmLayer != null)
+                                    OverlayNormalEmissiveAlpha(layers, normRgbaBuf, baseTex.Width, baseTex.Height);
+
                                 var normBgraBuf = EnsureBuf(ref scratch.NormBgra, byteCount);
-                                TextureSwapService.RgbaToBgra(normRgba, normBgraBuf, byteCount);
+                                TextureSwapService.RgbaToBgra(normRgbaBuf, normBgraBuf, byteCount);
                                 previewDiskPaths.TryGetValue(job.NormGamePath ?? "", out var normDiskOut);
                                 if (flushFiles && normDiskOut != null)
                                     WriteBgraTexFile(normDiskOut, normBgraBuf, byteCount, baseTex.Width, baseTex.Height);
@@ -2330,7 +2290,18 @@ public class PreviewService : IDisposable
         // Emissive / PBR: modify .mtrl, write emissive into norm.a, and mount ColorTable.
         var hasEmissive = group.HasEmissiveLayers();
         var hasPbr = group.HasPbrLayers() && MaterialSupportsPbr(group);
+        // Configured-but-maybe-hidden gate: drives the emissive redirect emission below
+        // so the Penumbra mod set stays stable across visibility flicker. Without this
+        // the (hasEmissive || hasPbr) gate would drop mtrl/CT redirects on any frame
+        // where HasEmissiveLayers() flips false, AddTemporaryModAll would replace the
+        // full set with a slim one, and CheckCanSwapInPlace's previewDiskPaths gate
+        // would deny the next drag -- forcing every drag back to Full Redraw.
+        // Scope is intentionally emissive-only: PBR's legacy mtrl path materially differs
+        // when hidden vs visible and we don't want to broaden it as a side effect.
+        bool emissiveConfiguredAny = group.HasEmissiveConfiguredAny();
         bool isSkinMtrl = IsSkinMaterial(group);
+
+        // Visibility-aware view: drives CT contents + per-layer logging.
         bool hasDiffuseEmissive = false;
         DecalLayer? normalEmissiveLayer = null;
         foreach (var l in group.Layers)
@@ -2339,7 +2310,21 @@ public class PreviewService : IDisposable
             if (l.TargetMap == TargetMap.Diffuse) { hasDiffuseEmissive = true; }
             else if (l.TargetMap == TargetMap.Normal && normalEmissiveLayer == null) normalEmissiveLayer = l;
         }
-        bool useSkinColorTable = (hasDiffuseEmissive || normalEmissiveLayer != null)
+
+        // Configured view: drives the CT-vs-legacy mtrl path so a hidden-but-configured
+        // emissive layer keeps the patched skin_ct.shpk + ColorTable mtrl wired up. When
+        // every emissive layer happens to be hidden, ctBytes still falls back to the
+        // PerLayer/NormalEmissive builder which produces an empty/zero CT -- the mtrl is
+        // CT-shaped but emits no glow, matching vanilla appearance.
+        bool hasDiffuseEmissiveCfg = false;
+        bool normalEmissiveCfg = false;
+        foreach (var l in group.Layers)
+        {
+            if (!l.AffectsEmissive || string.IsNullOrEmpty(l.ImagePath)) continue;
+            if (l.TargetMap == TargetMap.Diffuse) hasDiffuseEmissiveCfg = true;
+            else if (l.TargetMap == TargetMap.Normal) normalEmissiveCfg = true;
+        }
+        bool useSkinColorTable = (hasDiffuseEmissiveCfg || normalEmissiveCfg)
                                  && patchedSkinShpkPath != null && isSkinMtrl;
 
         if (hasEmissive)
@@ -2360,7 +2345,8 @@ public class PreviewService : IDisposable
             skinCtMaterials.TryRemove(group.MtrlGamePath!, out _);
         }
 
-        if ((hasEmissive || hasPbr) && !string.IsNullOrEmpty(group.MtrlGamePath))
+        if ((hasEmissive || hasPbr || emissiveConfiguredAny)
+            && !string.IsNullOrEmpty(group.MtrlGamePath))
         {
             var safeName = MakeSafeFileName(group.DiffuseGamePath!);
             var mtrlOutPath = Path.Combine(outputDir, $"preview_{safeName}.mtrl");
@@ -2603,9 +2589,16 @@ public class PreviewService : IDisposable
             { anyEmissiveNormal = true; break; }
         if (!anyEmissiveNormal) return;
 
-        int needLen = w * h * 4;
-        for (int i = 3; i < needLen; i += 4) buf[i] = 0;
-
+        // Preserve vanilla normal.alpha (typically 255) everywhere outside the decal footprint.
+        // skin.shpk uses normal.alpha both as a cb7 ShaderTypeParameter slot selector AND, in
+        // our patched variant, as the ColorTable row UV. Zeroing the whole texture shifts both
+        // lookups: cb7 selects a wrong skin-type slot (seam vs lower body), and the CT samples
+        // the high-row emissive that we meant for the decal itself (whole body glows grey).
+        //
+        // Encoding: vanilla alpha stays at its original value so CT UV.y lands near row 30.5
+        // (where the ramp is authored to emissive=0). Decal-covered pixels get alpha reduced
+        // toward 0 so UV.y lands near row 0.5 (where the ramp peaks at full emissive).
+        // Multiple overlapping decals take min alpha so they accumulate emissive strength.
         foreach (var layer in layers)
         {
             if (!layer.IsVisible || layer.TargetMap != TargetMap.Normal || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
@@ -2650,8 +2643,12 @@ public class PreviewService : IDisposable
                     if (da < 0.001f) continue;
 
                     int oIdx = (py * w + px) * 4;
-                    byte emByte = (byte)Math.Clamp((int)(da * 255), 0, 255);
-                    if (emByte > buf[oIdx + 3]) buf[oIdx + 3] = emByte;
+                    // mask strength -> alpha drop (inverted encoding: stronger decal = lower alpha).
+                    int current = buf[oIdx + 3];
+                    int drop = (int)(da * 255);
+                    int target = current - drop;
+                    if (target < 0) target = 0;
+                    if (target < current) buf[oIdx + 3] = (byte)target;
                 }
             });
         }
@@ -3264,10 +3261,13 @@ public class PreviewService : IDisposable
     /// </summary>
     private void TryDeployPatchedSkinShpk(DecalProject project, Dictionary<string, string> redirects)
     {
+        // Configured-not-visible counts: keeps the shpk redirect mounted even when every
+        // emissive layer happens to be hidden, so the redirect set Penumbra sees stays
+        // stable across drags / async composite cycles.
         bool hasEmissive = false;
         foreach (var group in project.Groups)
         {
-            if (group.HasEmissiveLayers()) { hasEmissive = true; break; }
+            if (group.HasEmissiveConfiguredAny()) { hasEmissive = true; break; }
         }
         if (!hasEmissive) return;
 
@@ -3292,10 +3292,14 @@ public class PreviewService : IDisposable
 
         if (patchedSkinShpkPath == null || !File.Exists(patchedSkinShpkPath))
         {
-            // v8: register-agnostic emissive replace (32/32 PSes vs 8/32 before) + gloss-mask
-            //     re-injection. Pulse anchor still r1-only, so animations degrade to static
-            //     emissive on non-r1 dest SceneKey variants (~24/32 states).
-            var candidate = Path.Combine(outputDir, "skin_ct_v8.shpk");
+            // Mode-dependent cache name: we keep both v11b (ValEmissive) and v13 (ValBody)
+            // paths runnable side-by-side so the user can A/B compare seam vs bloom vs
+            // shadow artifacts without rebuilding. Bump whenever the patch logic in that
+            // branch changes so cached files get regenerated.
+            var candidateName = SkinShpkPatcher.Mode == SkinShpkPatcher.PatchMode.ValBody_v13
+                ? "skin_ct_v13.shpk"
+                : "skin_ct_v11c.shpk";
+            var candidate = Path.Combine(outputDir, candidateName);
             if (!File.Exists(candidate))
             {
                 // Runtime patch: read vanilla skin.shpk from SqPack and patch in memory
@@ -3401,6 +3405,16 @@ public class PreviewService : IDisposable
             DebugServer.AppendLog($"[PreviewService] Game texture load failed: {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>Public loader used by debug endpoints: accepts a disk path or a game path
+    /// (game path is pulled from SqPack). Returns RGBA bytes.</summary>
+    public (byte[] Data, int Width, int Height)? LoadTextureAny(string pathOrGamePath)
+    {
+        if (string.IsNullOrWhiteSpace(pathOrGamePath)) return null;
+        if (File.Exists(pathOrGamePath))
+            return imageLoader.LoadImage(pathOrGamePath, useCache: false);
+        return LoadGameTexture(pathOrGamePath);
     }
 
     /// <summary>

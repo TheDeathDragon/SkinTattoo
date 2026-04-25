@@ -104,7 +104,7 @@ public partial class MainWindow
                             lastEditedLayerIndex = capturedLi;
                             config.LastImageDir = System.IO.Path.GetDirectoryName(path);
                             config.Save();
-                            TryAutoDetectNormalMap(picked);
+                            TryAutoDetectNormalMap(g, picked);
                             MarkPreviewDirty();
                         }
                     }
@@ -120,7 +120,7 @@ public partial class MainWindow
             layer.ImageHash = null;
             AutoFitLayerScale(group, layer);
             lastEditedLayerIndex = idx;
-            TryAutoDetectNormalMap(layer);
+            TryAutoDetectNormalMap(group, layer);
             MarkPreviewDirty();
         }
 
@@ -148,6 +148,22 @@ public partial class MainWindow
         {
             layer.TargetMap = tmValues[tmIdx];
             autoNormalNoticeForIndex = -1;
+            if (layer.AffectsEmissive)
+            {
+                // Mask target can't carry emissive; Diffuse/Normal can but each lives on
+                // a different glow path, so re-allocate row pairs and force the per-group
+                // mutex against the (possibly new) opposite-target sibling layers.
+                if (layer.TargetMap == TargetMap.Mask)
+                {
+                    layer.AffectsEmissive = false;
+                    previewService.ReleaseRowPairIfUnused(group, layer);
+                }
+                else
+                {
+                    previewService.ReleaseRowPairIfUnused(group, layer);
+                    EnforceEmissiveMutex(group, layer);
+                }
+            }
             // Force next cycle through Penumbra so redirects for the new
             // target texture get mounted (inplace swap can't introduce a new
             // redirect key, only update existing ones).
@@ -181,7 +197,7 @@ public partial class MainWindow
             AutoFitLayerScale(g, picked);
             imagePathBuf = resolved;
             lastEditedLayerIndex = g.SelectedLayerIndex;
-            TryAutoDetectNormalMap(picked);
+            TryAutoDetectNormalMap(g, picked);
             MarkPreviewDirty();
         };
         LibraryWindowRef.SetSelectedEntry(layer.ImageHash);
@@ -189,12 +205,12 @@ public partial class MainWindow
         LibraryWindowRef.BringToFront();
     }
 
-    private void TryAutoDetectNormalMap(DecalLayer layer)
+    private void TryAutoDetectNormalMap(TargetGroup group, DecalLayer layer)
     {
         autoNormalNoticeForIndex = -1;
         if (layer.TargetMap != TargetMap.Diffuse)
         {
-            TryAutoDetectEmissiveMask(layer);
+            TryAutoDetectEmissiveMask(group, layer);
             return;
         }
         if (string.IsNullOrEmpty(layer.ImagePath)) return;
@@ -204,16 +220,37 @@ public partial class MainWindow
         var gi = project.SelectedGroupIndex;
         if (gi >= 0 && gi < project.Groups.Count)
             autoNormalNoticeForIndex = project.Groups[gi].SelectedLayerIndex;
-        TryAutoDetectEmissiveMask(layer);
+        TryAutoDetectEmissiveMask(group, layer);
     }
 
-    private void TryAutoDetectEmissiveMask(DecalLayer layer)
+    private void TryAutoDetectEmissiveMask(TargetGroup group, DecalLayer layer)
     {
         if (layer.TargetMap != TargetMap.Normal) return;
         if (string.IsNullOrEmpty(layer.ImagePath)) return;
         if (layer.AffectsEmissive) return;
         if (previewService.IsLikelyEmissiveMask(layer.ImagePath))
+        {
             layer.AffectsEmissive = true;
+            EnforceEmissiveMutex(group, layer);
+        }
+    }
+
+    /// Emissive is mutually exclusive between the Diffuse-target and Normal-target paths
+    /// inside one group: they encode glow differently in the patched skin.shpk pipeline
+    /// (per-layer ColorTable rows vs normal.alpha ramp) and can't co-exist on the same
+    /// material. Flips off `AffectsEmissive` on every layer of the opposing target.
+    private void EnforceEmissiveMutex(TargetGroup group, DecalLayer keep)
+    {
+        if (!keep.AffectsEmissive) return;
+        if (keep.TargetMap != TargetMap.Diffuse && keep.TargetMap != TargetMap.Normal) return;
+        var loser = keep.TargetMap == TargetMap.Diffuse ? TargetMap.Normal : TargetMap.Diffuse;
+        foreach (var l in group.Layers)
+        {
+            if (l == keep) continue;
+            if (l.TargetMap != loser || !l.AffectsEmissive) continue;
+            l.AffectsEmissive = false;
+            previewService.ReleaseRowPairIfUnused(group, l);
+        }
     }
 
     private static void DrawInfoIcon(string tooltip)
@@ -342,10 +379,6 @@ public partial class MainWindow
 
         bool isDiffuseTarget = layer.TargetMap == TargetMap.Diffuse;
         bool isNormalTarget = layer.TargetMap == TargetMap.Normal;
-        bool groupHasNormalEmissive = false;
-        foreach (var l in group.Layers)
-            if (l != layer && l.IsVisible && l.TargetMap == TargetMap.Normal && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
-            { groupHasNormalEmissive = true; break; }
 
         if (isDiffuseTarget)
         {
@@ -363,8 +396,6 @@ public partial class MainWindow
 
         if (showEmissiveCheckbox)
         {
-            bool disabled = groupHasNormalEmissive;
-            if (disabled) ImGui.BeginDisabled();
             var was = layer.AffectsEmissive;
             var v = was;
             if (ImGui.Checkbox(Strings.T("checkbox.emissive"), ref v))
@@ -372,6 +403,7 @@ public partial class MainWindow
                 if (v && !was)
                 {
                     layer.AffectsEmissive = true;
+                    EnforceEmissiveMutex(group, layer);
                     previewService.InvalidateEmissiveForGroup(group);
                     MarkPreviewDirty(immediate: true);
                 }
@@ -383,13 +415,7 @@ public partial class MainWindow
                     MarkPreviewDirty(immediate: true);
                 }
             }
-            if (disabled)
-            {
-                ImGui.EndDisabled();
-                ImGui.SameLine();
-                DrawInfoIcon(Strings.T("emissive_normal.diffuse_locked"));
-            }
-            showEmissiveControls = layer.AffectsEmissive && !disabled;
+            showEmissiveControls = layer.AffectsEmissive;
         }
         else if (isNormalTarget && layer.AffectsEmissive)
         {
@@ -408,6 +434,7 @@ public partial class MainWindow
             if (ImGui.Button(Strings.T("emissive_normal.manual_enable_btn") + "##enableNormEm"))
             {
                 layer.AffectsEmissive = true;
+                EnforceEmissiveMutex(group, layer);
                 previewService.InvalidateEmissiveForGroup(group);
                 MarkPreviewDirty(immediate: true);
             }
