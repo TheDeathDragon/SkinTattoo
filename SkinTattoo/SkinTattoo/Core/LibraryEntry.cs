@@ -8,6 +8,7 @@ public sealed class LibraryEntry
     public string FileName { get; set; } = "";
     public string OriginalName { get; set; } = "";
     public string FolderPath { get; set; } = "";
+    public bool IsFavorite { get; set; }
     public DateTime AddedAt { get; set; }
     public DateTime LastUsedAt { get; set; }
     public int UseCount { get; set; }

@@ -178,6 +178,67 @@ public sealed class LibraryService
         }
     }
 
+    public bool RenameFolder(string oldPath, string newPath)
+    {
+        var normalizedOld = NormalizeFolderPath(oldPath);
+        var normalizedNew = NormalizeFolderPath(newPath);
+        if (string.IsNullOrEmpty(normalizedOld) || string.IsNullOrEmpty(normalizedNew)) return false;
+        if (string.Equals(normalizedOld, normalizedNew, StringComparison.OrdinalIgnoreCase)) return false;
+        if (normalizedNew.StartsWith(normalizedOld + "/", StringComparison.OrdinalIgnoreCase)) return false;
+
+        lock (sync)
+        {
+            if (!folders.Contains(normalizedOld)) return false;
+            if (folders.Contains(normalizedNew)) return false;
+
+            var affectedFolders = folders
+                .Where(f => string.Equals(f, normalizedOld, StringComparison.OrdinalIgnoreCase)
+                            || f.StartsWith(normalizedOld + "/", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var renamedFolders = affectedFolders
+                .Select(f => normalizedNew + f[normalizedOld.Length..])
+                .ToList();
+
+            if (renamedFolders.Any(r => !affectedFolders.Any(a => string.Equals(a, r, StringComparison.OrdinalIgnoreCase))
+                                        && folders.Contains(r)))
+                return false;
+
+            foreach (var entry in entries.Values)
+            {
+                var ef = NormalizeFolderPath(entry.FolderPath);
+                if (string.Equals(ef, normalizedOld, StringComparison.OrdinalIgnoreCase)
+                    || ef.StartsWith(normalizedOld + "/", StringComparison.OrdinalIgnoreCase))
+                {
+                    entry.FolderPath = normalizedNew + ef[normalizedOld.Length..];
+                }
+            }
+
+            foreach (var f in affectedFolders)
+                folders.Remove(f);
+            foreach (var f in renamedFolders)
+                folders.Add(f);
+
+            EnsureFolderTrackedLocked(normalizedNew);
+            SaveIndexLocked();
+            return true;
+        }
+    }
+
+    public bool SetFavorite(string hash, bool favorite)
+    {
+        if (string.IsNullOrWhiteSpace(hash)) return false;
+
+        lock (sync)
+        {
+            if (!entries.TryGetValue(hash, out var entry)) return false;
+            if (entry.IsFavorite == favorite) return false;
+
+            entry.IsFavorite = favorite;
+            SaveIndexLocked();
+            return true;
+        }
+    }
+
     public bool SetEntryFolder(string hash, string? folderPath)
     {
         if (string.IsNullOrWhiteSpace(hash)) return false;
@@ -193,28 +254,26 @@ public sealed class LibraryService
         }
     }
 
-    // Delete a folder and any subfolders. Entries inside are reassigned to the parent
-    // folder (root if the deleted folder was top-level), so no library content is lost.
     public bool DeleteFolder(string folderPath)
     {
         var normalized = NormalizeFolderPath(folderPath);
         if (string.IsNullOrEmpty(normalized)) return false;
 
-        var idx = normalized.LastIndexOf('/');
-        var parent = idx < 0 ? string.Empty : normalized[..idx];
+        List<LibraryEntry> removedEntries;
 
         lock (sync)
         {
-            foreach (var entry in entries.Values)
-            {
-                var ef = NormalizeFolderPath(entry.FolderPath);
-                if (string.IsNullOrEmpty(ef)) continue;
-                if (string.Equals(ef, normalized, StringComparison.OrdinalIgnoreCase) ||
-                    ef.StartsWith(normalized + "/", StringComparison.OrdinalIgnoreCase))
+            removedEntries = entries.Values
+                .Where(entry =>
                 {
-                    entry.FolderPath = parent;
-                }
-            }
+                    var ef = NormalizeFolderPath(entry.FolderPath);
+                    return string.Equals(ef, normalized, StringComparison.OrdinalIgnoreCase)
+                           || ef.StartsWith(normalized + "/", StringComparison.OrdinalIgnoreCase);
+                })
+                .ToList();
+
+            foreach (var entry in removedEntries)
+                entries.Remove(entry.Hash);
 
             var toRemove = folders.Where(f =>
                 string.Equals(f, normalized, StringComparison.OrdinalIgnoreCase) ||
@@ -223,8 +282,15 @@ public sealed class LibraryService
             foreach (var f in toRemove) folders.Remove(f);
 
             SaveIndexLocked();
-            return true;
         }
+
+        foreach (var entry in removedEntries)
+        {
+            try { File.Delete(Path.Combine(blobDir, entry.FileName)); } catch { }
+            try { File.Delete(Path.Combine(thumbDir, entry.Hash + ".png")); } catch { }
+        }
+
+        return true;
     }
 
     public LibraryEntry? Get(string hash)
@@ -234,11 +300,24 @@ public sealed class LibraryService
             return entries.TryGetValue(hash, out var e) ? e : null;
     }
 
-    private void EnsureFolderTrackedLocked(string? folderPath)
+    private bool EnsureFolderTrackedLocked(string? folderPath)
     {
         var normalized = NormalizeFolderPath(folderPath);
-        if (string.IsNullOrEmpty(normalized)) return;
-        folders.Add(normalized);
+        if (string.IsNullOrEmpty(normalized)) return false;
+
+        var parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0) return false;
+
+        var addedAny = false;
+        var path = string.Empty;
+        foreach (var part in parts)
+        {
+            path = string.IsNullOrEmpty(path) ? part : path + "/" + part;
+            if (folders.Add(path))
+                addedAny = true;
+        }
+
+        return addedAny;
     }
 
     public string? ResolveDiskPath(string hash)
@@ -338,6 +417,74 @@ public sealed class LibraryService
         return entry;
     }
 
+    public LibraryEntry? ImportProjectPayload(string hash, string blobFileName, string originalName, string folderPath, byte[] bytes)
+    {
+        if (string.IsNullOrWhiteSpace(hash) || bytes.Length == 0)
+            return null;
+
+        var normalizedFolder = NormalizeFolderPath(folderPath);
+        var ext = Path.GetExtension(blobFileName);
+        if (string.IsNullOrWhiteSpace(ext)) ext = ".png";
+        var canonicalBlob = hash + ext.ToLowerInvariant();
+        var destPath = Path.Combine(blobDir, canonicalBlob);
+
+        lock (sync)
+        {
+            if (entries.TryGetValue(hash, out var existing))
+            {
+                var existingPath = Path.Combine(blobDir, existing.FileName);
+                var shouldWrite = true;
+                if (File.Exists(existingPath))
+                {
+                    try
+                    {
+                        var currentHash = ComputeHash(File.ReadAllBytes(existingPath));
+                        shouldWrite = !currentHash.Equals(hash, StringComparison.OrdinalIgnoreCase);
+                    }
+                    catch
+                    {
+                        shouldWrite = true;
+                    }
+                }
+
+                if (shouldWrite)
+                    File.WriteAllBytes(destPath, bytes);
+
+                existing.FileName = canonicalBlob;
+                if (!string.IsNullOrWhiteSpace(originalName))
+                    existing.OriginalName = originalName;
+                existing.FolderPath = normalizedFolder;
+                existing.LastUsedAt = DateTime.UtcNow;
+                existing.UseCount++;
+                EnsureFolderTrackedLocked(normalizedFolder);
+                SaveIndexLocked();
+                QueueThumbIfMissingLocked(existing);
+                return existing;
+            }
+
+            File.WriteAllBytes(destPath, bytes);
+            var (w, h) = ProbeSize(destPath);
+            var created = new LibraryEntry
+            {
+                Hash = hash,
+                FileName = canonicalBlob,
+                OriginalName = string.IsNullOrWhiteSpace(originalName) ? canonicalBlob : originalName,
+                FolderPath = normalizedFolder,
+                AddedAt = DateTime.UtcNow,
+                LastUsedAt = DateTime.UtcNow,
+                UseCount = 1,
+                Width = w,
+                Height = h,
+            };
+
+            entries[hash] = created;
+            EnsureFolderTrackedLocked(normalizedFolder);
+            SaveIndexLocked();
+            QueueThumbIfMissingLocked(created);
+            return created;
+        }
+    }
+
     public void Touch(string hash)
     {
         lock (sync)
@@ -409,12 +556,14 @@ public sealed class LibraryService
                     }
                     e.FolderPath = NormalizeFolderPath(e.FolderPath);
                     entries[e.Hash] = e;
-                    EnsureFolderTrackedLocked(e.FolderPath);
+                    if (EnsureFolderTrackedLocked(e.FolderPath))
+                        needsRewrite = true;
                 }
                 if (model != null)
                 {
                     foreach (var f in model.Folders)
-                        EnsureFolderTrackedLocked(f);
+                        if (EnsureFolderTrackedLocked(f))
+                            needsRewrite = true;
                 }
                 // Persist if we dropped anything OR migrated from the legacy array format.
                 if (needsRewrite || model == null)

@@ -35,7 +35,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="images\folder-light.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Remove="Lumina" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="images\folder-light.png" />
   </ItemGroup>
 
   <ItemGroup>

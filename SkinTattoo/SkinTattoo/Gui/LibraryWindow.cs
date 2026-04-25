@@ -5,7 +5,6 @@ using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
-using Dalamud.Interface.Components;
 using Dalamud.Interface.ImGuiFileDialog;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
@@ -26,18 +25,28 @@ public sealed class LibraryWindow : Window
         Detail = 3,
     }
 
+    private enum LibraryContentTab
+    {
+        Resources = 0,
+        Favorites = 1,
+    }
+
     private readonly LibraryService library;
     private readonly ITextureProvider textureProvider;
     private readonly Configuration config;
     private readonly FileDialogManager fileDialog = new();
+    private readonly string folderIconPath;
 
     private string search = string.Empty;
     private string? pendingDeleteHash;
     private string? pendingDeleteFolder;
+    private string? pendingRenameFolder;
     private string? selectedEntryHash;
     private string selectedFolder = string.Empty;
     private string createFolderInput = string.Empty;
+    private string renameFolderInput = string.Empty;
     private LibraryViewMode viewMode;
+    private LibraryContentTab contentTab = LibraryContentTab.Resources;
 
     public Action<LibraryEntry>? OnPicked { get; set; }
 
@@ -53,6 +62,7 @@ public sealed class LibraryWindow : Window
         this.library = library;
         this.textureProvider = textureProvider;
         this.config = config;
+        folderIconPath = Path.Combine(config.GetAsmDir(), "images", "folder-light.png");
         viewMode = NormalizeViewMode(config.LibraryViewMode);
 
         SizeConstraints = new WindowSizeConstraints
@@ -66,6 +76,11 @@ public sealed class LibraryWindow : Window
     {
         fileDialog.Draw();
 
+        var currentFolder = LibraryService.NormalizeFolderPath(selectedFolder);
+        selectedFolder = currentFolder;
+
+        DrawContentTabPicker();
+        ImGui.Separator();
         if (UiHelpers.SquareIconButton("libImport", FontAwesomeIcon.FileImport))
             OpenImportFilesDialog();
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("library.tooltip.import"));
@@ -83,25 +98,27 @@ public sealed class LibraryWindow : Window
         ImGui.SameLine();
         DrawViewModePicker();
 
+
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(-1);
+        var searchWidth = MathF.Max(90f, MathF.Min(180f, ImGui.GetContentRegionAvail().X));
+        ImGui.SetNextItemWidth(searchWidth);
         ImGui.InputTextWithHint("##LibrarySearch", Strings.T("library.search_hint"), ref search, 128);
+
+        ImGui.SameLine();
+        var breadcrumbStartX = ImGui.GetCursorPosX();
+        var breadcrumbAvailWidth = ImGui.GetContentRegionAvail().X;
+        DrawFolderBreadcrumbs(currentFolder, breadcrumbStartX, breadcrumbAvailWidth);
 
         ImGui.Separator();
 
         DrawCreateFolderPopup();
+        DrawRenameFolderPopup();
 
         var allEntries = library.Snapshot();
         var folders = library.SnapshotFolders();
         using (var contentPane = ImRaii.Child("##LibraryContent", new Vector2(-1, -1), false))
         {
             if (!contentPane.Success) return;
-
-            var currentFolder = LibraryService.NormalizeFolderPath(selectedFolder);
-            selectedFolder = currentFolder;
-
-            DrawFolderBreadcrumbs(currentFolder);
-            ImGui.Separator();
 
             var childFolders = folders
                 .Where(f => IsDirectChildFolder(currentFolder, f))
@@ -113,6 +130,28 @@ public sealed class LibraryWindow : Window
                 if (string.Equals(LibraryService.NormalizeFolderPath(e.FolderPath), currentFolder, StringComparison.OrdinalIgnoreCase))
                     entries.Add(e);
 
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                childFolders = folders
+                    .Where(f => IsFolderInCurrentTree(f, currentFolder))
+                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                entries = allEntries
+                    .Where(e => IsEntryInCurrentTree(e, currentFolder))
+                    .OrderBy(e => e.OriginalName, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(e => e.AddedAt)
+                    .ToList();
+            }
+
+            var favoriteEntries = allEntries
+                .Where(e => e.IsFavorite)
+                .Where(e => IsEntryInCurrentTree(e, currentFolder))
+                .Where(e => MatchesEntrySearch(e))
+                .OrderBy(e => e.OriginalName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(e => e.AddedAt)
+                .ToList();
+
             if (!string.IsNullOrEmpty(currentFolder))
             {
                 entries = entries
@@ -121,10 +160,20 @@ public sealed class LibraryWindow : Window
                     .ToList();
             }
 
-            if (viewMode == LibraryViewMode.Detail)
-                DrawDetailMode(allEntries, childFolders, entries);
+            if (contentTab == LibraryContentTab.Favorites)
+            {
+                if (viewMode == LibraryViewMode.Detail)
+                    DrawDetailMode(allEntries, [], favoriteEntries);
+                else
+                    DrawGridMode([], favoriteEntries, GetCellSize(viewMode));
+            }
             else
-                DrawGridMode(childFolders, entries, GetCellSize(viewMode));
+            {
+                if (viewMode == LibraryViewMode.Detail)
+                    DrawDetailMode(allEntries, childFolders, entries);
+                else
+                    DrawGridMode(childFolders, entries, GetCellSize(viewMode));
+            }
 
             DrawDeleteConfirm();
             DrawFolderDeleteConfirm();
@@ -139,7 +188,7 @@ public sealed class LibraryWindow : Window
         if (current != viewMode)
             viewMode = current;
 
-        ImGui.SetNextItemWidth(130f);
+        ImGui.SetNextItemWidth(85f);
         if (!ImGui.BeginCombo("##LibraryViewMode", GetViewModeLabel(viewMode)))
             return;
 
@@ -228,6 +277,34 @@ public sealed class LibraryWindow : Window
             ImGui.TextDisabled(Strings.T("library.empty"));
     }
 
+    private void DrawContentTabPicker()
+    {
+        var spacing = ImGui.GetStyle().ItemSpacing.X;
+        var width = MathF.Max(80f, (ImGui.GetContentRegionAvail().X) * 0.5f);
+
+        ImGui.SetCursorPosX(spacing);
+        if (DrawContentTabButton(Strings.T("library.tabs.favorites"), contentTab == LibraryContentTab.Favorites, width))
+            contentTab = LibraryContentTab.Favorites;
+
+        ImGui.SameLine();
+        ImGui.SetCursorPosX(width + spacing*2);
+        if (DrawContentTabButton(Strings.T("library.tabs.resources"), contentTab == LibraryContentTab.Resources, width))
+            contentTab = LibraryContentTab.Resources;
+    }
+
+    private static bool DrawContentTabButton(string label, bool active, float width)
+    {
+        var colors = ImGui.GetStyle().Colors;
+        var baseColor = active ? colors[(int)ImGuiCol.TabActive] : colors[(int)ImGuiCol.Tab];
+        var hoveredColor = colors[(int)ImGuiCol.TabHovered];
+
+        using var _1 = ImRaii.PushColor(ImGuiCol.Button, baseColor);
+        using var _2 = ImRaii.PushColor(ImGuiCol.ButtonHovered, hoveredColor);
+        using var _3 = ImRaii.PushColor(ImGuiCol.ButtonActive, baseColor);
+
+        return ImGui.Button(label, new Vector2(width, 0f));
+    }
+
     private void DrawDetailMode(IReadOnlyList<LibraryEntry> allEntries, IReadOnlyList<string> childFolders, IReadOnlyList<LibraryEntry> entries)
     {
         using var child = ImRaii.Child("##LibraryDetail", new Vector2(-1, -1), false);
@@ -261,6 +338,19 @@ public sealed class LibraryWindow : Window
                 if (ImGui.Selectable(folderName + "##folder_row_" + folder, false))
                     selectedFolder = folder;
 
+                if (ImGui.BeginPopupContextItem("##folder_row_ctx_" + folder))
+                {
+                    if (ImGui.MenuItem(Strings.T("library.menu.rename_folder")))
+                    {
+                        pendingRenameFolder = folder;
+                        renameFolderInput = folderName;
+                    }
+
+                    if (ImGui.MenuItem(Strings.T("library.menu.delete_folder")))
+                        pendingDeleteFolder = folder;
+                    ImGui.EndPopup();
+                }
+
                 ImGui.TableNextColumn();
                 ImGui.TextUnformatted(Strings.T("library.detail.folder_type"));
 
@@ -288,6 +378,9 @@ public sealed class LibraryWindow : Window
                     OnPicked?.Invoke(entry);
                 }
 
+                if (ImGui.IsItemHovered())
+                    DrawEntryPreviewTooltip(entry, 96f);
+
                 if (ImGui.BeginPopupContextItem("##lib_ctx_" + entry.Hash))
                 {
                     if (ImGui.MenuItem(Strings.T("library.menu.apply")))
@@ -295,6 +388,11 @@ public sealed class LibraryWindow : Window
                         selectedEntryHash = entry.Hash;
                         OnPicked?.Invoke(entry);
                     }
+
+                    if (ImGui.MenuItem(entry.IsFavorite
+                            ? Strings.T("library.menu.unfavorite")
+                            : Strings.T("library.menu.favorite")))
+                        library.SetFavorite(entry.Hash, !entry.IsFavorite);
 
                     ImGui.Separator();
                     if (ImGui.MenuItem(Strings.T("library.menu.delete")))
@@ -353,6 +451,51 @@ public sealed class LibraryWindow : Window
         }
     }
 
+    private void DrawRenameFolderPopup()
+    {
+        if (pendingRenameFolder == null) return;
+
+        ImGui.OpenPopup("##libRenameFolder");
+        using var popup = ImRaii.PopupModal("##libRenameFolder",
+            ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar);
+        if (!popup.Success) return;
+
+        var sourceFolder = pendingRenameFolder;
+        var sourceName = GetFolderName(sourceFolder);
+        ImGui.TextUnformatted(Strings.T("library.folder.rename_prompt", sourceName));
+
+        ImGui.SetNextItemWidth(280f);
+        ImGui.InputTextWithHint("##libRenameFolderName", Strings.T("library.folder.name_hint"), ref renameFolderInput, 256);
+
+        var normalizedInput = LibraryService.NormalizeFolderPath(renameFolderInput);
+        var parentPath = GetParentFolder(sourceFolder);
+        var targetFolder = string.IsNullOrEmpty(normalizedInput)
+            ? string.Empty
+            : string.IsNullOrEmpty(parentPath)
+                ? normalizedInput
+                : LibraryService.NormalizeFolderPath(parentPath + "/" + normalizedInput);
+
+        var confirmPressed = ImGui.Button(Strings.T("button.confirm"), new Vector2(120, 0));
+        var enterPressed = ImGui.IsKeyPressed(ImGuiKey.Enter) || ImGui.IsKeyPressed(ImGuiKey.KeypadEnter);
+        if (confirmPressed || enterPressed)
+        {
+            if (!string.IsNullOrEmpty(targetFolder) && library.RenameFolder(sourceFolder, targetFolder))
+                selectedFolder = RewritePathPrefix(selectedFolder, sourceFolder, targetFolder);
+
+            pendingRenameFolder = null;
+            renameFolderInput = string.Empty;
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button(Strings.T("button.cancel"), new Vector2(120, 0)))
+        {
+            pendingRenameFolder = null;
+            renameFolderInput = string.Empty;
+            ImGui.CloseCurrentPopup();
+        }
+    }
+
     private void DrawFolderCell(string folderPath, string folderName, float size, int maxLabelLines)
     {
         ImGui.BeginGroup();
@@ -363,6 +506,12 @@ public sealed class LibraryWindow : Window
 
         if (ImGui.BeginPopupContextItem("##folderCtx_" + folderPath))
         {
+            if (ImGui.MenuItem(Strings.T("library.menu.rename_folder")))
+            {
+                pendingRenameFolder = folderPath;
+                renameFolderInput = folderName;
+            }
+
             if (ImGui.MenuItem(Strings.T("library.menu.delete_folder")))
                 pendingDeleteFolder = folderPath;
             ImGui.EndPopup();
@@ -392,11 +541,67 @@ public sealed class LibraryWindow : Window
         ImGui.EndGroup();
     }
 
+    private void DrawEntryPreviewTooltip(LibraryEntry entry, float previewSize)
+    {
+        ImGui.BeginTooltip();
+
+        var thumbPath = library.ThumbPath(entry);
+        if (!File.Exists(thumbPath))
+            library.EnsureThumb(entry);
+
+        if (File.Exists(thumbPath))
+        {
+            var wrap = textureProvider.GetFromFile(thumbPath).GetWrapOrDefault();
+            if (wrap != null)
+            {
+                var maxDim = Math.Max(wrap.Width, wrap.Height);
+                if (maxDim > 0)
+                {
+                    var scale = previewSize / maxDim;
+                    var size = new Vector2(wrap.Width * scale, wrap.Height * scale);
+                    ImGui.Image(wrap.Handle, size);
+                }
+            }
+        }
+
+        ImGui.TextUnformatted(entry.OriginalName);
+        ImGui.TextDisabled($"{entry.Width} x {entry.Height}");
+        ImGui.TextDisabled(Strings.T("library.tooltip.used_count", entry.UseCount));
+        ImGui.EndTooltip();
+    }
+
     private static string GetFolderName(string folderPath)
     {
         if (string.IsNullOrEmpty(folderPath)) return string.Empty;
         var idx = folderPath.LastIndexOf('/');
         return idx < 0 ? folderPath : folderPath[(idx + 1)..];
+    }
+
+    private static string GetParentFolder(string folderPath)
+    {
+        var normalized = LibraryService.NormalizeFolderPath(folderPath);
+        if (string.IsNullOrEmpty(normalized)) return string.Empty;
+
+        var idx = normalized.LastIndexOf('/');
+        return idx < 0 ? string.Empty : normalized[..idx];
+    }
+
+    private static string RewritePathPrefix(string path, string oldPrefix, string newPrefix)
+    {
+        var normalizedPath = LibraryService.NormalizeFolderPath(path);
+        var oldNormalized = LibraryService.NormalizeFolderPath(oldPrefix);
+        var newNormalized = LibraryService.NormalizeFolderPath(newPrefix);
+
+        if (string.IsNullOrEmpty(normalizedPath) || string.IsNullOrEmpty(oldNormalized))
+            return normalizedPath;
+
+        if (string.Equals(normalizedPath, oldNormalized, StringComparison.OrdinalIgnoreCase))
+            return newNormalized;
+
+        if (!normalizedPath.StartsWith(oldNormalized + "/", StringComparison.OrdinalIgnoreCase))
+            return normalizedPath;
+
+        return newNormalized + normalizedPath[oldNormalized.Length..];
     }
 
     private static bool IsDirectChildFolder(string parentFolder, string candidateFolder)
@@ -415,28 +620,232 @@ public sealed class LibraryWindow : Window
         return !remainder.Contains('/');
     }
 
-    private void DrawFolderBreadcrumbs(string currentFolder)
+    private static bool IsSameOrDescendantFolder(string rootFolder, string candidateFolder)
     {
+        var root = LibraryService.NormalizeFolderPath(rootFolder);
+        var candidate = LibraryService.NormalizeFolderPath(candidateFolder);
+
+        if (string.IsNullOrEmpty(root))
+            return true;
+
+        if (string.IsNullOrEmpty(candidate))
+            return false;
+
+        return string.Equals(root, candidate, StringComparison.OrdinalIgnoreCase)
+               || candidate.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsEntryInCurrentTree(LibraryEntry entry, string currentFolder)
+    {
+        var entryFolder = LibraryService.NormalizeFolderPath(entry.FolderPath);
+        return IsSameOrDescendantFolder(currentFolder, entryFolder);
+    }
+
+    private static bool IsFolderInCurrentTree(string folderPath, string currentFolder)
+    {
+        var folder = LibraryService.NormalizeFolderPath(folderPath);
+        return IsSameOrDescendantFolder(currentFolder, folder);
+    }
+
+    private readonly record struct BreadcrumbItem(string FullLabel, string Path);
+    private readonly record struct BreadcrumbRenderItem(string Label, string FullLabel, string Path, bool ShowTooltip);
+
+    private void DrawFolderBreadcrumbs(string currentFolder, float startX, float availableWidth)
+    {
+        if (availableWidth <= 0f)
+            return;
+
+        var items = BuildBreadcrumbItems(currentFolder);
+        if (items.Count == 0)
+            return;
+
+        var firstVisible = 0;
+        var rendered = BuildBreadcrumbRenderItems(items, firstVisible, availableWidth);
+        while (firstVisible < items.Count - 1 && rendered == null)
+        {
+            firstVisible++;
+            var prefixWidth = firstVisible > 0 ? MeasureBreadcrumbOverflowPrefixWidth() : 0f;
+            rendered = BuildBreadcrumbRenderItems(items, firstVisible, MathF.Max(0f, availableWidth - prefixWidth));
+        }
+
+        if (rendered == null)
+            return;
+
+        ImGui.SetCursorPosX(startX);
+
+        if (firstVisible > 0)
+        {
+            var overflowPopupId = "##crumb_overflow_popup_" + currentFolder;
+            if (ImGui.Button("...##crumb_overflow_btn_" + currentFolder))
+                ImGui.OpenPopup(overflowPopupId);
+
+            if (ImGui.BeginPopup(overflowPopupId))
+            {
+                for (var i = 0; i < firstVisible; i++)
+                {
+                    var item = items[i];
+                    var label = string.IsNullOrEmpty(item.Path) ? item.FullLabel : item.Path;
+                    if (ImGui.Selectable(label + "##crumb_hidden_" + item.Path))
+                    {
+                        selectedFolder = item.Path;
+                        ImGui.CloseCurrentPopup();
+                    }
+                }
+
+                ImGui.EndPopup();
+            }
+
+            if (rendered.Count > 0)
+            {
+                ImGui.SameLine();
+                ImGui.AlignTextToFramePadding();
+                ImGui.TextDisabled(">");
+                ImGui.SameLine();
+            }
+        }
+
+        for (var i = 0; i < rendered.Count; i++)
+        {
+            var item = rendered[i];
+            if (ImGui.Button(item.Label + "##crumb_" + item.Path))
+                selectedFolder = item.Path;
+
+            if (item.ShowTooltip && ImGui.IsItemHovered())
+                ImGui.SetTooltip(item.FullLabel);
+
+            if (i < rendered.Count - 1)
+            {
+                ImGui.SameLine();
+                ImGui.AlignTextToFramePadding();
+                ImGui.TextDisabled(">");
+                ImGui.SameLine();
+            }
+        }
+    }
+
+    private static float MeasureBreadcrumbOverflowPrefixWidth()
+    {
+        var style = ImGui.GetStyle();
+        var framePadX = style.FramePadding.X * 2f;
+        var itemSpacingX = style.ItemSpacing.X;
+        var separatorWidth = ImGui.CalcTextSize(">").X;
+
+        var overflowButtonWidth = ImGui.CalcTextSize("...").X + framePadX;
+        return overflowButtonWidth + itemSpacingX + separatorWidth + itemSpacingX;
+    }
+
+    private static List<BreadcrumbItem> BuildBreadcrumbItems(string currentFolder)
+    {
+        var items = new List<BreadcrumbItem>();
         var allLabel = Strings.T("library.folder.all");
-        if (ImGui.Button(allLabel + "##crumb_root"))
-            selectedFolder = string.Empty;
+        items.Add(new BreadcrumbItem(allLabel, string.Empty));
 
         if (string.IsNullOrEmpty(currentFolder))
-            return;
+            return items;
 
         var parts = currentFolder.Split('/', StringSplitOptions.RemoveEmptyEntries);
         var path = string.Empty;
         foreach (var part in parts)
         {
-            ImGui.SameLine();
-            ImGui.AlignTextToFramePadding();
-            ImGui.TextDisabled(">");
-            ImGui.SameLine();
-
             path = string.IsNullOrEmpty(path) ? part : path + "/" + part;
-            if (ImGui.Button(part + "##crumb_" + path))
-                selectedFolder = path;
+            items.Add(new BreadcrumbItem(part, path));
         }
+
+        return items;
+    }
+
+    private static List<BreadcrumbRenderItem>? BuildBreadcrumbRenderItems(
+        IReadOnlyList<BreadcrumbItem> items,
+        int startIndex,
+        float availableWidth)
+    {
+        if (startIndex >= items.Count)
+            return [];
+
+        const int minTruncateChars = 16;
+
+        var render = new List<BreadcrumbRenderItem>(items.Count - startIndex);
+        var limits = new List<int>(items.Count - startIndex);
+        var minLimits = new List<int>(items.Count - startIndex);
+
+        for (var i = startIndex; i < items.Count; i++)
+        {
+            var full = items[i].FullLabel;
+            limits.Add(full.Length);
+            minLimits.Add(Math.Min(minTruncateChars, full.Length));
+            render.Add(new BreadcrumbRenderItem(full, full, items[i].Path, false));
+        }
+
+        var totalWidth = MeasureBreadcrumbWidth(render);
+        while (totalWidth > availableWidth)
+        {
+            var reduceIndex = -1;
+            var widest = float.MinValue;
+            for (var i = 0; i < render.Count; i++)
+            {
+                if (limits[i] <= minLimits[i])
+                    continue;
+
+                var width = ImGui.CalcTextSize(render[i].Label).X;
+                if (width > widest)
+                {
+                    widest = width;
+                    reduceIndex = i;
+                }
+            }
+
+            if (reduceIndex < 0)
+                return null;
+
+            limits[reduceIndex]--;
+            var reduced = TruncateLabel(render[reduceIndex].FullLabel, limits[reduceIndex]);
+            render[reduceIndex] = new BreadcrumbRenderItem(
+                reduced,
+                render[reduceIndex].FullLabel,
+                render[reduceIndex].Path,
+                reduced != render[reduceIndex].FullLabel);
+
+            totalWidth = MeasureBreadcrumbWidth(render);
+        }
+
+        return render;
+    }
+
+    private static float MeasureBreadcrumbWidth(IReadOnlyList<BreadcrumbRenderItem> items)
+    {
+        if (items.Count == 0)
+            return 0f;
+
+        var style = ImGui.GetStyle();
+        var framePadX = style.FramePadding.X * 2f;
+        var itemSpacingX = style.ItemSpacing.X;
+        var separatorWidth = ImGui.CalcTextSize(">").X;
+
+        float total = 0f;
+        for (var i = 0; i < items.Count; i++)
+        {
+            var buttonWidth = ImGui.CalcTextSize(items[i].Label).X + framePadX;
+            total += buttonWidth;
+
+            if (i < items.Count - 1)
+                total += itemSpacingX + separatorWidth + itemSpacingX;
+        }
+
+        return total;
+    }
+
+    private static string TruncateLabel(string value, int maxChars)
+    {
+        if (string.IsNullOrEmpty(value) || maxChars <= 0)
+            return string.Empty;
+
+        if (value.Length <= maxChars)
+            return value;
+
+        if (maxChars <= 3)
+            return new string('.', maxChars);
+
+        return value[..(maxChars - 3)] + "...";
     }
 
     private void DrawCell(LibraryEntry entry, float size, int maxLabelLines)
@@ -507,6 +916,12 @@ public sealed class LibraryWindow : Window
                 selectedEntryHash = entry.Hash;
                 OnPicked?.Invoke(entry);
             }
+
+            if (ImGui.MenuItem(entry.IsFavorite
+                    ? Strings.T("library.menu.unfavorite")
+                    : Strings.T("library.menu.favorite")))
+                library.SetFavorite(entry.Hash, !entry.IsFavorite);
+
             ImGui.Separator();
             if (ImGui.MenuItem(Strings.T("library.menu.delete")))
                 pendingDeleteHash = entry.Hash;
@@ -526,19 +941,67 @@ public sealed class LibraryWindow : Window
 
     private void DrawLargeFolderIcon(ImDrawListPtr drawList, Vector2 cursor, float size, bool hovered)
     {
-        // Use the icon at its native size -- the bitmap font glyph blurs badly when
-        // upscaled. The cell background + folder name below carry the "folder" feel.
-        ImGui.PushFont(UiBuilder.IconFont);
-        var iconStr = FontAwesomeIcon.FolderOpen.ToIconString();
-        var iconColor = hovered
-            ? ImGui.GetColorU32(new Vector4(0.95f, 0.78f, 0.40f, 1f))
-            : ImGui.GetColorU32(new Vector4(0.85f, 0.70f, 0.35f, 1f));
-        var measured = ImGui.CalcTextSize(iconStr);
-        var iconPos = new Vector2(
-            cursor.X + (size - measured.X) * 0.5f,
-            cursor.Y + (size - measured.Y) * 0.5f);
-        drawList.AddText(iconPos, iconColor, iconStr);
-        ImGui.PopFont();
+        if (File.Exists(folderIconPath))
+        {
+            var wrap = textureProvider.GetFromFile(folderIconPath).GetWrapOrDefault();
+            if (wrap != null)
+            {
+                var iconMaxSize = MathF.Max(16f, size - 10f);
+                var iw = wrap.Width;
+                var ih = wrap.Height;
+                var maxDim = Math.Max(iw, ih);
+                if (maxDim > 0)
+                {
+                    var scale = iconMaxSize / maxDim;
+                    var dw = iw * scale;
+                    var dh = ih * scale;
+                    var min = new Vector2(
+                        MathF.Round(cursor.X + (size - dw) * 0.5f),
+                        MathF.Round(cursor.Y + (size - dh) * 0.5f));
+                    var max = min + new Vector2(dw, dh);
+                    drawList.AddImage(wrap.Handle, min, max, Vector2.Zero, Vector2.One);
+                    return;
+                }
+            }
+        }
+
+        //// Fallback keeps the previous crisp vector icon if the PNG is unavailable.
+        //var iconInset = MathF.Max(6f, size * 0.15f);
+        //var iconWidth = MathF.Max(16f, size - (iconInset * 2f));
+        //var iconHeight = MathF.Max(12f, iconWidth * 0.68f);
+
+        //var iconMin = new Vector2(
+        //    MathF.Round(cursor.X + (size - iconWidth) * 0.5f),
+        //    MathF.Round(cursor.Y + (size - iconHeight) * 0.5f));
+        //var iconMax = new Vector2(iconMin.X + iconWidth, iconMin.Y + iconHeight);
+
+        //var bodyTop = MathF.Round(iconMin.Y + iconHeight * 0.26f);
+        //var tabHeight = MathF.Max(4f, MathF.Round(iconHeight * 0.24f));
+        //var tabWidth = MathF.Round(iconWidth * 0.50f);
+        //var tabStartX = MathF.Round(iconMin.X + iconWidth * 0.08f);
+
+        //var folderBodyMin = new Vector2(iconMin.X, bodyTop);
+        //var folderBodyMax = iconMax;
+        //var folderTabMin = new Vector2(tabStartX, bodyTop - tabHeight);
+        //var folderTabMax = new Vector2(tabStartX + tabWidth, bodyTop + 1f);
+
+        //var cornerRadius = MathF.Max(2f, MathF.Min(6f, iconHeight * 0.10f));
+        //var tabRadius = MathF.Max(2f, cornerRadius - 1f);
+
+        //var bodyColor = hovered
+        //    ? ImGui.GetColorU32(new Vector4(0.95f, 0.78f, 0.40f, 1f))
+        //    : ImGui.GetColorU32(new Vector4(0.85f, 0.70f, 0.35f, 1f));
+        //var tabColor = hovered
+        //    ? ImGui.GetColorU32(new Vector4(0.99f, 0.86f, 0.56f, 1f))
+        //    : ImGui.GetColorU32(new Vector4(0.92f, 0.77f, 0.45f, 1f));
+        //var edgeColor = hovered
+        //    ? ImGui.GetColorU32(new Vector4(0.42f, 0.33f, 0.14f, 0.95f))
+        //    : ImGui.GetColorU32(new Vector4(0.36f, 0.29f, 0.12f, 0.90f));
+
+        //drawList.AddRectFilled(folderBodyMin, folderBodyMax, bodyColor, cornerRadius);
+        //drawList.AddRectFilled(folderTabMin, folderTabMax, tabColor, tabRadius);
+        //drawList.AddRect(folderBodyMin, folderBodyMax, edgeColor, cornerRadius, ImDrawFlags.None, 1.1f);
+        //drawList.AddRect(folderTabMin, folderTabMax, edgeColor, tabRadius, ImDrawFlags.None, 1.0f);
     }
 
     private static void DrawNameTypeIcon(FontAwesomeIcon icon)
@@ -794,7 +1257,9 @@ public sealed class LibraryWindow : Window
         ImGui.TextUnformatted(Strings.T("library.folder.delete_prompt", pendingDeleteFolder));
         ImGui.Spacing();
 
-        if (ImGui.Button(Strings.T("button.confirm"), new Vector2(120, 0)))
+        var confirmPressed = ImGui.Button(Strings.T("button.confirm"), new Vector2(120, 0));
+        var enterPressed = ImGui.IsKeyPressed(ImGuiKey.Enter) || ImGui.IsKeyPressed(ImGuiKey.KeypadEnter);
+        if (confirmPressed || enterPressed)
         {
             var deleted = pendingDeleteFolder;
             library.DeleteFolder(deleted);
@@ -831,7 +1296,9 @@ public sealed class LibraryWindow : Window
         ImGui.TextUnformatted(Strings.T("library.delete_prompt", entry.OriginalName));
         ImGui.Spacing();
 
-        if (ImGui.Button(Strings.T("button.confirm"), new Vector2(120, 0)))
+        var confirmPressed = ImGui.Button(Strings.T("button.confirm"), new Vector2(120, 0));
+        var enterPressed = ImGui.IsKeyPressed(ImGuiKey.Enter) || ImGui.IsKeyPressed(ImGuiKey.KeypadEnter);
+        if (confirmPressed || enterPressed)
         {
             library.Remove(entry.Hash);
             pendingDeleteHash = null;

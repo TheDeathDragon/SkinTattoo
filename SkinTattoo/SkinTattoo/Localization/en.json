@@ -105,6 +105,10 @@
       "small": "Small",
       "detail": "Detail"
     },
+    "tabs": {
+      "favorites": "Favorites",
+      "resources": "Resources"
+    },
     "detail": {
       "name": "Name",
       "type": "Type",
@@ -115,7 +119,8 @@
     "folder": {
       "all": "All",
       "name_hint": "Folder name",
-      "delete_prompt": "Delete folder \"{0}\"?\nEntries inside will move to the parent folder (no resources are deleted)."
+      "delete_prompt": "Delete folder \"{0}\" and all its contents?\nThis permanently deletes all files and subfolders inside.",
+      "rename_prompt": "Rename folder \"{0}\" to:"
     },
     "import_folder_hint": "Folder path...",
     "import_folder_button": "Import Folder",
@@ -130,8 +135,14 @@
     },
     "menu": {
       "apply": "Apply to current layer",
+      "favorite": "Favorite",
+      "unfavorite": "Unfavorite",
       "delete": "Remove from library",
+      "rename_folder": "Rename folder",
       "delete_folder": "Delete folder"
+    },
+    "favorites": {
+      "title": "Favorites"
     }
   },
   "button": {

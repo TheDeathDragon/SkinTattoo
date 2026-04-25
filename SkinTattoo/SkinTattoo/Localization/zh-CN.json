@@ -99,6 +99,10 @@
       "small": "小图标",
       "detail": "详细信息"
     },
+    "tabs": {
+      "favorites": "收藏",
+      "resources": "资源"
+    },
     "detail": {
       "name": "名称",
       "type": "类型",
@@ -109,7 +113,8 @@
     "folder": {
       "all": "全部",
       "name_hint": "文件夹名称",
-      "delete_prompt": "删除文件夹 \"{0}\"？\n夹内素材将移到上级文件夹（不会被删除）。"
+      "delete_prompt": "删除文件夹 \"{0}\" 及其全部内容？\n此操作会永久删除该文件夹内所有文件和子文件夹。",
+      "rename_prompt": "将文件夹 \"{0}\" 重命名为："
     },
     "import_folder_hint": "文件夹路径...",
     "import_folder_button": "导入文件夹",
@@ -124,8 +129,14 @@
     },
     "menu": {
       "apply": "应用到当前图层",
+      "favorite": "收藏",
+      "unfavorite": "取消收藏",
       "delete": "从素材库中删除",
+      "rename_folder": "重命名文件夹",
       "delete_folder": "删除文件夹"
+    },
+    "favorites": {
+      "title": "收藏"
     }
   },
   "tab": {

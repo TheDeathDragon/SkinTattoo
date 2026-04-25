@@ -151,4 +151,6 @@ public class Configuration : IPluginConfiguration
         if (GameSwapIntervalMs > 500) GameSwapIntervalMs = 500;
     }
     public void Save() => pluginInterface?.SavePluginConfig(this);
+
+    public string GetAsmDir() => pluginInterface?.AssemblyLocation?.DirectoryName ?? string.Empty;
 }
