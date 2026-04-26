@@ -1,6 +1,20 @@
 {
   "versions": [
     {
+      "version": "0.2.9",
+      "date": "2026-04-26",
+      "en": [
+        { "text": "Project management + library favorites / folder rename (thanks @arandommug, #7)", "links": [{ "label": "@arandommug", "url": "https://github.com/arandommug" }, { "label": "#7", "url": "https://github.com/TheDeathDragon/SkinTattoo/pull/7" }] },
+        { "text": "Canvas link toggle to sync the preview map with the selected layer's target; new layers inherit the canvas map" },
+        { "text": "Escape no longer closes the main window from inside dialogs; optional setting to keep the window visible when the game UI is hidden" }
+      ],
+      "zh": [
+        { "text": "项目管理 + 素材库收藏 / 文件夹重命名 (感谢 @arandommug, #7)", "links": [{ "label": "@arandommug", "url": "https://github.com/arandommug" }, { "label": "#7", "url": "https://github.com/TheDeathDragon/SkinTattoo/pull/7" }] },
+        { "text": "画布新增链接开关同步预览与图层目标贴图，新增图层时目标跟随当前画布" },
+        { "text": "弹窗内按 Escape 不再连带关闭主窗口；可选设置：游戏界面隐藏时保留插件窗口" }
+      ]
+    },
+    {
       "version": "0.2.8",
       "date": "2026-04-25",
       "en": [
