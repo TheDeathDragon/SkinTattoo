@@ -342,7 +342,9 @@
     "export": {
       "options": {
         "title": "导出选项",
-        "include_images": "在导出项目中包含图片"
+        "include_images": "在导出项目中包含图片",
+        "path": "导出路径",
+        "browse_path": "选择导出路径"
       }
     },
     "dialog": {

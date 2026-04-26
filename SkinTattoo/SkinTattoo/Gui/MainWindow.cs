@@ -58,6 +58,8 @@ public partial class MainWindow : Window, IDisposable
     // Project management state
     private string? currentProjectPath;
     private bool suppressProjectAutoSave;
+    private int untitledCounter = -1;   // cached; -1 = not yet initialised
+    private Task? autoSaveTask;
     private bool projectTabFirstOpenHandled;
     private int selectedProjectRow = -1;
     private List<ProjectFileService.ProjectListItem> cachedProjectList = [];
@@ -70,6 +72,7 @@ public partial class MainWindow : Window, IDisposable
     private bool openProjectExportOptionsModal;
     private bool exportIncludeImages = true;
     private int pendingExportProjectRow = -1;
+    private string downloadDir = string.Empty;
 
     // Cached base texture size
     private int lastBaseTexWidth;
@@ -1321,25 +1324,35 @@ public partial class MainWindow : Window, IDisposable
             config.Save();
         }
 
-        var projectName = Path.GetFileName(Path.GetDirectoryName(currentProjectPath) ?? "Untitled");
-        projectFileService.SaveProject(currentProjectPath, projectName, snapshot);
+        var savePath = currentProjectPath;
+        var projectName = Path.GetFileName(Path.GetDirectoryName(savePath) ?? "Untitled");
+
+        // Run file I/O on a background thread so the render thread is not blocked.
+        autoSaveTask = Task.Run(() => projectFileService.SaveProject(savePath, projectName, snapshot));
     }
 
     private string GetNextUntitledProjectName()
     {
-        var projects = projectFileService.ListProjects();
-        int max = 0;
-        foreach (var p in projects)
+        // Initialise counter once by scanning existing projects; afterwards just
+        // increment in memory so ListProjects() is never called per-edit.
+        if (untitledCounter < 0)
         {
-            var name = p.Name;
-            if (name.StartsWith("Untitled ", StringComparison.OrdinalIgnoreCase)
-                && int.TryParse(name[9..], out var n)
-                && n > max)
+            var projects = projectFileService.ListProjects();
+            int max = 0;
+            foreach (var p in projects)
             {
-                max = n;
+                var name = p.Name;
+                if (name.StartsWith("Untitled ", StringComparison.OrdinalIgnoreCase)
+                    && int.TryParse(name[9..], out var n)
+                    && n > max)
+                {
+                    max = n;
+                }
             }
+            untitledCounter = max;
         }
 
-        return $"Untitled {max + 1}";
+        untitledCounter++;
+        return $"Untitled {untitledCounter}";
     }
 }

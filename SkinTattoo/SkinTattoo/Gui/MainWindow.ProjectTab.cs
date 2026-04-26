@@ -621,17 +621,49 @@ public partial class MainWindow
         ImGui.Checkbox(Strings.T("project.export.options.include_images"), ref exportIncludeImages);
         ImGui.Spacing();
 
+        if (string.IsNullOrEmpty(downloadDir))
+            downloadDir = GetDownloadDirectory();
+
+        ImGui.SetNextItemWidth(-1);
+        ImGui.TextUnformatted(Strings.T("project.export.options.path"));
+        if(ImGui.InputText("##project_export_path", ref downloadDir, 256))
+        {
+            if (!Directory.Exists(downloadDir))
+                downloadDir = GetDownloadDirectory();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(downloadDir);
+
+        ImGui.SameLine();
+        if (UiHelpers.SquareIconButton("##project_export_browse", FontAwesomeIcon.FolderOpen))
+        {
+            fileDialog.OpenFolderDialog(
+                Strings.T("project.export.options.browse_path"),
+                (ok, path) =>
+                {
+                    openProjectExportOptionsModal = true;
+                    if (!ok || string.IsNullOrWhiteSpace(path)) return;
+                    if (!Directory.Exists(path)) return;
+                    downloadDir = path;
+                },
+                downloadDir,
+                true
+            );
+        }
+
         if (ImGui.Button(Strings.T("button.confirm"), new Vector2(120, 0)))
         {
             if (pendingExportProjectRow >= 0 && pendingExportProjectRow < cachedProjectList.Count)
             {
+
+
                 var item = cachedProjectList[pendingExportProjectRow];
                 var fileName = item.Name;
                 if (string.IsNullOrWhiteSpace(fileName))
                     fileName = Path.GetFileName(Path.GetDirectoryName(item.ProjectPath) ?? string.Empty);
                 if (string.IsNullOrWhiteSpace(fileName))
                     fileName = "project";
-                var targetPath = GetUniqueFilePath(Path.Combine(GetDownloadDirectory(), fileName + ".proj.json"));
+                var targetPath = GetUniqueFilePath(Path.Combine(downloadDir, fileName + ".proj.json"));
                 ExportProjectRowToPath(pendingExportProjectRow, targetPath);
             }
 

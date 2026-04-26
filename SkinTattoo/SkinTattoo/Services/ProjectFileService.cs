@@ -751,7 +751,7 @@ public sealed class ProjectFileService
                 chars[i] = '_';
         }
 
-        var cleaned = new string(chars).Trim();
+        var cleaned = new string(chars).Trim(' ', '.');
         return string.IsNullOrWhiteSpace(cleaned) ? "Untitled" : cleaned;
     }
 
