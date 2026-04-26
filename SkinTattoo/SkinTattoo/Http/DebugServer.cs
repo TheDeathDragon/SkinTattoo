@@ -42,6 +42,7 @@ public class DebugServer : IDisposable
 
     private readonly TextureSwapService? _textureSwap;
     private readonly Mesh.SkinMeshResolver _resolver;
+    private readonly LibraryService? _library;
 
     public DebugServer(
         Configuration config,
@@ -51,6 +52,7 @@ public class DebugServer : IDisposable
         IDataManager dataManager,
         ModExportService exportService,
         Mesh.SkinMeshResolver resolver,
+        LibraryService? library = null,
         TextureSwapService? textureSwap = null)
     {
         _config = config;
@@ -60,6 +62,7 @@ public class DebugServer : IDisposable
         _dataManager = dataManager;
         _exportService = exportService;
         _resolver = resolver;
+        _library = library;
         _textureSwap = textureSwap;
     }
 
@@ -72,7 +75,7 @@ public class DebugServer : IDisposable
             .WithUrlPrefix(url)
             .WithMode(HttpListenerMode.EmbedIO))
             .WithWebApi("/api", m => m.WithController(() =>
-                new ApiController(_project, _penumbra, _preview, _config, _dataManager, _exportService, _resolver, _textureSwap)));
+                new ApiController(_project, _penumbra, _preview, _config, _dataManager, _exportService, _resolver, _library, _textureSwap)));
 
         _ = _server.RunAsync(_cts.Token).ContinueWith(t =>
         {
@@ -102,6 +105,7 @@ internal sealed class ApiController : WebApiController
     private readonly IDataManager _dataManager;
     private readonly ModExportService _exportService;
     private readonly Mesh.SkinMeshResolver _resolver;
+    private readonly LibraryService? _library;
     private readonly TextureSwapService? _textureSwap;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -117,6 +121,7 @@ internal sealed class ApiController : WebApiController
         IDataManager dataManager,
         ModExportService exportService,
         Mesh.SkinMeshResolver resolver,
+        LibraryService? library = null,
         TextureSwapService? textureSwap = null)
     {
         _project = project;
@@ -126,6 +131,7 @@ internal sealed class ApiController : WebApiController
         _dataManager = dataManager;
         _exportService = exportService;
         _resolver = resolver;
+        _library = library;
         _textureSwap = textureSwap;
     }
 
@@ -605,6 +611,178 @@ internal sealed class ApiController : WebApiController
     {
         entries = DebugServer.LogBuffer.ToArray(),
     };
+
+    // -- Test endpoints (introspect library state) ----------------------------
+    [Route(HttpVerbs.Get, "/test/library/folders")]
+    public object TestLibraryFolders()
+    {
+        if (_library == null) return new { error = "library unavailable" };
+        return new { folders = _library.SnapshotFolders().ToList() };
+    }
+
+    [Route(HttpVerbs.Get, "/test/library/entries")]
+    public object TestLibraryEntries()
+    {
+        if (_library == null) return new { error = "library unavailable" };
+        return new
+        {
+            entries = _library.Snapshot().Select(e => new
+            {
+                hash = e.Hash,
+                fileName = e.FileName,
+                originalName = e.OriginalName,
+                folder = e.FolderPath,
+                isFavorite = e.IsFavorite,
+                width = e.Width,
+                height = e.Height,
+            }).ToList(),
+        };
+    }
+
+    [Route(HttpVerbs.Get, "/test/library/blob-files")]
+    public object TestLibraryBlobFiles()
+    {
+        if (_library == null) return new { error = "library unavailable" };
+        var dir = _library.BlobsDir;
+        if (!Directory.Exists(dir)) return new { dir, files = Array.Empty<string>() };
+        var files = Directory.GetFiles(dir).Select(Path.GetFileName).OrderBy(s => s).ToList();
+        return new { dir, count = files.Count, files };
+    }
+
+    // -- Test runner: validates the recent LibraryService bug fixes -----------
+    // Runs in isolation under a "_test_" prefixed folder so existing user data
+    // is not affected.
+    [Route(HttpVerbs.Post, "/test/run-library-suite")]
+    public async Task<object> TestRunLibrarySuite()
+    {
+        if (_library == null) return new { error = "library unavailable" };
+        await Task.Yield();
+
+        var prefix = $"_test_{DateTime.Now:HHmmssfff}";
+        var results = new List<object>();
+        var pass = 0; var fail = 0;
+
+        void Record(string name, bool ok, string? detail = null)
+        {
+            results.Add(new { name, ok, detail });
+            if (ok) pass++; else fail++;
+            DebugServer.AppendLog($"[TestSuite] {(ok ? "PASS" : "FAIL")} {name}{(detail == null ? "" : " :: " + detail)}");
+        }
+
+        try
+        {
+            DebugServer.AppendLog($"[TestSuite] BEGIN prefix={prefix}");
+
+            // ---- Test 1: RenameFolder tracks parent components ----
+            // Setup: create folder "<prefix>/A". Rename to "<prefix>/X/Y".
+            // Expect: "<prefix>/X" exists in folder list afterwards.
+            var oldPath = $"{prefix}/A";
+            var newPath = $"{prefix}/X/Y";
+            _library.CreateFolder(oldPath);
+            var renamed = _library.RenameFolder(oldPath, newPath);
+            var foldersAfter = _library.SnapshotFolders();
+            var hasParent = foldersAfter.Contains($"{prefix}/X", StringComparer.OrdinalIgnoreCase);
+            Record("rename_folder_parent_tracked", renamed && hasParent,
+                $"renamed={renamed} hasParent={hasParent} folders=[{string.Join(",", foldersAfter.Where(f => f.StartsWith(prefix)))}]");
+
+            // ---- Test 2: ImportProjectPayload + extension-change cleanup ----
+            // Import the same hash twice with different extensions -- the second
+            // call should canonicalize FileName and delete the old blob.
+            var pngBytes = MakePngBytes(8, 8, 0xFF, 0x80, 0x40);
+            var hash = HashBytes(pngBytes);
+            var importedA = _library.ImportProjectPayload(hash, "synthetic.png", "synthetic", $"{prefix}/I", pngBytes);
+            var fileA = importedA?.FileName;
+            var blobAExists = fileA != null && File.Exists(Path.Combine(_library.BlobsDir, fileA));
+            Record("import_payload_initial", importedA != null && blobAExists,
+                $"file={fileA} exists={blobAExists}");
+
+            // Re-import same hash with a different extension. The bytes are the
+            // same, but the canonical filename should change to .jpg and the
+            // old .png blob should be removed.
+            var importedB = _library.ImportProjectPayload(hash, "synthetic.jpg", "synthetic", $"{prefix}/I", pngBytes);
+            var fileB = importedB?.FileName;
+            var blobBExists = fileB != null && File.Exists(Path.Combine(_library.BlobsDir, fileB));
+            var oldBlobGone = fileA == null || !File.Exists(Path.Combine(_library.BlobsDir, fileA)) || string.Equals(fileA, fileB, StringComparison.OrdinalIgnoreCase);
+            Record("import_payload_old_blob_cleaned",
+                importedB != null && blobBExists && oldBlobGone,
+                $"oldFile={fileA} newFile={fileB} oldGone={oldBlobGone}");
+
+            // ---- Test 3: DeleteFolder physically removes blobs ----
+            // Use the entry from Test 2 (folder = <prefix>/I) and delete its folder.
+            var blobBeforeDelete = importedB != null
+                ? Path.Combine(_library.BlobsDir, importedB.FileName)
+                : null;
+            var deleted = _library.DeleteFolder($"{prefix}/I");
+            var blobAfterDelete = blobBeforeDelete != null && File.Exists(blobBeforeDelete);
+            var entryGone = importedB == null || _library.Get(importedB.Hash) == null;
+            Record("delete_folder_removes_blob",
+                deleted && !blobAfterDelete && entryGone,
+                $"deleted={deleted} blobStillExists={blobAfterDelete} entryGone={entryGone}");
+
+            // ---- Test 4: SetFavorite round-trip ----
+            // Import a fresh entry, toggle favorite, verify state.
+            var pngBytes2 = MakePngBytes(8, 8, 0x10, 0x20, 0x30);
+            var hash2 = HashBytes(pngBytes2);
+            var importedC = _library.ImportProjectPayload(hash2, "fav.png", "fav", $"{prefix}/F", pngBytes2);
+            var setOk = importedC != null && _library.SetFavorite(importedC.Hash, true);
+            var entryC = importedC != null ? _library.Get(importedC.Hash) : null;
+            Record("set_favorite_toggle",
+                setOk && entryC != null && entryC.IsFavorite,
+                $"setOk={setOk} isFavorite={entryC?.IsFavorite}");
+
+            // Toggle off again, then idempotent (no-op when already off).
+            var unsetOk = importedC != null && _library.SetFavorite(importedC.Hash, false);
+            var noOpReturnsFalse = importedC != null && !_library.SetFavorite(importedC.Hash, false);
+            Record("set_favorite_idempotent",
+                unsetOk && noOpReturnsFalse,
+                $"unsetOk={unsetOk} noOpReturnsFalse={noOpReturnsFalse}");
+        }
+        catch (Exception ex)
+        {
+            Record("uncaught_exception", false, ex.ToString());
+        }
+        finally
+        {
+            // Best-effort cleanup: nuke any folders we created under the prefix.
+            try
+            {
+                foreach (var f in _library.SnapshotFolders().Where(f => f.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList())
+                    _library.DeleteFolder(f);
+            }
+            catch (Exception ex)
+            {
+                DebugServer.AppendLog($"[TestSuite] cleanup error: {ex.Message}");
+            }
+            DebugServer.AppendLog($"[TestSuite] END pass={pass} fail={fail}");
+        }
+
+        return new { prefix, pass, fail, results };
+    }
+
+    private static byte[] MakePngBytes(int w, int h, byte r, byte g, byte b)
+    {
+        var raw = new byte[w * h * 4];
+        for (int i = 0; i < w * h; i++)
+        {
+            raw[i * 4 + 0] = r;
+            raw[i * 4 + 1] = g;
+            raw[i * 4 + 2] = b;
+            raw[i * 4 + 3] = 0xFF;
+        }
+        using var ms = new MemoryStream();
+        var writer = new StbImageWriteSharp.ImageWriter();
+        writer.WritePng(raw, w, h, StbImageWriteSharp.ColorComponents.RedGreenBlueAlpha, ms);
+        return ms.ToArray();
+    }
+
+    private static string HashBytes(byte[] bytes)
+    {
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        var h = sha.ComputeHash(bytes);
+        var sb = new System.Text.StringBuilder(16);
+        for (int i = 0; i < 8; i++) sb.Append(h[i].ToString("x2"));
+        return sb.ToString();
+    }
 
     [Route(HttpVerbs.Get, "/filecheck")]
     public object GetFileCheck()

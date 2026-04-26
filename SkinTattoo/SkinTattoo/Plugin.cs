@@ -115,7 +115,7 @@ public sealed class Plugin : IDalamudPlugin
         mainWindow.LibraryWindowRef = libraryWindow;
         mainWindow.InitializeRequested = InitializeProjectPreview;
 
-        debugServer = new DebugServer(config, project, penumbra, previewService, dataManager, modExportService, skinMeshResolver, textureSwap);
+        debugServer = new DebugServer(config, project, penumbra, previewService, dataManager, modExportService, skinMeshResolver, libraryService, textureSwap);
         if (config.HttpEnabled)
             debugServer.Start();
 

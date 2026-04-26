@@ -48,6 +48,8 @@ public sealed class LibraryService
 
     public int EntryCount { get { lock (sync) return entries.Count; } }
     public int FolderCount { get { lock (sync) return folders.Count; } }
+    public string BlobsDir => blobDir;
+    public string ThumbsDir => thumbDir;
 
     public int ImportFolderTree(string sourceRoot)
     {
@@ -466,13 +468,32 @@ public sealed class LibraryService
                 if (!entries.TryGetValue(hash, out var existing))
                     return null;
 
-                // Clean up the previous blob if the canonical filename changed
-                // (e.g. extension differs), otherwise it would be left orphaned.
+                // If the canonical filename changed (e.g. extension differs from
+                // the previously stored blob), reconcile the on-disk state so
+                // FileName always points at an actual file. Two cases:
+                //   - shouldWrite was true: destPath now has the new content;
+                //     delete the old blob to avoid orphans.
+                //   - shouldWrite was false (existing content matched hash):
+                //     destPath was NOT written, so move the old blob over to
+                //     the new path instead of leaving FileName dangling.
                 if (!string.Equals(existing.FileName, canonicalBlob, StringComparison.OrdinalIgnoreCase))
                 {
                     var oldBlobPath = Path.Combine(blobDir, existing.FileName);
-                    try { if (File.Exists(oldBlobPath)) File.Delete(oldBlobPath); }
-                    catch (Exception ex) { log.Warning(ex, "[Library] Cleanup old blob failed: {0}", existing.FileName); }
+                    try
+                    {
+                        if (File.Exists(destPath))
+                        {
+                            if (File.Exists(oldBlobPath)) File.Delete(oldBlobPath);
+                        }
+                        else if (File.Exists(oldBlobPath))
+                        {
+                            File.Move(oldBlobPath, destPath);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Warning(ex, "[Library] Reconcile blob path failed: {0} -> {1}", existing.FileName, canonicalBlob);
+                    }
                 }
 
                 existing.FileName = canonicalBlob;
