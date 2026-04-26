@@ -20,6 +20,7 @@ public class PenumbraBridge : IDisposable
     private readonly GetPlayerResourcePaths getPlayerResourcePaths;
     private readonly GetPlayerResourceTrees getPlayerResourceTrees;
     private readonly Penumbra.Api.IpcSubscribers.InstallMod installMod;
+    private readonly GetModDirectory getModDirectory;
 
     private const string TempModTag = "SkinTattooTemp";
 
@@ -38,6 +39,7 @@ public class PenumbraBridge : IDisposable
         getPlayerResourcePaths = new GetPlayerResourcePaths(pluginInterface);
         getPlayerResourceTrees = new GetPlayerResourceTrees(pluginInterface);
         installMod = new Penumbra.Api.IpcSubscribers.InstallMod(pluginInterface);
+        getModDirectory = new GetModDirectory(pluginInterface);
 
         CheckAvailability();
     }
@@ -116,6 +118,22 @@ public class PenumbraBridge : IDisposable
         {
             log.Error(ex, "Failed to install mod");
             return PenumbraApiEc.UnknownError;
+        }
+    }
+
+    /// <summary>Returns Penumbra's configured mod root directory, or null if unavailable.</summary>
+    public string? GetModDirectory()
+    {
+        if (!IsAvailable) return null;
+        try
+        {
+            var dir = getModDirectory.Invoke();
+            return string.IsNullOrEmpty(dir) ? null : dir;
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex, "Failed to get Penumbra mod directory");
+            return null;
         }
     }
 
