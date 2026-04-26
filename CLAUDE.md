@@ -55,6 +55,7 @@ docs/                                 # Technical documentation
   route-c-ida-research.md             # IDA decompilation of vanilla shader package loading
   skin-uv-mesh-matching.md            # SkinMeshResolver design rationale (body mod UV matching strategy)
   skin-shpk-colortable-implementation.md  # skin.shpk + ColorTable implementation (IDA逆向 + DXBC patch + 验证)
+  skin-shpk-cb7-slotlock.md           # cb7 slot-lock patch (消除上下半身接缝)
 ```
 
 ## Key Conventions

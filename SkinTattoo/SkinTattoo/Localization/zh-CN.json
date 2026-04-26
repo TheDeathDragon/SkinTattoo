@@ -198,8 +198,6 @@
     "delete_group": "按住组合键删除图层组",
     "add_layer": "添加图层",
     "delete_layer": "按住组合键删除图层",
-    "highlight_on": "高亮显示图层",
-    "highlight_off": "关闭高亮",
     "canvas_zoom": "画布缩放 (滚轮)",
     "uv_mesh_no_model": "需要先导入模型才能显示 UV 网格",
     "uv_mesh_show": "显示 UV 网格",
@@ -426,8 +424,6 @@
     "copy_game_path": "复制游戏路径",
     "copy_actual_path": "复制实际路径",
     "duplicate_layer": "复制图层",
-    "highlight_on": "高亮显示图层",
-    "highlight_off": "关闭高亮",
     "delete_layer": "删除图层"
   },
   "anim": {
@@ -459,8 +455,7 @@
     "detected": "已检测到 Normal alpha 发光遮罩，发光由该层控制",
     "manual_enable_btn": "启用发光",
     "manual_enable_tip": "把 Normal 贴图的 alpha 通道作为发光遮罩",
-    "disable_btn": "关闭发光",
-    "diffuse_locked": "本组发光由 Normal 层接管，已禁用此处的发光选项"
+    "disable_btn": "关闭发光"
   },
   "enum": {
     "blendmode": {
@@ -520,6 +515,8 @@
     "no_mesh_loaded": "未加载网格"
   },
   "help": {
+    "mare_sync": "Mare 同步说明",
+    "mare_sync_note": "如需通过 Mare 同步给其他玩家显示，请先用「导出 Mod」把当前效果安装到 Penumbra，再关闭本插件后再进行同步。本插件预览基于 Penumbra 临时 Mod，Mare 不会同步临时 Mod 的内容。",
     "uv_editor_canvas": "UV 编辑器  -- 画布操作",
     "uv_editor_modifiers": "UV 编辑器  -- 修饰键",
     "layer_target": "图层与目标",

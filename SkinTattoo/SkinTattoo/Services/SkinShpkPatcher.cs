@@ -18,23 +18,69 @@ public static class SkinShpkPatcher
 {
     private const uint CrcSamplerTable = 0x2005679F;
 
-    // Full list of lighting-pass PSes discovered via NodeDump: every MATCH-FULL Emissive
-    // node's pass[2] (SubViewIndex=6 -> lighting render stage) references one of these.
-    // Patching only PS[19] covered 1/32 of render states; patching all 32 covers the full set.
-    private static readonly int[] LightingPsIndices = {
+    // Material key CRCs. When `Mode == ValEmissive_v11b`, MtrlFileWriter forces the mtrl
+    // onto (ValEmissive, ValDecalEmissive, ValVertexColorEmissive) so node selector picks
+    // PS[19]-family. When `Mode == ValBody_v13`, mtrl keys are left as the body mod author
+    // set them (typically ValBody), which routes through PS[8]-family.
+    public const uint CategorySkinType = 0x380CAED0;
+    public const uint ValueEmissive = 0x72E697CD;
+    public const uint CategoryDecalMode = 0xD2777173;
+    public const uint ValueDecalEmissive = 0x584265DD;
+    public const uint CategoryVertexColorMode = 0xF52CCF05;
+    public const uint ValueVertexColorEmissive = 0xA7D2FF60;
+
+    /// <summary>
+    /// Which PS family to inject ColorTable emissive into. v11b / v13 expose a visible
+    /// trade-off on bibo/3BO bodies: ValEmissive preserves the bloom halo but reveals a
+    /// mesh-boundary seam; ValBody eliminates the seam but loses bloom and may corrupt
+    /// some deferred-shadow cascades. Caller flips this while we collect A/B data.
+    /// </summary>
+    public enum PatchMode
+    {
+        /// <summary>Patch 32 ValEmissive pass[2] PSes (19, 28, ... 382) and force mtrl
+        /// keys to (ValEmissive, ValDecalEmissive, ValVertexColorEmissive). Pipeline has
+        /// the full v8 emissive init replacement + pulse animation + tile-orb UV rewrite.
+        /// Output: skin_ct_v11b.shpk</summary>
+        ValEmissive_v11b,
+
+        /// <summary>Patch 32 ValBody pass[2] PSes (8, 23, ... 377) with a single
+        /// "inject emissive at output" stage. mtrl keeps its original ValBody keys,
+        /// only ShaderPackageName is rewritten to skin_ct.shpk.
+        /// Output: skin_ct_v13.shpk</summary>
+        ValBody_v13,
+    }
+
+    public static PatchMode Mode { get; set; } = PatchMode.ValEmissive_v11b;
+
+    // ValEmissive pass[2] lighting PS indices (v11b path).
+    private static readonly int[] EmissivePsIndices = {
         19, 28, 49, 58, 79, 88, 109, 118,
         139, 148, 169, 178, 199, 208, 229, 238,
         247, 256, 265, 274, 283, 292, 301, 310,
         319, 328, 337, 346, 355, 364, 373, 382,
     };
 
-    // Material keys we force on skin mtrls to route selector to PS[19]
-    private const uint CategorySkinType = 0x380CAED0;
-    private const uint ValueEmissive = 0x72E697CD;
-    private const uint CategoryDecalMode = 0xD2777173;
-    private const uint ValueDecalEmissive = 0x584265DD;
-    private const uint CategoryVertexColorMode = 0xF52CCF05;
-    private const uint ValueVertexColorEmissive = 0xA7D2FF60;
+    // ValEmissive pass[0] g-buffer-write PS indices (v11b path). These PSes write
+    // skin-type / gloss-mask / tangent data into the g-buffer for pass[2] to consume;
+    // they sample g_SamplerTileOrb with v2.zw (UV1) just like pass[2] does. bibo/3BO
+    // body mods leave UV1 inconsistent between upper- and lower-body meshes, so the
+    // gbuffer ends up with discontinuous tile-orb contribution -> pass[2] reads it
+    // and the seam at the waist appears even after patching pass[2]. Rewriting the
+    // UV source to v2.xy (UV0) here closes the last piece.
+    private static readonly int[] EmissiveGbufferPsIndices = {
+        17, 47, 77, 107, 137, 167, 197, 227,
+    };
+
+    // ValBody pass[2] lighting PS indices (v13 path).
+    private static readonly int[] ValBodyPsIndices = {
+        8, 23, 38, 53, 68, 83, 98, 113,
+        128, 143, 158, 173, 188, 203, 218, 233,
+        242, 251, 260, 269, 278, 287, 296, 305,
+        314, 323, 332, 341, 350, 359, 368, 377,
+    };
+
+    private static int[] LightingPsIndices => Mode == PatchMode.ValBody_v13
+        ? ValBodyPsIndices : EmissivePsIndices;
 
     // -- Public API ------------------------------------------------------
 
@@ -64,6 +110,21 @@ public static class SkinShpkPatcher
             {
                 Log("All PS patches failed; aborting");
                 return null;
+            }
+
+            // v11b extra pass: rewrite the tile-orb UV lookup from v2.zw (UV1) to v2.xy
+            // (UV0) in every ValEmissive pass[0] g-buffer PS. Same rationale as the
+            // corresponding pass[2] rewrite -- bibo/3BO meshes only author UV0 per-vertex
+            // consistently.
+            if (Mode == PatchMode.ValEmissive_v11b)
+            {
+                int gbSuccess = 0, gbSkipped = 0;
+                foreach (int psIdx in EmissiveGbufferPsIndices)
+                {
+                    if (PatchSingleGbufferPsUvRewrite(shpk, psIdx)) gbSuccess++;
+                    else gbSkipped++;
+                }
+                Log($"Gbuffer PS UV-rewrite: {gbSuccess}/{EmissiveGbufferPsIndices.Length} (skipped {gbSkipped})");
             }
 
             var result = RebuildShpk(shpk);
@@ -119,43 +180,61 @@ public static class SkinShpkPatcher
         var withDecls = PatchShexAddDeclarations(shexData, 5, 10);
         if (withDecls == null) return false;
 
-        // Gloss-mask re-injection must run BEFORE emissive-replace: the latter overwrites
-        // the emissive init pair we rely on to detect which temp register holds normal.alpha.
-        // If the pattern doesn't match, skip silently -- ColorTable emissive still works.
-        var withGlossMask = PatchShexInjectGlossMask(withDecls);
-        if (withGlossMask == null)
+        byte[]? finalShex;
+        if (Mode == PatchMode.ValBody_v13)
         {
-            Log($"PS[{psIndex}] gloss-mask pattern not found, continuing without seam fix");
-            withGlossMask = withDecls;
+            // v13 pipeline: inject emissive sample before the `mul o0.xyz + ret` tail of
+            // each ValBody lighting PS. mtrl keeps ValBody shader keys -> avoids the
+            // seam that ValEmissive g-buffer pipeline exposes on bibo/3BO bodies.
+            finalShex = PatchShexInjectEmissiveAtOutput(withDecls);
+            if (finalShex == null)
+            {
+                Log($"PS[{psIndex}] v13 output anchor (mul o0+ret) not found");
+                return false;
+            }
+        }
+        else
+        {
+            // v11b pipeline (original ValEmissive path).
+            var withGlossMask = PatchShexInjectGlossMask(withDecls);
+            if (withGlossMask == null)
+            {
+                Log($"PS[{psIndex}] gloss-mask pattern not found, continuing without seam fix");
+                withGlossMask = withDecls;
+            }
+
+            var withReplacement = PatchShexReplaceEmissive(withGlossMask);
+            if (withReplacement == null)
+            {
+                Log($"PS[{psIndex}] emissive pattern not found");
+                return false;
+            }
+
+            var withCb0Ext = PatchShexExtendCb0(withReplacement, 20);
+            if (withCb0Ext == null)
+            {
+                Log($"PS[{psIndex}] CB0 dcl not found");
+                return false;
+            }
+
+            var withPulse = PatchShexInjectPulseModulation(withCb0Ext);
+            if (withPulse == null)
+            {
+                Log($"PS[{psIndex}] pulse anchor not matched (non-r1 dest), static emissive only");
+                withPulse = withCb0Ext;
+            }
+
+            var withTileUv = PatchShexTileOrbUseUv0(withPulse);
+            if (withTileUv == null)
+            {
+                Log($"PS[{psIndex}] tile-orb UV1 pattern not found, skipping UV0 rewrite");
+                withTileUv = withPulse;
+            }
+
+            finalShex = withTileUv;
         }
 
-        var withReplacement = PatchShexReplaceEmissive(withGlossMask);
-        if (withReplacement == null)
-        {
-            Log($"PS[{psIndex}] emissive pattern not found");
-            return false;
-        }
-
-        // Stage 0: extend CB0 dcl from [18] to [20] so animation params at cb0[19] are readable.
-        var withCb0Ext = PatchShexExtendCb0(withReplacement, 20);
-        if (withCb0Ext == null)
-        {
-            Log($"PS[{psIndex}] CB0 dcl not found");
-            return false;
-        }
-
-        // Stage 1: inject pulse modulation `r0.xyz *= 1 + amp * sin(2pi * speed * LoopTime)`
-        // before the final `mul o0.xyz, r0.xyzx, cb1[3].xxxx` output instruction.
-        // Pulse anchor is hardcoded to r1.xyzw sample; non-r1 emissive-dest variants
-        // (~24/32 SceneKey combos) won't match -- per-layer color still works, animations off.
-        var withPulse = PatchShexInjectPulseModulation(withCb0Ext);
-        if (withPulse == null)
-        {
-            Log($"PS[{psIndex}] pulse anchor not matched (non-r1 dest), static emissive only");
-            withPulse = withCb0Ext;
-        }
-
-        var patchedDxbc = RebuildDxbc(originalDxbc, withPulse);
+        var patchedDxbc = RebuildDxbc(originalDxbc, finalShex);
 
         int oldSize = ps.BlobSz;
         int newSize = patchedDxbc.Length;
@@ -187,6 +266,41 @@ public static class SkinShpkPatcher
         ps.SCnt++;
         ps.TCnt++;
 
+        return true;
+    }
+
+    /// <summary>Minimal pass[0] patch: only rewrites `mul rX.xy, v2.zwzz, cb0[7].xyxx`
+    /// -> `mul rX.xy, v2.xyxx, cb0[7].xyxx` so the g-buffer pass picks the tile-orb UV
+    /// from UV0 instead of UV1. Blob size stays identical (same instruction length) so
+    /// no resource bookkeeping, no blob-offset shifting, no token count update are
+    /// needed. If the anchor is absent the PS is left untouched.</summary>
+    private static bool PatchSingleGbufferPsUvRewrite(ShpkFile shpk, int psIndex)
+    {
+        int targetIdx = shpk.VsCount + psIndex;
+        if (targetIdx < 0 || targetIdx >= shpk.Shaders.Count) return false;
+        var ps = shpk.Shaders[targetIdx];
+        int blobStart = ps.BlobOff;
+        if (blobStart + ps.BlobSz > shpk.BlobSection.Count) return false;
+
+        var originalDxbc = shpk.BlobSection.GetRange(blobStart, ps.BlobSz).ToArray();
+        if (!IsDxbc(originalDxbc)) return false;
+
+        var shexData = ExtractShexData(originalDxbc);
+        if (shexData == null) return false;
+
+        var rewritten = PatchShexTileOrbUseUv0(shexData);
+        if (rewritten == null) return false;
+
+        // Size is identical, but the DXBC checksum still needs to be recomputed.
+        var patchedDxbc = RebuildDxbc(originalDxbc, rewritten);
+        if (patchedDxbc.Length != originalDxbc.Length)
+        {
+            Log($"PS[{psIndex}] gbuffer UV rewrite produced unexpected size change");
+            return false;
+        }
+
+        for (int i = 0; i < patchedDxbc.Length; i++)
+            shpk.BlobSection[blobStart + i] = patchedDxbc[i];
         return true;
     }
 
@@ -400,6 +514,83 @@ public static class SkinShpkPatcher
         uint oldCount = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4));
         BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(4), oldCount + 7);
 
+        return result;
+    }
+
+    // Anchor for the tail of every ValBody pass[2] PS in skin.shpk (verified across
+    // PS[8..377]): the brightness-scale + return pair.
+    //   mul  o0.xyz, r0.xyzx, cb1[3].xxxx        ; 8 tokens
+    //   ret                                      ; 1 token
+    // We deliberately exclude the preceding `sqrt r0.xyz` so we can inject emissive
+    // *after* the gamma curve runs. Adding emissive before sqrt crushes the intensity
+    // (e.g. em=5.3 -> sqrt(5.3)=2.3) and kills bloom-range HDR output; adding after
+    // sqrt preserves the full linear emissive on top of the tone-mapped lighting.
+    // Register operands r0 / o0 / cb1[3] are identical across every ValBody PS.
+    private static readonly byte[] ValBodyOutputAnchor = ToLeBytes(
+        // mul o0.xyz, r0.xyzx, cb1[3].xxxx
+        0x08000038u, 0x00102072u, 0x00000000u, 0x00100246u, 0x00000000u,
+        0x00208006u, 0x00000001u, 0x00000003u,
+        // ret
+        0x0100003Eu);
+
+    // Instructions to inject immediately before ValBodyOutputAnchor (i.e. after
+    // `sqrt r0.xyz` has already run, so emissive is added in gamma-mapped space):
+    //   sample_indexable r1.xyzw, v2.xyxx, t5.xyzw, s1       ; re-sample normal (alpha = row key)
+    //   mad r1.y, r1.w, l(0.9375), l(0.015625)               ; CT row UV (match ValEmissive path)
+    //   mov r1.x, l(0.3125)                                  ; CT col 2 (emissive RGB column)
+    //   sample_indexable r1.xyzw, r1.xyxx, t10.xyzw, s5      ; read emissive from ColorTable
+    //   add r0.xyz, r0.xyzx, r1.xyzx                         ; accumulate HDR emissive atop output
+    // 11+9+5+11+7 = 43 tokens = 172 bytes.
+    //
+    // Register choice: r1 is safe across all 32 PSes -- the last use of r1.xyzw in each PS
+    // is `div o0.w, r1.x, r1.y` a few instructions before ValBodyOutputAnchor, so clobbering
+    // r1 at the injection site has no downstream consumer.
+    private static readonly byte[] ValBodyEmissiveInjection = ToLeBytes(
+        // sample r1.xyzw, v2.xyxx, t5.xyzw, s1
+        0x8B000045u, 0x800000C2u, 0x00155543u,
+        0x001000F2u, 0x00000001u,
+        0x00101046u, 0x00000002u,
+        0x00107E46u, 0x00000005u,
+        0x00106000u, 0x00000001u,
+        // mad r1.y, r1.w, l(0.9375), l(0.015625)
+        0x09000032u,
+        0x00100022u, 0x00000001u,
+        0x0010003Au, 0x00000001u,
+        0x00004001u, 0x3F700000u,
+        0x00004001u, 0x3C800000u,
+        // mov r1.x, l(0.3125)
+        0x05000036u,
+        0x00100012u, 0x00000001u,
+        0x00004001u, 0x3EA00000u,
+        // sample r1.xyzw, r1.xyxx, t10.xyzw, s5
+        0x8B000045u, 0x800000C2u, 0x00155543u,
+        0x001000F2u, 0x00000001u,
+        0x00100046u, 0x00000001u,
+        0x00107E46u, 0x0000000Au,
+        0x00106000u, 0x00000005u,
+        // add r0.xyz, r0.xyzx, r1.xyzx
+        0x07000000u,
+        0x00100072u, 0x00000000u,
+        0x00100246u, 0x00000000u,
+        0x00100246u, 0x00000001u);
+
+    /// <summary>Inject a ColorTable emissive sample + accumulate right before the output
+    /// `sqrt + mul o0 + ret` tail of a ValBody pass[2] lighting PS. Bumps the SHEX token
+    /// count by 43. Returns null if the anchor is not found.</summary>
+    private static byte[]? PatchShexInjectEmissiveAtOutput(byte[] shexData)
+    {
+        int anchor = FindPattern(shexData, ValBodyOutputAnchor);
+        if (anchor < 0) return null;
+
+        var result = new byte[shexData.Length + ValBodyEmissiveInjection.Length];
+        shexData.AsSpan(0, anchor).CopyTo(result);
+        ValBodyEmissiveInjection.CopyTo(result.AsSpan(anchor));
+        shexData.AsSpan(anchor).CopyTo(result.AsSpan(anchor + ValBodyEmissiveInjection.Length));
+
+        // Bump SHEX token count by 43 (ValBodyEmissiveInjection.Length / 4).
+        uint oldCount = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4));
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(4),
+            oldCount + (uint)(ValBodyEmissiveInjection.Length / 4));
         return result;
     }
 
@@ -760,6 +951,35 @@ public static class SkinShpkPatcher
 
         uint oldCount = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4));
         BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(4), oldCount + 7);
+        return result;
+    }
+
+    // Anchor for the tile-orb UV mul: `mul rX.xy, v2.zwzz, cb0[7].xyxx`.
+    // The last 20 bytes (src0 + src1 with their index u32s) are invariant across
+    // all 32 emissive PSes; only opcode/dst (which vary by register allocation) precede it.
+    //   src0 operand  = 0x00101AE6  (INPUT v[], 1D index imm32, swizzle=0xAE=zwzz)
+    //   src0 reg idx  = 2           (v2)
+    //   src1 operand  = 0x00208046  (CB, 2D index imm32, swizzle=0x04=xyxx)
+    //   src1 cb idx   = 0
+    //   src1 elem idx = 7
+    private static readonly byte[] TileOrbUv1Tail = ToLeBytes(
+        0x00101AE6, 0x00000002, 0x00208046, 0x00000000, 0x00000007);
+
+    /// <summary>Rewrite `mul rX.xy, v2.zwzz, cb0[7].xyxx` -> `mul rX.xy, v2.xyxx, cb0[7].xyxx`
+    /// by flipping the src0 swizzle field from 0xAE (zwzz) to 0x04 (xyxx). In-place, same
+    /// instruction length, so no SHEX token count update is needed.</summary>
+    private static byte[]? PatchShexTileOrbUseUv0(byte[] shexData)
+    {
+        int idx = FindPattern(shexData, TileOrbUv1Tail);
+        if (idx < 0) return null;
+
+        var result = (byte[])shexData.Clone();
+        // TileOrbUv1Tail starts at src0 operand. Rewrite that u32's swizzle bits (4..11)
+        // from 0xAE to 0x04. Keep everything else (num_components, select_mode, op_type,
+        // index_dim, index0_repr) identical -- mask those bits and OR in the new swizzle.
+        uint src0 = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(idx));
+        uint rebuilt = (src0 & ~0x0FF0u) | (0x04u << 4);
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(idx), rebuilt);
         return result;
     }
 

@@ -102,6 +102,22 @@ public class TargetGroup
         return false;
     }
 
+    /// Visibility-agnostic counterpart of <see cref="HasEmissiveLayers"/>. The redirect
+    /// build pipeline keys mtrl + patched shpk emission off this so Penumbra's temp-mod
+    /// set stays stable across visibility/hover/composite cycles -- otherwise a single
+    /// frame where every emissive layer happens to look hidden produces a slim redirect
+    /// set, AddTemporaryModAll replaces the previous full set, and the next drag falls
+    /// back to Full Redraw because previewDiskPaths/initializedRedirects can no longer
+    /// gate CheckCanSwapInPlace correctly.
+    public bool HasEmissiveConfiguredAny()
+    {
+        foreach (var l in Layers)
+            if ((l.TargetMap == TargetMap.Diffuse || l.TargetMap == TargetMap.Normal)
+                && l.AffectsEmissive && !string.IsNullOrEmpty(l.ImagePath))
+                return true;
+        return false;
+    }
+
     public bool HasPbrLayers()
     {
         foreach (var l in Layers)

@@ -198,8 +198,6 @@
     "delete_group": "Hold Ctrl+Shift to delete layer group",
     "add_layer": "Add layer",
     "delete_layer": "Hold Ctrl+Shift to delete layer",
-    "highlight_on": "Highlight layer",
-    "highlight_off": "Disable highlight",
     "canvas_zoom": "Canvas zoom (scroll wheel)",
     "uv_mesh_no_model": "Import a model first to show UV mesh",
     "uv_mesh_show": "Show UV mesh",
@@ -424,8 +422,6 @@
     "copy_decal_group": "Copy Layer Group",
     "paste_decal_group": "Paste Layer Group",
     "duplicate_layer": "Duplicate Layer",
-    "highlight_on": "Highlight Layer",
-    "highlight_off": "Disable Highlight",
     "delete_layer": "Delete Layer",
     "copy_game_path": "Copy Game Path",
     "copy_actual_path": "Copy Actual Path"
@@ -459,8 +455,7 @@
     "detected": "Detected emissive mask in Normal alpha — glow controlled by this layer",
     "manual_enable_btn": "Enable glow",
     "manual_enable_tip": "Use the Normal map's alpha channel as the emissive mask",
-    "disable_btn": "Disable glow",
-    "diffuse_locked": "Emissive controlled by a Normal layer — disabled here"
+    "disable_btn": "Disable glow"
   },
   "enum": {
     "blendmode": {
@@ -520,6 +515,8 @@
     "no_mesh_loaded": "No mesh loaded"
   },
   "help": {
+    "mare_sync": "Mare Sync",
+    "mare_sync_note": "To make tattoos visible to other players through Mare, first use Export Mod to install the current setup into Penumbra, then disable this plugin before syncing. Live preview here uses Penumbra temporary mods, which Mare does not sync.",
     "uv_editor_canvas": "UV Editor  -- Canvas Controls",
     "uv_editor_modifiers": "UV Editor  -- Modifier Keys",
     "layer_target": "Layers and Targets",
