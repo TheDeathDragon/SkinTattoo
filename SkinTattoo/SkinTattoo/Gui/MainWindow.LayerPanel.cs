@@ -222,8 +222,8 @@ public partial class MainWindow
         const float cardPadX = 4f;
         const float cardPadY = 3f;
         const float layerSpacing = 2f;
-        // Action strip: highlight, up, down, duplicate, delete  (5 buttons + 4 gaps).
-        float actionStripWidth = buttonSize * 5 + gap * 4;
+        // Action strip: up, down, duplicate, delete  (4 buttons + 3 gaps).
+        float actionStripWidth = buttonSize * 4 + gap * 3;
         float cardHeight = buttonSize + cardPadY * 2;
 
         for (int li = 0; li < group.Layers.Count; li++)
@@ -232,8 +232,6 @@ public partial class MainWindow
             ImGui.PushID(li + 1000);
 
             bool isLayerSelected = isGroupSelected && group.SelectedLayerIndex == li;
-            bool canHighlight = !string.IsNullOrEmpty(layer.ImagePath) && !string.IsNullOrEmpty(group.MtrlGamePath);
-            bool isThisHighlighted = highlightActive && highlightGroupIndex == gi && highlightLayerIndex == li;
 
             var layerStart = ImGui.GetCursorScreenPos();
             var rowAvail = ImGui.GetContentRegionAvail().X;
@@ -312,28 +310,6 @@ public partial class MainWindow
                 float actionStartX = layerStart.X + cardWidth - cardPadX - actionStripWidth;
                 ImGui.SetCursorScreenPos(new Vector2(actionStartX, layerStart.Y + cardPadY));
 
-                using (ImRaii.Disabled(!canHighlight))
-                {
-                    if (isThisHighlighted)
-                    {
-                        var iconHue = (highlightFrameCounter % HighlightCycleSteps) / (float)HighlightCycleSteps;
-                        var ic = TextureSwapService.HsvToRgb(iconHue, 0.8f, 1f);
-                        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(ic.X, ic.Y, ic.Z, 1f));
-                    }
-                    bool hlClicked = UiHelpers.SquareIconButton(200 + li, FontAwesomeIcon.Crosshairs, buttonSize);
-                    if (isThisHighlighted) ImGui.PopStyleColor();
-                    if (hlClicked)
-                    {
-                        SelectLayer(gi, li);
-                        ToggleLayerHighlight(group, gi, li, isThisHighlighted);
-                    }
-                }
-                if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                    ImGui.SetTooltip(isThisHighlighted
-                        ? Strings.T("tooltip.highlight_off")
-                        : Strings.T("tooltip.highlight_on"));
-
-                ImGui.SameLine();
                 using (ImRaii.Disabled(li <= 0))
                 {
                     if (UiHelpers.SquareIconButton(220 + li, FontAwesomeIcon.ArrowUp, buttonSize))
@@ -443,31 +419,12 @@ public partial class MainWindow
         previewService.ForceReleaseRowPair(group, doomed);
 
         group.RemoveLayer(index);
+        // In-place async path silently no-ops when no visible layer paints (CpuUvComposite
+        // returns null) so deleting the last decal would leave the previously baked GPU
+        // texture mounted -- game keeps showing it. Force a Full Redraw so the new redirect
+        // set (without this group / shrunken redirect set) actually replaces the temp mod.
+        previewService.ForceFullRedrawNextCycle();
         MarkPreviewDirty(immediate: true);
-    }
-
-    private void ToggleLayerHighlight(TargetGroup group, int groupIndex, int layerIndex, bool isThisHighlighted)
-    {
-        if (isThisHighlighted)
-        {
-            highlightActive = false;
-            highlightGroupIndex = -1;
-            highlightLayerIndex = -1;
-            highlightFrameCounter = 0;
-            RestoreEmissiveAfterHighlight(group);
-            return;
-        }
-
-        if (highlightActive && highlightGroupIndex >= 0 && highlightGroupIndex < project.Groups.Count)
-            RestoreEmissiveAfterHighlight(project.Groups[highlightGroupIndex]);
-
-        if (!previewService.HasEmissiveOffset(group.MtrlGamePath))
-            previewService.EnsureEmissiveInitialized(group);
-
-        highlightActive = true;
-        highlightGroupIndex = groupIndex;
-        highlightLayerIndex = layerIndex;
-        highlightFrameCounter = 0;
     }
 
     private void PasteDecalGroup(int targetGroupIndex)
@@ -476,15 +433,6 @@ public partial class MainWindow
             return;
 
         var targetGroup = project.Groups[targetGroupIndex];
-
-        if (highlightActive && highlightGroupIndex == targetGroupIndex)
-        {
-            RestoreEmissiveAfterHighlight(targetGroup);
-            highlightActive = false;
-            highlightGroupIndex = -1;
-            highlightLayerIndex = -1;
-            highlightFrameCounter = 0;
-        }
 
         previewService.InvalidateEmissiveForGroup(targetGroup);
         foreach (var layer in targetGroup.Layers)

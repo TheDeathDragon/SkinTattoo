@@ -36,6 +36,7 @@ public sealed class LibraryWindow : Window
     private readonly Configuration config;
     private readonly FileDialogManager fileDialog = new();
     private readonly string folderIconPath;
+    private readonly bool folderIconExists;
 
     private string search = string.Empty;
     private string? pendingDeleteHash;
@@ -63,6 +64,7 @@ public sealed class LibraryWindow : Window
         this.textureProvider = textureProvider;
         this.config = config;
         folderIconPath = Path.Combine(config.GetAsmDir(), "images", "folder-light.png");
+        folderIconExists = File.Exists(folderIconPath);
         viewMode = NormalizeViewMode(config.LibraryViewMode);
 
         SizeConstraints = new WindowSizeConstraints
@@ -105,6 +107,15 @@ public sealed class LibraryWindow : Window
         ImGui.InputTextWithHint("##LibrarySearch", Strings.T("library.search_hint"), ref search, 128);
 
         ImGui.SameLine();
+
+        if (!string.IsNullOrEmpty(currentFolder))
+        {
+            if (UiHelpers.SquareIconButton("libUpFolder", FontAwesomeIcon.ArrowTurnUp))
+                selectedFolder = GetParentFolder(currentFolder);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.T("library.tooltip.up_folder"));
+            ImGui.SameLine();
+        }
+
         var breadcrumbStartX = ImGui.GetCursorPosX();
         var breadcrumbAvailWidth = ImGui.GetContentRegionAvail().X;
         DrawFolderBreadcrumbs(currentFolder, breadcrumbStartX, breadcrumbAvailWidth);
@@ -144,6 +155,8 @@ public sealed class LibraryWindow : Window
                     .ToList();
             }
 
+            // Favorites are intentionally scoped to the currently selected folder tree
+            // so the view stays consistent with the active navigation context.
             var favoriteEntries = allEntries
                 .Where(e => e.IsFavorite)
                 .Where(e => IsEntryInCurrentTree(e, currentFolder))
@@ -669,7 +682,29 @@ public sealed class LibraryWindow : Window
         }
 
         if (rendered == null)
+        {
+            // Window too narrow to fit even the minimum breadcrumb — keep the overflow
+            // popup accessible so the user can still navigate at any window size.
+            var overflowPopupId = "##crumb_overflow_popup_" + currentFolder;
+            ImGui.SetCursorPosX(startX);
+            if (ImGui.Button("...##crumb_overflow_btn_" + currentFolder))
+                ImGui.OpenPopup(overflowPopupId);
+            if (ImGui.BeginPopup(overflowPopupId))
+            {
+                for (var i = 0; i < items.Count; i++)
+                {
+                    var item = items[i];
+                    var label = string.IsNullOrEmpty(item.Path) ? item.FullLabel : item.Path;
+                    if (ImGui.Selectable(label + "##crumb_hidden_all_" + item.Path))
+                    {
+                        selectedFolder = item.Path;
+                        ImGui.CloseCurrentPopup();
+                    }
+                }
+                ImGui.EndPopup();
+            }
             return;
+        }
 
         ImGui.SetCursorPosX(startX);
 
@@ -941,7 +976,7 @@ public sealed class LibraryWindow : Window
 
     private void DrawLargeFolderIcon(ImDrawListPtr drawList, Vector2 cursor, float size, bool hovered)
     {
-        if (File.Exists(folderIconPath))
+        if (folderIconExists)
         {
             var wrap = textureProvider.GetFromFile(folderIconPath).GetWrapOrDefault();
             if (wrap != null)
@@ -964,44 +999,6 @@ public sealed class LibraryWindow : Window
                 }
             }
         }
-
-        //// Fallback keeps the previous crisp vector icon if the PNG is unavailable.
-        //var iconInset = MathF.Max(6f, size * 0.15f);
-        //var iconWidth = MathF.Max(16f, size - (iconInset * 2f));
-        //var iconHeight = MathF.Max(12f, iconWidth * 0.68f);
-
-        //var iconMin = new Vector2(
-        //    MathF.Round(cursor.X + (size - iconWidth) * 0.5f),
-        //    MathF.Round(cursor.Y + (size - iconHeight) * 0.5f));
-        //var iconMax = new Vector2(iconMin.X + iconWidth, iconMin.Y + iconHeight);
-
-        //var bodyTop = MathF.Round(iconMin.Y + iconHeight * 0.26f);
-        //var tabHeight = MathF.Max(4f, MathF.Round(iconHeight * 0.24f));
-        //var tabWidth = MathF.Round(iconWidth * 0.50f);
-        //var tabStartX = MathF.Round(iconMin.X + iconWidth * 0.08f);
-
-        //var folderBodyMin = new Vector2(iconMin.X, bodyTop);
-        //var folderBodyMax = iconMax;
-        //var folderTabMin = new Vector2(tabStartX, bodyTop - tabHeight);
-        //var folderTabMax = new Vector2(tabStartX + tabWidth, bodyTop + 1f);
-
-        //var cornerRadius = MathF.Max(2f, MathF.Min(6f, iconHeight * 0.10f));
-        //var tabRadius = MathF.Max(2f, cornerRadius - 1f);
-
-        //var bodyColor = hovered
-        //    ? ImGui.GetColorU32(new Vector4(0.95f, 0.78f, 0.40f, 1f))
-        //    : ImGui.GetColorU32(new Vector4(0.85f, 0.70f, 0.35f, 1f));
-        //var tabColor = hovered
-        //    ? ImGui.GetColorU32(new Vector4(0.99f, 0.86f, 0.56f, 1f))
-        //    : ImGui.GetColorU32(new Vector4(0.92f, 0.77f, 0.45f, 1f));
-        //var edgeColor = hovered
-        //    ? ImGui.GetColorU32(new Vector4(0.42f, 0.33f, 0.14f, 0.95f))
-        //    : ImGui.GetColorU32(new Vector4(0.36f, 0.29f, 0.12f, 0.90f));
-
-        //drawList.AddRectFilled(folderBodyMin, folderBodyMax, bodyColor, cornerRadius);
-        //drawList.AddRectFilled(folderTabMin, folderTabMax, tabColor, tabRadius);
-        //drawList.AddRect(folderBodyMin, folderBodyMax, edgeColor, cornerRadius, ImDrawFlags.None, 1.1f);
-        //drawList.AddRect(folderTabMin, folderTabMax, edgeColor, tabRadius, ImDrawFlags.None, 1.0f);
     }
 
     private static void DrawNameTypeIcon(FontAwesomeIcon icon)
@@ -1253,6 +1250,11 @@ public sealed class LibraryWindow : Window
         using var popup = ImRaii.PopupModal("##lib_folder_delete_confirm",
             ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar);
         if (!popup.Success) return;
+
+        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.65f, 0.1f, 1f));
+        ImGui.TextUnformatted(Strings.T("library.folder.delete_warning"));
+        ImGui.PopStyleColor();
+        ImGui.Spacing();
 
         ImGui.TextUnformatted(Strings.T("library.folder.delete_prompt", pendingDeleteFolder));
         ImGui.Spacing();

@@ -215,10 +215,11 @@ public sealed class LibraryService
 
             foreach (var f in affectedFolders)
                 folders.Remove(f);
+            // renamedFolders is built as normalizedNew + suffix for every affected path,
+            // so all component segments of normalizedNew are already covered by these adds.
             foreach (var f in renamedFolders)
                 folders.Add(f);
 
-            EnsureFolderTrackedLocked(normalizedNew);
             SaveIndexLocked();
             return true;
         }
@@ -428,27 +429,39 @@ public sealed class LibraryService
         var canonicalBlob = hash + ext.ToLowerInvariant();
         var destPath = Path.Combine(blobDir, canonicalBlob);
 
+        // Snapshot the existing entry's file path (if any) under a brief lock so that
+        // the expensive file I/O and ProbeSize calls can happen outside the lock.
+        string? existingFilePath;
         lock (sync)
         {
-            if (entries.TryGetValue(hash, out var existing))
-            {
-                var existingPath = Path.Combine(blobDir, existing.FileName);
-                var shouldWrite = true;
-                if (File.Exists(existingPath))
-                {
-                    try
-                    {
-                        var currentHash = ComputeHash(File.ReadAllBytes(existingPath));
-                        shouldWrite = !currentHash.Equals(hash, StringComparison.OrdinalIgnoreCase);
-                    }
-                    catch
-                    {
-                        shouldWrite = true;
-                    }
-                }
+            existingFilePath = entries.TryGetValue(hash, out var snapshot)
+                ? Path.Combine(blobDir, snapshot.FileName)
+                : null;
+        }
 
-                if (shouldWrite)
-                    File.WriteAllBytes(destPath, bytes);
+        if (existingFilePath != null)
+        {
+            var shouldWrite = true;
+            if (File.Exists(existingFilePath))
+            {
+                try
+                {
+                    var currentHash = ComputeHash(File.ReadAllBytes(existingFilePath));
+                    shouldWrite = !currentHash.Equals(hash, StringComparison.OrdinalIgnoreCase);
+                }
+                catch
+                {
+                    shouldWrite = true;
+                }
+            }
+
+            if (shouldWrite)
+                File.WriteAllBytes(destPath, bytes);
+
+            lock (sync)
+            {
+                if (!entries.TryGetValue(hash, out var existing))
+                    return null;
 
                 existing.FileName = canonicalBlob;
                 if (!string.IsNullOrWhiteSpace(originalName))
@@ -461,22 +474,26 @@ public sealed class LibraryService
                 QueueThumbIfMissingLocked(existing);
                 return existing;
             }
+        }
 
-            File.WriteAllBytes(destPath, bytes);
-            var (w, h) = ProbeSize(destPath);
-            var created = new LibraryEntry
-            {
-                Hash = hash,
-                FileName = canonicalBlob,
-                OriginalName = string.IsNullOrWhiteSpace(originalName) ? canonicalBlob : originalName,
-                FolderPath = normalizedFolder,
-                AddedAt = DateTime.UtcNow,
-                LastUsedAt = DateTime.UtcNow,
-                UseCount = 1,
-                Width = w,
-                Height = h,
-            };
+        // New entry: write the file and probe its dimensions before entering the lock.
+        File.WriteAllBytes(destPath, bytes);
+        var (w, h) = ProbeSize(destPath);
+        var created = new LibraryEntry
+        {
+            Hash = hash,
+            FileName = canonicalBlob,
+            OriginalName = string.IsNullOrWhiteSpace(originalName) ? canonicalBlob : originalName,
+            FolderPath = normalizedFolder,
+            AddedAt = DateTime.UtcNow,
+            LastUsedAt = DateTime.UtcNow,
+            UseCount = 1,
+            Width = w,
+            Height = h,
+        };
 
+        lock (sync)
+        {
             entries[hash] = created;
             EnsureFolderTrackedLocked(normalizedFolder);
             SaveIndexLocked();

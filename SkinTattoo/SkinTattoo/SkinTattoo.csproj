@@ -45,10 +45,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="images\folder-light.png" />
-  </ItemGroup>
-
-  <ItemGroup>
     <ProjectReference Include="..\..\Penumbra.Api\Penumbra.Api.csproj" />
     <ProjectReference Include="..\..\Lumina\src\Lumina\Lumina.csproj" />
     <ProjectReference Include="..\..\Meddle\Meddle\Meddle.Utils\Meddle.Utils.csproj" />

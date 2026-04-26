@@ -93,13 +93,6 @@ public partial class MainWindow : Window, IDisposable
     // Tab control
     private bool requestSwitchToSettings;
 
-    // Highlight glow state
-    private bool highlightActive;
-    private int highlightGroupIndex = -1;
-    private int highlightLayerIndex = -1;
-    private int highlightFrameCounter;
-    private const int HighlightCycleSteps = 400;
-
     private List<DecalLayer>? copiedGroupLayers;
     private int copiedGroupSelectedLayerIndex = -1;
     private float copiedGroupSrcAspect;
@@ -448,15 +441,6 @@ public partial class MainWindow : Window, IDisposable
     private void OnHistoryReplayed(bool inPlace)
     {
         ResetHistoryTrackerBaseline();
-
-        if (highlightActive)
-        {
-            highlightActive = false;
-            highlightGroupIndex = -1;
-            highlightLayerIndex = -1;
-            highlightFrameCounter = 0;
-        }
-
         SyncImagePathBuf();
 
         if (inPlace)
@@ -579,8 +563,6 @@ public partial class MainWindow : Window, IDisposable
             MarkPreviewDirty();
         }
 
-        UpdateHighlight();
-
         // -- Tab bar --
         if (ImGui.BeginTabBar("##MainTabs", ImGuiTabBarFlags.None))
         {
@@ -655,50 +637,6 @@ public partial class MainWindow : Window, IDisposable
         HandleUndoRedoShortcuts();
         TickHistoryTracker();
 
-    }
-
-    // -- Highlight ----------------------------------------------------------
-
-    private void UpdateHighlight()
-    {
-        if (!highlightActive) return;
-        if (highlightGroupIndex < 0 || highlightGroupIndex >= project.Groups.Count)
-        { highlightActive = false; return; }
-
-        var group = project.Groups[highlightGroupIndex];
-        if (highlightLayerIndex < 0 || highlightLayerIndex >= group.Layers.Count)
-        { highlightActive = false; return; }
-
-        highlightFrameCounter++;
-        var t = highlightFrameCounter;
-        var hue = (t % HighlightCycleSteps) / (float)HighlightCycleSteps;
-        var intensity = 1.0f + 1.0f * MathF.Sin(t * 0.03f);
-        var color = TextureSwapService.HsvToRgb(hue, 1f, 1f) * intensity;
-        HighlightEmissive(color, group, highlightLayerIndex);
-    }
-
-    private unsafe void HighlightEmissive(Vector3 color, TargetGroup? targetGroup = null, int layerIndex = -1)
-    {
-        var group = targetGroup ?? project.SelectedGroup;
-        if (group == null || string.IsNullOrEmpty(group.MtrlGamePath)) return;
-        var charBase = previewService.GetCharacterBase();
-        if (charBase == null) return;
-        previewService.HighlightEmissiveColor(charBase, group, color, layerIndex);
-    }
-
-    private unsafe void RestoreEmissiveAfterHighlight(TargetGroup group)
-    {
-        var charBase = previewService.GetCharacterBase();
-        if (charBase == null) return;
-
-        if (!group.HasEmissiveLayers())
-        {
-            previewService.HighlightEmissiveColor(charBase, group, Vector3.Zero);
-            return;
-        }
-
-        // skin CT: rebuild per-layer CT; legacy: set CBuffer color
-        TryDirectEmissiveUpdate(group);
     }
 
     // -- Mesh state tick ------------------------------------------------------
@@ -858,6 +796,12 @@ public partial class MainWindow : Window, IDisposable
         if (!scroll.Success) return;
 
         var header = new Vector4(1f, 0.8f, 0.3f, 1f);
+        var warn = new Vector4(1f, 0.55f, 0.25f, 1f);
+
+        ImGui.TextColored(warn, Strings.T("help.mare_sync"));
+        ImGui.Separator();
+        ImGui.TextWrapped(Strings.T("help.mare_sync_note"));
+        ImGui.Spacing();
 
         ImGui.TextColored(header, Strings.T("help.uv_editor_canvas"));
         ImGui.Separator();
@@ -1260,15 +1204,14 @@ public partial class MainWindow : Window, IDisposable
         var charBase = previewService.GetCharacterBase();
         if (charBase == null) return;
 
-        // skin CT: rebuild per-layer CT from current layer state (includes per-layer animation).
-        // Do NOT fall through to HighlightEmissiveColor -- it would overwrite
-        // per-layer colors with a single combined color.
-        if (previewService.RestoreSkinCtAfterHighlight(charBase, group))
+        // skin CT path rebuilds the per-layer ColorTable so per-layer colors / animation
+        // params survive. Falling through to the CBuffer write here would overwrite all
+        // layers with a single combined color.
+        if (previewService.TryWriteSkinCtDirect(charBase, group))
             return;
 
-        // Legacy path: set combined emissive via CBuffer
         var color = previewService.GetCombinedEmissiveColorForGroup(group);
-        previewService.HighlightEmissiveColor(charBase, group, color);
+        previewService.WriteEmissiveColorDirect(charBase, group, color);
     }
 
     private static bool ScrollAdjust(ref float value, float step, float min, float max)
@@ -1349,6 +1292,7 @@ public partial class MainWindow : Window, IDisposable
     {
         InitializeRequested = null;
         DisposeDiskTexPreviewCache();
+        DisposeCanvasBaseWrapCache();
     }
 
     private bool IsDeleteModifierHeld()
