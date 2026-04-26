@@ -137,6 +137,9 @@ public class Configuration : IPluginConfiguration
     public bool UvShowBaseTexture { get; set; } = true;
     public bool UvShowWireframe { get; set; } = false;
     public bool UvSyncViewerWithLayerTargetMap { get; set; } = false;
+    // When false the plugin window stays visible even after the user toggles the
+    // game UI. Default true matches Dalamud's standard behavior.
+    public bool HideWithGameUi { get; set; } = true;
     // Modifier keys required to enable destructive actions (delete layer/group).
     // Bit 0 = Ctrl, bit 1 = Shift, bit 2 = Alt. Default = Ctrl+Shift (3).
     public int DeleteModifierKeys { get; set; } = 3;

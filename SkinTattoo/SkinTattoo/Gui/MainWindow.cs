@@ -65,14 +65,15 @@ public partial class MainWindow : Window, IDisposable
     private List<ProjectFileService.ProjectListItem> cachedProjectList = [];
     private bool projectListCacheDirty = true;
     private bool projectTabOpenLastFrame;
-    private int pendingDeleteProjectRow = -1;
+    private string? pendingDeleteProjectPath;
     private bool openProjectDeleteConfirmModal;
     private int projectInlineRenameRow = -1;
     private string projectInlineRenameBuffer = string.Empty;
     private bool openProjectExportOptionsModal;
     private bool exportIncludeImages = true;
-    private int pendingExportProjectRow = -1;
+    private string? pendingExportProjectPath;
     private string downloadDir = string.Empty;
+    private string exportFileNameInput = string.Empty;
 
     // Cached base texture size
     private int lastBaseTexWidth;
@@ -211,6 +212,9 @@ public partial class MainWindow : Window, IDisposable
         : base(Strings.T("window.main.title") + "###SkinTattooMain",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
+        // Don't let Escape close the window: project-tab modals would otherwise
+        // close together with the popup, surprising the user mid-cancel.
+        RespectCloseHotkey = false;
         this.project = project;
         this.previewService = previewService;
         this.penumbra = penumbra;

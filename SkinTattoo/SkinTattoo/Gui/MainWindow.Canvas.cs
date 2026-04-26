@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
@@ -199,6 +200,25 @@ public partial class MainWindow
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(Strings.T("tooltip.canvas_map"));
+
+        ImGui.SameLine();
+        var syncEnabled = config.UvSyncViewerWithLayerTargetMap;
+        var syncColor = syncEnabled
+            ? new Vector4(0.4f, 0.8f, 1f, 1f)
+            : new Vector4(0.5f, 0.5f, 0.5f, 1f);
+        ImGui.PushStyleColor(ImGuiCol.Text, syncColor);
+        var syncClicked = UiHelpers.SquareIconButton("##canvasMapSync",
+            syncEnabled ? FontAwesomeIcon.Link : FontAwesomeIcon.Unlink);
+        ImGui.PopStyleColor();
+        if (syncClicked)
+        {
+            config.UvSyncViewerWithLayerTargetMap = !syncEnabled;
+            if (config.UvSyncViewerWithLayerTargetMap)
+                SyncCanvasMapToSelectedLayerIfEnabled();
+            config.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(Strings.T(syncEnabled ? "tooltip.canvas_map_sync_on" : "tooltip.canvas_map_sync_off"));
 
         ImGui.SameLine();
         var currentOnly = previewCurrentLayerOnly;

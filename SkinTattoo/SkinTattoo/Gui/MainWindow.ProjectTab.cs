@@ -7,6 +7,7 @@ using Dalamud.Interface.ImGuiNotification;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
+using SkinTattoo.Services;
 using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Gui;
@@ -298,7 +299,7 @@ public partial class MainWindow
         if (!IsDeleteModifierHeld())
             return;
 
-        pendingDeleteProjectRow = row;
+        pendingDeleteProjectPath = cachedProjectList[row].ProjectPath;
         openProjectDeleteConfirmModal = true;
     }
 
@@ -314,16 +315,15 @@ public partial class MainWindow
             ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar);
         if (!popup.Success) return;
 
-        var hasTarget = pendingDeleteProjectRow >= 0 && pendingDeleteProjectRow < cachedProjectList.Count;
-        var targetName = hasTarget ? cachedProjectList[pendingDeleteProjectRow].Name : string.Empty;
+        var target = ResolvePendingProject(pendingDeleteProjectPath);
+        var targetName = target?.Name ?? string.Empty;
         ImGui.TextWrapped(Strings.T("project.delete.confirm", targetName));
         ImGui.Spacing();
 
         if (ImGui.Button(Strings.T("button.confirm"), new Vector2(120, 0)))
         {
-            if (hasTarget)
+            if (target != null)
             {
-                var target = cachedProjectList[pendingDeleteProjectRow];
                 if (projectFileService.DeleteProject(target.ProjectPath))
                 {
                     if (!string.IsNullOrWhiteSpace(currentProjectPath)
@@ -357,16 +357,26 @@ public partial class MainWindow
                 }
             }
 
-            pendingDeleteProjectRow = -1;
+            pendingDeleteProjectPath = null;
             ImGui.CloseCurrentPopup();
         }
 
         ImGui.SameLine();
         if (ImGui.Button(Strings.T("button.cancel"), new Vector2(120, 0)))
         {
-            pendingDeleteProjectRow = -1;
+            pendingDeleteProjectPath = null;
             ImGui.CloseCurrentPopup();
         }
+    }
+
+    private ProjectFileService.ProjectListItem? ResolvePendingProject(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+        for (var i = 0; i < cachedProjectList.Count; i++)
+            if (ProjectPathEquals(cachedProjectList[i].ProjectPath, path))
+                return cachedProjectList[i];
+        return null;
     }
 
     private void DrawProjectActions()
@@ -438,7 +448,7 @@ public partial class MainWindow
         if (row < 0 || row >= cachedProjectList.Count)
             return;
 
-        pendingExportProjectRow = row;
+        pendingExportProjectPath = cachedProjectList[row].ProjectPath;
         openProjectExportOptionsModal = true;
     }
 
@@ -553,12 +563,12 @@ public partial class MainWindow
             false);
     }
 
-    private void ExportProjectRowToPath(int row, string path)
+    private void ExportProjectToPath(string sourceProjectPath, string path)
     {
-        if (row < 0 || row >= cachedProjectList.Count || string.IsNullOrWhiteSpace(path))
+        if (string.IsNullOrWhiteSpace(sourceProjectPath) || string.IsNullOrWhiteSpace(path))
             return;
 
-        var loaded = projectFileService.LoadProject(cachedProjectList[row].ProjectPath);
+        var loaded = projectFileService.LoadProject(sourceProjectPath);
         if (loaded == null)
         {
             NotifyProject(false, Strings.T("project.notify.export_failed.title"), Strings.T("project.notify.export_failed.content"));
@@ -624,9 +634,15 @@ public partial class MainWindow
         if (string.IsNullOrEmpty(downloadDir))
             downloadDir = GetDownloadDirectory();
 
-        ImGui.SetNextItemWidth(-1);
+        var target = ResolvePendingProject(pendingExportProjectPath);
+        if (string.IsNullOrEmpty(exportFileNameInput) && target != null)
+            exportFileNameInput = target.Name;
+
         ImGui.TextUnformatted(Strings.T("project.export.options.path"));
-        if(ImGui.InputText("##project_export_path", ref downloadDir, 256))
+        var browseBtnW = ImGui.GetFrameHeight();
+        var pathInputW = MathF.Max(120f, ImGui.GetContentRegionAvail().X - browseBtnW - ImGui.GetStyle().ItemSpacing.X);
+        ImGui.SetNextItemWidth(pathInputW);
+        if (ImGui.InputText("##project_export_path", ref downloadDir, 256))
         {
             if (!Directory.Exists(downloadDir))
                 downloadDir = GetDownloadDirectory();
@@ -651,32 +667,45 @@ public partial class MainWindow
             );
         }
 
+        ImGui.TextUnformatted(Strings.T("project.export.options.filename"));
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputText("##project_export_filename", ref exportFileNameInput, 256);
+
+        ImGui.Spacing();
+
         if (ImGui.Button(Strings.T("button.confirm"), new Vector2(120, 0)))
         {
-            if (pendingExportProjectRow >= 0 && pendingExportProjectRow < cachedProjectList.Count)
+            if (target != null)
             {
-
-
-                var item = cachedProjectList[pendingExportProjectRow];
-                var fileName = item.Name;
-                if (string.IsNullOrWhiteSpace(fileName))
-                    fileName = Path.GetFileName(Path.GetDirectoryName(item.ProjectPath) ?? string.Empty);
+                var fileName = string.IsNullOrWhiteSpace(exportFileNameInput) ? target.Name : exportFileNameInput.Trim();
                 if (string.IsNullOrWhiteSpace(fileName))
                     fileName = "project";
+                fileName = SanitizeFileName(fileName);
                 var targetPath = GetUniqueFilePath(Path.Combine(downloadDir, fileName + ".proj.json"));
-                ExportProjectRowToPath(pendingExportProjectRow, targetPath);
+                ExportProjectToPath(target.ProjectPath, targetPath);
             }
 
-            pendingExportProjectRow = -1;
+            pendingExportProjectPath = null;
+            exportFileNameInput = string.Empty;
             ImGui.CloseCurrentPopup();
         }
 
         ImGui.SameLine();
         if (ImGui.Button(Strings.T("button.cancel"), new Vector2(120, 0)))
         {
-            pendingExportProjectRow = -1;
+            pendingExportProjectPath = null;
+            exportFileNameInput = string.Empty;
             ImGui.CloseCurrentPopup();
         }
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new System.Text.StringBuilder(name.Length);
+        foreach (var c in name)
+            sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
+        return sb.ToString();
     }
 
     private static void NotifyProject(bool success, string title, string content)

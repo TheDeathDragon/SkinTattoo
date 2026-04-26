@@ -233,6 +233,8 @@
     "browse_image": "Browse...",
     "preview_current_layer": "Show only the `ed layer in preview overlays; disable to show cumulative layers.",
     "canvas_map": "Which game texture map to display in the editor preview.\nDiffuse — color/albedo\nNormal — bump/normal map\nMask — material mask (spec/roughness)",
+    "canvas_map_sync_on": "Sync ON — canvas preview follows the selected layer's target map\nClick to disable",
+    "canvas_map_sync_off": "Sync OFF — canvas preview is independent from the layer target\nClick to enable auto-sync",
     "canvas_show_base": "Show/hide the selected map's base texture behind overlays",
     "open_library": "Open layer library",
     "delete_modifier_help": "Hold this modifier combination to enable layer/group delete buttons. Set to 'None' to allow direct clicking (dangerous).",
@@ -241,7 +243,8 @@
     "open_debug_help": "Open the debug window to view runtime logs and internal state",
     "open_perf_help": "Open performance monitor\nView process memory and plugin cache sizes",
     "force_gc": "Trigger an immediate GC.Collect to reclaim managed objects\nUseful for diffing memory before/after to confirm leaks",
-    "set_baseline": "Pin the current snapshot as baseline\nAll values will then show delta against it"
+    "set_baseline": "Pin the current snapshot as baseline\nAll values will then show delta against it",
+    "hide_with_game_ui": "Disable to keep the plugin window visible when you toggle the game UI.\nLeave enabled to follow the default behavior."
   },
   "label": {
     "diffuse": "Diffuse",
@@ -344,6 +347,7 @@
         "title": "Export options",
         "include_images": "Include images in exported project?",
         "path": "Export Path",
+        "filename": "File Name",
         "browse_path": "Select Export Path"
       }
     },
@@ -422,6 +426,7 @@
     "uv_cull": "Viewport Culling##uvCull",
     "uv_dedup": "Shared Edge Dedup##uvDedup",
     "uv_sync_layer_target": "Sync UV Viewer with Layer Target",
+    "hide_with_game_ui": "Hide with game UI",
     "http_enable": "Enable HTTP Server##httpEn",
     "preview_current_layer": "Current Layer Only",
     "canvas_show_base": "Show Base"

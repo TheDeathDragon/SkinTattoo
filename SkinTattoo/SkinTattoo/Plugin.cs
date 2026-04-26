@@ -130,6 +130,7 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.Draw += DrawUi;
         pluginInterface.UiBuilder.OpenConfigUi += OpenConfigUi;
         pluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
+        ApplyHideWithGameUi();
 
         commandManager.AddHandler(CommandName, new Dalamud.Game.Command.CommandInfo(OnCommand)
         {
@@ -279,6 +280,15 @@ public sealed class Plugin : IDalamudPlugin
     private void OnCommand(string command, string args)
     {
         mainWindow.IsOpen = !mainWindow.IsOpen;
+    }
+
+    public void ApplyHideWithGameUi() => ApplyHideWithGameUi(config);
+
+    public static void ApplyHideWithGameUi(Configuration config)
+    {
+        // DisableUserUiHide=true means the plugin window IGNORES the user toggling
+        // the game UI, keeping it visible.
+        PluginInterface.UiBuilder.DisableUserUiHide = !config.HideWithGameUi;
     }
 
 

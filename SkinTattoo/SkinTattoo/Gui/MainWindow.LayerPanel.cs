@@ -189,6 +189,13 @@ public partial class MainWindow
             project.SelectedGroupIndex = gi;
             layerCounter++;
             var newLayer = group.AddLayer(Strings.T("layer.default.name", layerCounter));
+            // New layer inherits the currently displayed canvas map so painting
+            // happens on the texture the user is looking at. Falls back to
+            // Diffuse if the group's material can't carry a Mask.
+            var desired = CanvasMapMode;
+            if (desired == TargetMap.Mask && !previewService.MaterialSupportsMask(group))
+                desired = TargetMap.Diffuse;
+            newLayer.TargetMap = desired;
             var (tw, th) = previewService.GetBaseTextureSize(group);
             float texAspect = (tw > 0 && th > 0) ? (float)tw / th : 1f;
             newLayer.UvScale = new Vector2(newLayer.UvScale.X, newLayer.UvScale.X * texAspect);

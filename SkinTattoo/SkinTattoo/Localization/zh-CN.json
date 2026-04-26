@@ -233,6 +233,8 @@
     "browse_image": "浏览...",
     "preview_current_layer": "仅显示当前选中图层的预览叠加；关闭后显示所有图层的叠加结果。",
     "canvas_map": "选择编辑器预览中显示的贴图类型。\n漫反射 — 颜色/反照率\n法线 — 法线贴图\n遮罩 — 材质遮罩（高光/粗糙度）",
+    "canvas_map_sync_on": "已开启 — 切换图层目标贴图时画布预览会自动跟随\n点击关闭",
+    "canvas_map_sync_off": "已关闭 — 画布预览与图层目标贴图相互独立\n点击开启自动同步",
     "canvas_show_base": "显示/隐藏当前贴图类型的基础贴图（叠加层背景）",
     "open_library": "打开图层素材库",
     "delete_modifier_help": "点击删除按钮（图层/组）时需要按住此组合键才能生效。设为「无」表示删除按钮可直接点击（危险）。",
@@ -241,7 +243,8 @@
     "open_debug_help": "打开调试窗口查看插件运行日志和内部状态",
     "open_perf_help": "打开性能监控\n查看进程内存与插件各缓存的条目数",
     "force_gc": "立即触发一次 GC.Collect 回收托管对象\n常用于对比前后内存以确认泄漏",
-    "set_baseline": "将当前快照记为基线\n之后所有数字会显示相对基线的增量"
+    "set_baseline": "将当前快照记为基线\n之后所有数字会显示相对基线的增量",
+    "hide_with_game_ui": "关闭后，切换游戏界面隐藏时插件窗口仍然可见。\n开启则与默认行为一致：随游戏界面一起隐藏。"
   },
   "label": {
     "diffuse": "贴图",
@@ -344,6 +347,7 @@
         "title": "导出选项",
         "include_images": "在导出项目中包含图片",
         "path": "导出路径",
+        "filename": "文件名",
         "browse_path": "选择导出路径"
       }
     },
@@ -422,6 +426,7 @@
     "uv_cull": "视口外剔除##uvCull",
     "uv_dedup": "共享边去重##uvDedup",
     "uv_sync_layer_target": "同步 UV 预览与图层目标贴图",
+    "hide_with_game_ui": "随游戏界面一起隐藏",
     "http_enable": "启用 HTTP 服务器##httpEn",
     "preview_current_layer": "仅预览当前图层",
     "canvas_show_base": "显示基础贴图"
@@ -456,11 +461,11 @@
   },
   "target_map": {
     "label": "目标贴图",
-    "diffuse": "Diffuse",
-    "mask": "Mask",
-    "normal": "Normal",
-    "tooltip": "图层画到哪张游戏贴图上。\nDiffuse — 颜色，默认\nMask — 材质遮罩，高光/粗糙度\nNormal — 法线贴图，凹凸细节",
-    "auto_normal_detected": "检测到这像法线贴图，目标已自动设为 Normal。"
+    "diffuse": "漫反射",
+    "mask": "遮罩",
+    "normal": "法线",
+    "tooltip": "图层画到哪张游戏贴图上。\n漫反射 — 颜色，默认\n遮罩 — 材质遮罩，高光/粗糙度\n法线 — 法线贴图，凹凸细节",
+    "auto_normal_detected": "检测到这像法线贴图，目标已自动设为法线。"
   },
   "emissive_normal": {
     "detected": "已检测到 Normal alpha 发光遮罩，发光由该层控制",

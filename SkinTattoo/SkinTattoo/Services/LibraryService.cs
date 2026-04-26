@@ -215,10 +215,11 @@ public sealed class LibraryService
 
             foreach (var f in affectedFolders)
                 folders.Remove(f);
-            // renamedFolders is built as normalizedNew + suffix for every affected path,
-            // so all component segments of normalizedNew are already covered by these adds.
             foreach (var f in renamedFolders)
                 folders.Add(f);
+            // The new path may have parent components that didn't exist before (e.g.
+            // renaming "A" to "X/Y" must register "X" so it remains navigable).
+            EnsureFolderTrackedLocked(normalizedNew);
 
             SaveIndexLocked();
             return true;
@@ -260,11 +261,11 @@ public sealed class LibraryService
         var normalized = NormalizeFolderPath(folderPath);
         if (string.IsNullOrEmpty(normalized)) return false;
 
-        List<LibraryEntry> removedEntries;
-
+        // Hold the lock through file deletion: a concurrent ImportFromPath for the
+        // same hash could otherwise re-create the blob between Remove() and Delete().
         lock (sync)
         {
-            removedEntries = entries.Values
+            var removedEntries = entries.Values
                 .Where(entry =>
                 {
                     var ef = NormalizeFolderPath(entry.FolderPath);
@@ -283,12 +284,14 @@ public sealed class LibraryService
             foreach (var f in toRemove) folders.Remove(f);
 
             SaveIndexLocked();
-        }
 
-        foreach (var entry in removedEntries)
-        {
-            try { File.Delete(Path.Combine(blobDir, entry.FileName)); } catch { }
-            try { File.Delete(Path.Combine(thumbDir, entry.Hash + ".png")); } catch { }
+            foreach (var entry in removedEntries)
+            {
+                try { File.Delete(Path.Combine(blobDir, entry.FileName)); }
+                catch (Exception ex) { log.Warning(ex, "[Library] Delete blob failed: {0}", entry.FileName); }
+                try { File.Delete(Path.Combine(thumbDir, entry.Hash + ".png")); }
+                catch (Exception ex) { log.Warning(ex, "[Library] Delete thumb failed: {0}", entry.Hash); }
+            }
         }
 
         return true;
@@ -462,6 +465,15 @@ public sealed class LibraryService
             {
                 if (!entries.TryGetValue(hash, out var existing))
                     return null;
+
+                // Clean up the previous blob if the canonical filename changed
+                // (e.g. extension differs), otherwise it would be left orphaned.
+                if (!string.Equals(existing.FileName, canonicalBlob, StringComparison.OrdinalIgnoreCase))
+                {
+                    var oldBlobPath = Path.Combine(blobDir, existing.FileName);
+                    try { if (File.Exists(oldBlobPath)) File.Delete(oldBlobPath); }
+                    catch (Exception ex) { log.Warning(ex, "[Library] Cleanup old blob failed: {0}", existing.FileName); }
+                }
 
                 existing.FileName = canonicalBlob;
                 if (!string.IsNullOrWhiteSpace(originalName))

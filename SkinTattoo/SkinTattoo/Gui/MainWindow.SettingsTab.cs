@@ -173,6 +173,15 @@ public partial class MainWindow
             config.Save();
         }
 
+        var hideWithUi = config.HideWithGameUi;
+        if (UiHelpers.CheckboxWithTextAndHelp("##hideWithGameUi", Strings.T("checkbox.hide_with_game_ui"),
+                Strings.T("tooltip.hide_with_game_ui"), ref hideWithUi))
+        {
+            config.HideWithGameUi = hideWithUi;
+            config.Save();
+            Plugin.ApplyHideWithGameUi(config);
+        }
+
         ImGui.Spacing();
         DrawDeleteModifierSelector();
 
