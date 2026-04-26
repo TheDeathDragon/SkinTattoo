@@ -222,7 +222,9 @@ public partial class MainWindow : Window, IDisposable
         projectFileService = new ProjectFileService(
             Plugin.Log,
             Plugin.PluginInterface.GetPluginConfigDirectory(),
-            library);
+            library,
+            penumbra,
+            dataManager);
 
         SizeConstraints = new WindowSizeConstraints
         {

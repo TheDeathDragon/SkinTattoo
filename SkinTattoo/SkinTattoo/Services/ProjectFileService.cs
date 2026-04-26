@@ -6,15 +6,20 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Dalamud.Plugin.Services;
 using SkinTattoo.Core;
+using SkinTattoo.Interop;
 
 namespace SkinTattoo.Services;
 
 public sealed class ProjectFileService
 {
     private const string ProjectFileName = "project.json";
+    private const string PenumbraModDirToken = "{PenumbraModDir}";
+    private const string GameDirToken = "{GameDir}";
 
     private readonly IPluginLog log;
     private readonly LibraryService? library;
+    private readonly PenumbraBridge? penumbra;
+    private readonly IDataManager? dataManager;
     private readonly string pluginConfigDir;
 
     private readonly JsonSerializerOptions jsonOptions = new()
@@ -25,10 +30,12 @@ public sealed class ProjectFileService
 
     public string ProjectsRoot { get; }
 
-    public ProjectFileService(IPluginLog log, string pluginConfigDir, LibraryService? library)
+    public ProjectFileService(IPluginLog log, string pluginConfigDir, LibraryService? library, PenumbraBridge? penumbra = null, IDataManager? dataManager = null)
     {
         this.log = log;
         this.library = library;
+        this.penumbra = penumbra;
+        this.dataManager = dataManager;
         this.pluginConfigDir = Path.GetFullPath(pluginConfigDir);
         ProjectsRoot = Path.Combine(this.pluginConfigDir, "Projects");
         Directory.CreateDirectory(ProjectsRoot);
@@ -133,8 +140,18 @@ public sealed class ProjectFileService
             File.Copy(sourceFullPath, destinationProjectPath, overwrite: false);
             if (package != null)
             {
+                // Expand any relative paths from the source file to absolute before re-relativizing
+                var sourceDir = Path.GetDirectoryName(sourceFullPath)!;
+                foreach (var group in package.Snapshot.TargetGroups)
+                    ResolveGroupPathsAbsolute(group, sourceDir);
+
                 var layerMap = ExtractImages(destinationProjectPath, package.Images);
                 RewriteSnapshotPaths(package.Snapshot, layerMap);
+
+                // Re-relativize paths against the destination directory
+                foreach (var group in package.Snapshot.TargetGroups)
+                    MakeGroupPathsRelative(group, destinationDir);
+
                 var updatedJson = JsonSerializer.Serialize(package, jsonOptions);
                 File.WriteAllText(destinationProjectPath, updatedJson);
             }
@@ -292,6 +309,10 @@ public sealed class ProjectFileService
             if (package == null)
                 return null;
 
+            var projectDir = Path.GetDirectoryName(fullProjectPath)!;
+            foreach (var group in package.Snapshot.TargetGroups)
+                ResolveGroupPathsAbsolute(group, projectDir);
+
             if (importImagesToLibrary)
             {
                 var logicalToDisk = ExtractImages(fullProjectPath, package.Images);
@@ -317,6 +338,9 @@ public sealed class ProjectFileService
         var snapshot = DeepClone(source);
         var existing = ReadPackage(projectPath);
         var createdUtc = existing?.Metadata.CreatedUtc ?? DateTime.UtcNow;
+        var projectDir = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
+        foreach (var group in snapshot.TargetGroups)
+            MakeGroupPathsRelative(group, projectDir);
         if (!includeImages)
         {
             return new ProjectPackage
@@ -599,6 +623,121 @@ public sealed class ProjectFileService
                               .Replace('\\', Path.DirectorySeparatorChar);
         var full = Path.GetFullPath(Path.Combine(pluginConfigDir, rel));
         return full.StartsWith(pluginConfigDir, StringComparison.OrdinalIgnoreCase) ? full : null;
+    }
+
+    private string? MakePathRelative(string? path, string baseDir)
+    {
+        if (string.IsNullOrEmpty(path)) return path;
+
+        // Only transform absolute filesystem paths; leave relative/game-format paths as-is
+        if (!Path.IsPathRooted(path)) return path;
+
+        // Try standard relative path first (works when on the same drive)
+        var rel = Path.GetRelativePath(baseDir, path);
+
+        // If the result is still rooted (cross-drive on Windows), fall back to
+        // a known-root token so the path is portable.
+        if (Path.IsPathRooted(rel))
+        {
+            var fullPath = Path.GetFullPath(path);
+
+            // Check Penumbra mod directory first
+            var modDir = penumbra?.GetModDirectory();
+            if (!string.IsNullOrEmpty(modDir))
+            {
+                var fullModDir = Path.GetFullPath(modDir)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+                if (fullPath.StartsWith(fullModDir, StringComparison.OrdinalIgnoreCase))
+                    return PenumbraModDirToken + "/" + Path.GetRelativePath(fullModDir.TrimEnd(Path.DirectorySeparatorChar), fullPath).Replace('\\', '/');
+            }
+
+            // Check FFXIV game directory (parent of sqpack, i.e. the "game" folder)
+            var gameDir = GetGameDir();
+            if (!string.IsNullOrEmpty(gameDir))
+            {
+                var fullGameDir = Path.GetFullPath(gameDir)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+                if (fullPath.StartsWith(fullGameDir, StringComparison.OrdinalIgnoreCase))
+                    return GameDirToken + "/" + Path.GetRelativePath(fullGameDir.TrimEnd(Path.DirectorySeparatorChar), fullPath).Replace('\\', '/');
+            }
+        }
+
+        return rel;
+    }
+
+    private string? ResolvePathAbsolute(string? path, string baseDir)
+    {
+        if (string.IsNullOrEmpty(path)) return path;
+
+        // Resolve Penumbra mod directory token
+        if (path.StartsWith(PenumbraModDirToken, StringComparison.OrdinalIgnoreCase))
+        {
+            var modDir = penumbra?.GetModDirectory();
+            if (!string.IsNullOrEmpty(modDir))
+            {
+                var rest = path[PenumbraModDirToken.Length..].TrimStart('/', '\\');
+                return Path.GetFullPath(Path.Combine(modDir, rest));
+            }
+            // Penumbra unavailable — leave token in place so it can be resolved later
+            return path;
+        }
+
+        // Resolve game directory token
+        if (path.StartsWith(GameDirToken, StringComparison.OrdinalIgnoreCase))
+        {
+            var gameDir = GetGameDir();
+            if (!string.IsNullOrEmpty(gameDir))
+            {
+                var rest = path[GameDirToken.Length..].TrimStart('/', '\\');
+                return Path.GetFullPath(Path.Combine(gameDir, rest));
+            }
+            // Game dir unavailable — leave token in place so it can be resolved later
+            return path;
+        }
+
+        if (Path.IsPathRooted(path)) return path;
+        // Only expand genuine filesystem-relative paths (start with . or path separator).
+        // Bare game-format paths like "chara/human/..." are not filesystem paths and
+        // must not be combined with baseDir.
+        if (path[0] != '.' && path[0] != Path.DirectorySeparatorChar && path[0] != Path.AltDirectorySeparatorChar)
+            return path;
+        return Path.GetFullPath(Path.Combine(baseDir, path));
+    }
+
+    private string? GetGameDir()
+    {
+        // DataPath points to the "sqpack" folder; game files live in its parent ("game" folder)
+        var sqpackDir = dataManager?.GameData?.DataPath?.FullName;
+        if (string.IsNullOrEmpty(sqpackDir)) return null;
+        return Path.GetDirectoryName(sqpackDir);
+    }
+
+    private void MakeGroupPathsRelative(SavedTargetGroup group, string projectDir)
+    {
+        group.DiffuseDiskPath = MakePathRelative(group.DiffuseDiskPath, projectDir);
+        group.NormDiskPath = MakePathRelative(group.NormDiskPath, projectDir);
+        group.MtrlDiskPath = MakePathRelative(group.MtrlDiskPath, projectDir);
+        group.MeshDiskPath = MakePathRelative(group.MeshDiskPath, projectDir);
+        group.OrigDiffuseDiskPath = MakePathRelative(group.OrigDiffuseDiskPath, projectDir);
+        group.OrigNormDiskPath = MakePathRelative(group.OrigNormDiskPath, projectDir);
+        group.OrigMtrlDiskPath = MakePathRelative(group.OrigMtrlDiskPath, projectDir);
+        for (var i = 0; i < group.MeshDiskPaths.Count; i++)
+            group.MeshDiskPaths[i] = MakePathRelative(group.MeshDiskPaths[i], projectDir) ?? group.MeshDiskPaths[i];
+    }
+
+    private void ResolveGroupPathsAbsolute(SavedTargetGroup group, string projectDir)
+    {
+        group.DiffuseDiskPath = ResolvePathAbsolute(group.DiffuseDiskPath, projectDir);
+        group.NormDiskPath = ResolvePathAbsolute(group.NormDiskPath, projectDir);
+        group.MtrlDiskPath = ResolvePathAbsolute(group.MtrlDiskPath, projectDir);
+        group.MeshDiskPath = ResolvePathAbsolute(group.MeshDiskPath, projectDir);
+        group.OrigDiffuseDiskPath = ResolvePathAbsolute(group.OrigDiffuseDiskPath, projectDir);
+        group.OrigNormDiskPath = ResolvePathAbsolute(group.OrigNormDiskPath, projectDir);
+        group.OrigMtrlDiskPath = ResolvePathAbsolute(group.OrigMtrlDiskPath, projectDir);
+        for (var i = 0; i < group.MeshDiskPaths.Count; i++)
+            group.MeshDiskPaths[i] = ResolvePathAbsolute(group.MeshDiskPaths[i], projectDir) ?? group.MeshDiskPaths[i];
     }
 
     private static string SanitizeProjectName(string value)
