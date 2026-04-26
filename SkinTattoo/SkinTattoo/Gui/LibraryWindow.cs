@@ -6,6 +6,7 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.ImGuiFileDialog;
+using Dalamud.Interface.Textures;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
@@ -37,6 +38,7 @@ public sealed class LibraryWindow : Window
     private readonly FileDialogManager fileDialog = new();
     private readonly string folderIconPath;
     private readonly bool folderIconExists;
+    private readonly ISharedImmediateTexture? folderIconTexture;
 
     private string search = string.Empty;
     private string? pendingDeleteHash;
@@ -65,6 +67,7 @@ public sealed class LibraryWindow : Window
         this.config = config;
         folderIconPath = Path.Combine(config.GetAsmDir(), "images", "folder-light.png");
         folderIconExists = File.Exists(folderIconPath);
+        folderIconTexture = folderIconExists ? textureProvider.GetFromFile(folderIconPath) : null;
         viewMode = NormalizeViewMode(config.LibraryViewMode);
 
         SizeConstraints = new WindowSizeConstraints
@@ -392,7 +395,12 @@ public sealed class LibraryWindow : Window
                 }
 
                 if (ImGui.IsItemHovered())
+                {
+                    var thumbPath = library.ThumbPath(entry);
+                    if (!File.Exists(thumbPath))
+                        library.EnsureThumb(entry);
                     DrawEntryPreviewTooltip(entry, 96f);
+                }
 
                 if (ImGui.BeginPopupContextItem("##lib_ctx_" + entry.Hash))
                 {
@@ -478,7 +486,7 @@ public sealed class LibraryWindow : Window
         ImGui.TextUnformatted(Strings.T("library.folder.rename_prompt", sourceName));
 
         ImGui.SetNextItemWidth(280f);
-        ImGui.InputTextWithHint("##libRenameFolderName", Strings.T("library.folder.name_hint"), ref renameFolderInput, 256);
+        var inputConfirmed = ImGui.InputTextWithHint("##libRenameFolderName", Strings.T("library.folder.name_hint"), ref renameFolderInput, 256, ImGuiInputTextFlags.EnterReturnsTrue);
 
         var normalizedInput = LibraryService.NormalizeFolderPath(renameFolderInput);
         var parentPath = GetParentFolder(sourceFolder);
@@ -489,8 +497,7 @@ public sealed class LibraryWindow : Window
                 : LibraryService.NormalizeFolderPath(parentPath + "/" + normalizedInput);
 
         var confirmPressed = ImGui.Button(Strings.T("button.confirm"), new Vector2(120, 0));
-        var enterPressed = ImGui.IsKeyPressed(ImGuiKey.Enter) || ImGui.IsKeyPressed(ImGuiKey.KeypadEnter);
-        if (confirmPressed || enterPressed)
+        if (confirmPressed || inputConfirmed)
         {
             if (!string.IsNullOrEmpty(targetFolder) && library.RenameFolder(sourceFolder, targetFolder))
                 selectedFolder = RewritePathPrefix(selectedFolder, sourceFolder, targetFolder);
@@ -559,9 +566,6 @@ public sealed class LibraryWindow : Window
         ImGui.BeginTooltip();
 
         var thumbPath = library.ThumbPath(entry);
-        if (!File.Exists(thumbPath))
-            library.EnsureThumb(entry);
-
         if (File.Exists(thumbPath))
         {
             var wrap = textureProvider.GetFromFile(thumbPath).GetWrapOrDefault();
@@ -812,19 +816,26 @@ public sealed class LibraryWindow : Window
         }
 
         var totalWidth = MeasureBreadcrumbWidth(render);
+        if (totalWidth <= availableWidth)
+            return render;
+
+        // Pre-compute per-item text widths so we can maintain totalWidth incrementally
+        // instead of calling MeasureBreadcrumbWidth (O(N) CalcTextSize calls) each iteration.
+        var textWidths = new float[render.Count];
+        for (var i = 0; i < render.Count; i++)
+            textWidths[i] = ImGui.CalcTextSize(render[i].Label).X;
+
         while (totalWidth > availableWidth)
         {
+            // Find the widest item that still has room to truncate further.
             var reduceIndex = -1;
-            var widest = float.MinValue;
+            var widestTextWidth = float.MinValue;
             for (var i = 0; i < render.Count; i++)
             {
-                if (limits[i] <= minLimits[i])
-                    continue;
-
-                var width = ImGui.CalcTextSize(render[i].Label).X;
-                if (width > widest)
+                if (limits[i] <= minLimits[i]) continue;
+                if (textWidths[i] > widestTextWidth)
                 {
-                    widest = width;
+                    widestTextWidth = textWidths[i];
                     reduceIndex = i;
                 }
             }
@@ -832,15 +843,35 @@ public sealed class LibraryWindow : Window
             if (reduceIndex < 0)
                 return null;
 
-            limits[reduceIndex]--;
-            var reduced = TruncateLabel(render[reduceIndex].FullLabel, limits[reduceIndex]);
-            render[reduceIndex] = new BreadcrumbRenderItem(
-                reduced,
-                render[reduceIndex].FullLabel,
-                render[reduceIndex].Path,
-                reduced != render[reduceIndex].FullLabel);
+            // Binary search: find the longest label for reduceIndex that makes totalWidth <= availableWidth.
+            // Changing this item's width from widestTextWidth to newW shifts totalWidth by (newW - widestTextWidth).
+            // We need: newW <= widestTextWidth - (totalWidth - availableWidth).
+            var targetTextWidth = widestTextWidth - (totalWidth - availableWidth);
+            var fullLabel = render[reduceIndex].FullLabel;
+            var lo = minLimits[reduceIndex];
+            var hi = limits[reduceIndex] - 1;
+            var bestLen = lo;
+            while (lo <= hi)
+            {
+                var mid = (lo + hi) / 2;
+                if (ImGui.CalcTextSize(TruncateLabel(fullLabel, mid)).X <= targetTextWidth)
+                {
+                    bestLen = mid;
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid - 1;
+                }
+            }
 
-            totalWidth = MeasureBreadcrumbWidth(render);
+            limits[reduceIndex] = bestLen;
+            var newLabel = TruncateLabel(fullLabel, bestLen);
+            var newTextWidth = ImGui.CalcTextSize(newLabel).X;
+            totalWidth -= widestTextWidth - newTextWidth;
+            textWidths[reduceIndex] = newTextWidth;
+            render[reduceIndex] = new BreadcrumbRenderItem(
+                newLabel, fullLabel, render[reduceIndex].Path, newLabel != fullLabel);
         }
 
         return render;
@@ -976,9 +1007,9 @@ public sealed class LibraryWindow : Window
 
     private void DrawLargeFolderIcon(ImDrawListPtr drawList, Vector2 cursor, float size, bool hovered)
     {
-        if (folderIconExists)
+        if (folderIconTexture != null)
         {
-            var wrap = textureProvider.GetFromFile(folderIconPath).GetWrapOrDefault();
+            var wrap = folderIconTexture.GetWrapOrDefault();
             if (wrap != null)
             {
                 var iconMaxSize = MathF.Max(16f, size - 10f);
@@ -999,6 +1030,13 @@ public sealed class LibraryWindow : Window
                 }
             }
         }
+
+        // Fallback rectangle when PNG icon is unavailable or not yet loaded.
+        var pad = size * 0.2f;
+        var fallbackColor = hovered
+            ? ImGui.GetColorU32(new Vector4(0.85f, 0.70f, 0.25f, 0.65f))
+            : ImGui.GetColorU32(new Vector4(0.70f, 0.58f, 0.18f, 0.45f));
+        drawList.AddRectFilled(cursor + new Vector2(pad, pad), cursor + new Vector2(size - pad, size - pad), fallbackColor, 4f);
     }
 
     private static void DrawNameTypeIcon(FontAwesomeIcon icon)
@@ -1260,8 +1298,7 @@ public sealed class LibraryWindow : Window
         ImGui.Spacing();
 
         var confirmPressed = ImGui.Button(Strings.T("button.confirm"), new Vector2(120, 0));
-        var enterPressed = ImGui.IsKeyPressed(ImGuiKey.Enter) || ImGui.IsKeyPressed(ImGuiKey.KeypadEnter);
-        if (confirmPressed || enterPressed)
+        if (confirmPressed)
         {
             var deleted = pendingDeleteFolder;
             library.DeleteFolder(deleted);

@@ -115,7 +115,7 @@
       "name_hint": "文件夹名称",
       "delete_prompt": "删除文件夹 \"{0}\" 及其全部内容？",
       "delete_warning": "⚠ 此操作将永久删除该文件夹内所有文件和子文件夹，且无法撤销。",
-      "rename_prompt":
+      "rename_prompt": "将文件夹 \"{0}\" 重命名为:"
     },
     "import_folder_hint": "文件夹路径...",
     "import_folder_button": "导入文件夹",
