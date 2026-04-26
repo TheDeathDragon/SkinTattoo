@@ -5,8 +5,8 @@
     "Punchline": "Real-time skin decal compositor for FFXIV",
     "Description": "Composites image decals onto character skin textures (diffuse + normal) in real time via Penumbra. No game file modification. Supports per-layer emissive, iris glow, ColorTable PBR, and Mod (.pmp) export. Under active development - feedback welcome via Issues or Discord. Type /skintattoo to open.",
     "InternalName": "SkinTattoo",
-    "AssemblyVersion": "0.0.0.1",
-    "TestingAssemblyVersion": "0.0.0.1",
+    "AssemblyVersion": "0.2.9",
+    "TestingAssemblyVersion": "0.2.9",
     "RepoUrl": "https://github.com/TheDeathDragon/SkinTattoo",
     "IconUrl": "https://raw.githubusercontent.com/TheDeathDragon/SkinTattoo/master/images/icon.png",
     "ApplicableVersion": "any",
@@ -16,11 +16,22 @@
     "IsTestingExclusive": "False",
     "DownloadCount": 0,
     "LastUpdate": 0,
-    "DownloadLinkInstall": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.0.0.1/SkinTattoo.zip",
-    "DownloadLinkTesting": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.0.0.1/SkinTattoo.zip",
-    "DownloadLinkUpdate": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.0.0.1/SkinTattoo.zip",
-    "Tags": ["texture", "decal", "tattoo", "skin", "penumbra", "glamour", "mod", "cosmetic"],
-    "CategoryTags": ["utility"],
+    "DownloadLinkInstall": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.2.9/SkinTattoo.zip",
+    "DownloadLinkTesting": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.2.9/SkinTattoo.zip",
+    "DownloadLinkUpdate": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.2.9/SkinTattoo.zip",
+    "Tags": [
+      "texture",
+      "decal",
+      "tattoo",
+      "skin",
+      "penumbra",
+      "glamour",
+      "mod",
+      "cosmetic"
+    ],
+    "CategoryTags": [
+      "utility"
+    ],
     "Changelog": ""
   }
 ]

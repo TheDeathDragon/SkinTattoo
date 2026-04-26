@@ -5,8 +5,8 @@
     "Punchline": "实时皮肤贴花合成",
     "Description": "将图片贴花实时合成到角色皮肤贴图（漫反射 + 法线），通过 Penumbra 预览，不修改游戏本体。支持多图层发光、虹膜发光、ColorTable PBR、Mod (.pmp) 导出。目前仍在开发中，欢迎通过 GitHub Issue 或 Discord 反馈。/skintattoo 打开。",
     "InternalName": "SkinTattoo",
-    "AssemblyVersion": "0.0.0.1",
-    "TestingAssemblyVersion": "0.0.0.1",
+    "AssemblyVersion": "0.2.9",
+    "TestingAssemblyVersion": "0.2.9",
     "RepoUrl": "https://github.com/TheDeathDragon/SkinTattoo",
     "IconUrl": "https://raw.githubusercontent.com/TheDeathDragon/SkinTattoo/master/images/icon.png",
     "ApplicableVersion": "any",
@@ -16,11 +16,22 @@
     "IsTestingExclusive": "False",
     "DownloadCount": 0,
     "LastUpdate": 0,
-    "DownloadLinkInstall": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.0.0.1/SkinTattoo.zip",
-    "DownloadLinkTesting": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.0.0.1/SkinTattoo.zip",
-    "DownloadLinkUpdate": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.0.0.1/SkinTattoo.zip",
-    "Tags": ["texture", "decal", "tattoo", "skin", "penumbra", "glamour", "mod", "cosmetic"],
-    "CategoryTags": ["utility"],
+    "DownloadLinkInstall": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.2.9/SkinTattoo.zip",
+    "DownloadLinkTesting": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.2.9/SkinTattoo.zip",
+    "DownloadLinkUpdate": "https://github.com/TheDeathDragon/SkinTattoo/releases/download/v0.2.9/SkinTattoo.zip",
+    "Tags": [
+      "texture",
+      "decal",
+      "tattoo",
+      "skin",
+      "penumbra",
+      "glamour",
+      "mod",
+      "cosmetic"
+    ],
+    "CategoryTags": [
+      "utility"
+    ],
     "Changelog": ""
   }
 ]
