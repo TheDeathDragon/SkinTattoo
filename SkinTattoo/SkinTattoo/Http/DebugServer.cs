@@ -652,6 +652,62 @@ internal sealed class ApiController : WebApiController
     // -- Test runner: validates the recent LibraryService bug fixes -----------
     // Runs in isolation under a "_test_" prefixed folder so existing user data
     // is not affected.
+    // Read vanilla mtrl from SqPack and dump shader keys.
+    // ?path=<gamePath>
+    [Route(HttpVerbs.Get, "/debug/vanilla-mtrl")]
+    public object GetVanillaMtrl()
+    {
+        var q = HttpContext.GetRequestQueryData();
+        var path = q["path"];
+        if (string.IsNullOrWhiteSpace(path))
+            return new { error = "?path=<gamePath> required" };
+
+        try
+        {
+            var pack = _preview.GetSqPackInstanceForDiag();
+            if (pack == null) return new { error = "SqPack unavailable" };
+            var sq = pack.GetFile(path);
+            if (sq == null) return new { error = "file not found in SqPack", path };
+            var bytes = sq.Value.file.RawData.ToArray();
+            if (bytes.Length < 16) return new { error = "file too small", len = bytes.Length };
+
+            uint fileSizeField = BitConverter.ToUInt32(bytes, 4);
+            int dataSetSize = (int)(fileSizeField >> 16);
+            int stringTableSize = BitConverter.ToUInt16(bytes, 8);
+            int shpkNameOff = BitConverter.ToUInt16(bytes, 10);
+            int textureCount = bytes[12];
+            int uvSetCount = bytes[13];
+            int colorSetCount = bytes[14];
+            int additionalDataSize = bytes[15];
+
+            int stringsOff = 16 + textureCount * 4 + uvSetCount * 4 + colorSetCount * 4;
+            int materialHeaderOff = stringsOff + stringTableSize + additionalDataSize + dataSetSize;
+
+            string shpkName = "";
+            int nameEnd = Array.IndexOf(bytes, (byte)0, stringsOff + shpkNameOff);
+            if (nameEnd > 0) shpkName = System.Text.Encoding.ASCII.GetString(
+                bytes, stringsOff + shpkNameOff, nameEnd - stringsOff - shpkNameOff);
+
+            var keys = new List<object>();
+            if (materialHeaderOff + 12 <= bytes.Length)
+            {
+                int shaderKeyCount = BitConverter.ToUInt16(bytes, materialHeaderOff + 2);
+                int keysOff = materialHeaderOff + 12;
+                for (int i = 0; i < shaderKeyCount && keysOff + 8 * (i + 1) <= bytes.Length; i++)
+                {
+                    uint cat = BitConverter.ToUInt32(bytes, keysOff + i * 8);
+                    uint val = BitConverter.ToUInt32(bytes, keysOff + i * 8 + 4);
+                    keys.Add(new { category = $"0x{cat:X8}", value = $"0x{val:X8}" });
+                }
+            }
+            return new { path, shpkName, dataSetSize, fileSize = bytes.Length, shaderKeys = keys };
+        }
+        catch (Exception ex)
+        {
+            return new { error = ex.Message };
+        }
+    }
+
     [Route(HttpVerbs.Get, "/debug/state-dump")]
     public object GetStateDump()
     {
