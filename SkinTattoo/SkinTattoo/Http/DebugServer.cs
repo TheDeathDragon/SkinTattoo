@@ -652,6 +652,52 @@ internal sealed class ApiController : WebApiController
     // -- Test runner: validates the recent LibraryService bug fixes -----------
     // Runs in isolation under a "_test_" prefixed folder so existing user data
     // is not affected.
+    // Read vanilla texture from SqPack and dump per-channel histogram.
+    // Used to inspect mask/normal channel encoding without going through Penumbra.
+    [Route(HttpVerbs.Get, "/debug/vanilla-tex-stats")]
+    public object GetVanillaTexStats()
+    {
+        var q = HttpContext.GetRequestQueryData();
+        var path = q["path"];
+        if (string.IsNullOrWhiteSpace(path))
+            return new { error = "?path=<gamePath> required" };
+
+        try
+        {
+            var img = _preview.LoadGameTextureForDiag(path);
+            if (img == null) return new { error = "load failed", path };
+            var (rgba, w, h) = img.Value;
+
+            var histR = new int[256]; var histG = new int[256];
+            var histB = new int[256]; var histA = new int[256];
+            int total = w * h;
+            for (int i = 0; i < total; i++)
+            {
+                int o = i * 4;
+                histR[rgba[o]]++; histG[rgba[o + 1]]++;
+                histB[rgba[o + 2]]++; histA[rgba[o + 3]]++;
+            }
+
+            object Top10(int[] hist) => hist
+                .Select((c, v) => new { value = v, count = c })
+                .Where(x => x.count > 0)
+                .OrderByDescending(x => x.count)
+                .Take(10)
+                .Select(x => new { x.value, x.count, pct = (float)x.count / total })
+                .ToList();
+
+            return new
+            {
+                path, width = w, height = h,
+                channels = new { r = Top10(histR), g = Top10(histG), b = Top10(histB), a = Top10(histA) },
+            };
+        }
+        catch (Exception ex)
+        {
+            return new { error = ex.Message };
+        }
+    }
+
     // Read vanilla mtrl from SqPack and dump shader keys.
     // ?path=<gamePath>
     [Route(HttpVerbs.Get, "/debug/vanilla-mtrl")]

@@ -3974,6 +3974,7 @@ public class PreviewService : IDisposable
     }
 
     internal Meddle.Utils.Files.SqPack.SqPack? GetSqPackInstanceForDiag() => meshExtractor.GetSqPackInstance();
+    internal (byte[] Data, int Width, int Height)? LoadGameTextureForDiag(string gamePath) => LoadGameTexture(gamePath);
 
     // Read-only snapshot for the /api/debug/state-dump endpoint. Safe to call
     // from any thread; torn reads don't matter for diagnostics.
