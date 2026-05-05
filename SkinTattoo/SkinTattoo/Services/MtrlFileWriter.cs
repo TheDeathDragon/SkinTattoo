@@ -255,11 +255,14 @@ public static class MtrlFileWriter
             BitConverter.TryWriteBytes(bytes.AsSpan(off, 2), (Half)value);
         }
 
-        // Fill all rows with safe defaults (white diffuse/specular, zero emissive)
+        // Default fill. animSpeed=1 (not 0) because the patched PS pulse formula
+        // divides by speed; speed=0 -> NaN -> darkens the surface. With amp=0
+        // the formula collapses to em*(1+0*sin) = em, so vanilla rows stay dark.
         for (int row = 0; row < 32; row++)
         {
             WriteHalf(row, 0, 1f); WriteHalf(row, 1, 1f); WriteHalf(row, 2, 1f);
             WriteHalf(row, 4, 1f); WriteHalf(row, 5, 1f); WriteHalf(row, 6, 1f);
+            WriteHalf(row, 12, 1f);
             WriteHalf(row, 16, 0.5f);
         }
 
@@ -274,7 +277,7 @@ public static class MtrlFileWriter
             int rowLower = layer.AllocatedRowPair * 2;
             var em = layer.EmissiveColor * layer.EmissiveIntensity;
             bool hasAnim = layer.AnimMode != Core.EmissiveAnimMode.None;
-            float animSpeed = hasAnim ? layer.AnimSpeed : 0f;
+            float animSpeed = hasAnim ? layer.AnimSpeed : 1f; // see default-fill note
             float animAmp   = hasAnim ? layer.AnimAmplitude : 0f;
             // mode sentinel for DXBC branch selection: 0=pulse, 1=flicker, 2=gradient, 3=ripple
             float animMode = layer.AnimMode switch
@@ -361,7 +364,8 @@ public static class MtrlFileWriter
 
         var em = layer.EmissiveColor * layer.EmissiveIntensity;
         bool hasAnim = layer.AnimMode != Core.EmissiveAnimMode.None;
-        float animSpeed = hasAnim ? layer.AnimSpeed : 0f;
+        // Speed=1 (not 0) when None: patched PS pulse formula divides by speed.
+        float animSpeed = hasAnim ? layer.AnimSpeed : 1f;
         float animAmp   = hasAnim ? layer.AnimAmplitude : 0f;
         float animMode = layer.AnimMode switch
         {

@@ -652,6 +652,274 @@ internal sealed class ApiController : WebApiController
     // -- Test runner: validates the recent LibraryService bug fixes -----------
     // Runs in isolation under a "_test_" prefixed folder so existing user data
     // is not affected.
+    [Route(HttpVerbs.Get, "/debug/state-dump")]
+    public object GetStateDump()
+    {
+        try
+        {
+            return new
+            {
+                project = new
+                {
+                    groupCount = _project.Groups.Count,
+                    groups = _project.Groups.Select((g, i) => new
+                    {
+                        index = i,
+                        name = g.Name,
+                        diffuse = g.DiffuseGamePath,
+                        norm = g.NormGamePath,
+                        mtrl = g.MtrlGamePath,
+                        layerCount = g.Layers.Count,
+                        visibleLayers = g.Layers.Count(l => l.IsVisible),
+                        emissiveLayers = g.Layers.Count(l => l.AffectsEmissive),
+                    }).ToList(),
+                },
+                preview = _preview.DumpStateDiagnostics(),
+            };
+        }
+        catch (Exception ex)
+        {
+            return new { error = ex.Message, stack = ex.StackTrace };
+        }
+    }
+
+    [Route(HttpVerbs.Get, "/debug/state-invariants")]
+    public object GetStateInvariants()
+    {
+        try
+        {
+            var violations = _preview.CheckStateInvariants();
+            return new
+            {
+                violationCount = violations.Count,
+                violations,
+            };
+        }
+        catch (Exception ex)
+        {
+            return new { error = ex.Message, stack = ex.StackTrace };
+        }
+    }
+
+    // Dry-run export to a temp dir + introspect the resulting mtrl ColorTable
+    // + shader keys to verify anim params actually got baked in.
+    [Route(HttpVerbs.Post, "/test/dry-export")]
+    public object TestDryExport()
+    {
+        var stagingDir = Path.Combine(Path.GetTempPath(), $"SkinTattoo_DryExport_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(stagingDir);
+        var groupReports = new List<object>();
+
+        try
+        {
+            for (int gi = 0; gi < _project.Groups.Count; gi++)
+            {
+                var group = _project.Groups[gi];
+                bool hasEmissive = group.Layers.Any(l => l.IsVisible && l.AffectsEmissive);
+                if (!hasEmissive) continue;
+
+                var redirects = _preview.CompositeForExport(group, stagingDir);
+                var mtrlReport = InspectStagingMtrl(stagingDir, group.MtrlGamePath);
+                var layerSummary = group.Layers
+                    .Where(l => l.IsVisible && l.AffectsEmissive)
+                    .Select(l => new
+                    {
+                        l.Name,
+                        target = l.TargetMap.ToString(),
+                        animMode = l.AnimMode.ToString(),
+                        l.AnimSpeed,
+                        l.AnimAmplitude,
+                        emColor = new[] { l.EmissiveColor.X, l.EmissiveColor.Y, l.EmissiveColor.Z },
+                        l.EmissiveIntensity,
+                    })
+                    .ToList();
+                bool hasShpk = redirects.Keys.Any(k => k.Contains("skin_ct.shpk", StringComparison.OrdinalIgnoreCase));
+                bool hasNorm = !string.IsNullOrEmpty(group.NormGamePath)
+                               && redirects.ContainsKey(group.NormGamePath);
+
+                groupReports.Add(new
+                {
+                    groupIndex = gi,
+                    groupName = group.Name,
+                    mtrlGamePath = group.MtrlGamePath,
+                    redirectCount = redirects.Count,
+                    redirectKeys = redirects.Keys.ToList(),
+                    sharedShpkIncluded = hasShpk,
+                    normalTexIncluded = hasNorm,
+                    layers = layerSummary,
+                    mtrl = mtrlReport,
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            return new { error = ex.Message, stack = ex.StackTrace };
+        }
+        finally
+        {
+            try { Directory.Delete(stagingDir, recursive: true); } catch { }
+        }
+
+        return new { stagingDir, groupCount = groupReports.Count, groups = groupReports };
+    }
+
+    // Hand-rolled mtrl parser; Lumina's MtrlFile mis-aligns past Dawntrail's
+    // 2048-byte ColorTable so we can't trust ShaderKeys etc. via Lumina here.
+    private static object? InspectStagingMtrl(string stagingDir, string? mtrlGamePath)
+    {
+        if (string.IsNullOrEmpty(mtrlGamePath)) return null;
+        var disk = Path.Combine(stagingDir, mtrlGamePath.Replace('/', Path.DirectorySeparatorChar));
+        if (!File.Exists(disk)) return new { exists = false, path = disk };
+
+        try
+        {
+            var bytes = File.ReadAllBytes(disk);
+            if (bytes.Length < 16) return new { exists = true, error = "file too small" };
+
+            // FileHeader (16 bytes)
+            uint fileSizeField = BitConverter.ToUInt32(bytes, 4);
+            int dataSetSize = (int)(fileSizeField >> 16);
+            int stringTableSize = BitConverter.ToUInt16(bytes, 8);
+            int shpkNameOff = BitConverter.ToUInt16(bytes, 10);
+            int textureCount = bytes[12];
+            int uvSetCount = bytes[13];
+            int colorSetCount = bytes[14];
+            int additionalDataSize = bytes[15];
+
+            int stringsOff = 16 + textureCount * 4 + uvSetCount * 4 + colorSetCount * 4;
+            int addlOff = stringsOff + stringTableSize;
+            int dataSetOff = addlOff + additionalDataSize;
+            int materialHeaderOff = dataSetOff + dataSetSize;
+
+            string shpkName = ReadCString(bytes, stringsOff + shpkNameOff);
+            uint flags = additionalDataSize >= 4 ? BitConverter.ToUInt32(bytes, addlOff) : 0u;
+
+            // MaterialHeader (12 bytes): shaderValueListSize, shaderKeyCount, constantCount, samplerCount, unk1, unk2
+            object? matHeader = null;
+            List<object>? shaderKeys = null;
+            object? ctRows = null;
+            if (materialHeaderOff + 12 <= bytes.Length)
+            {
+                int shaderKeyCount = BitConverter.ToUInt16(bytes, materialHeaderOff + 2);
+                int constantCount = BitConverter.ToUInt16(bytes, materialHeaderOff + 4);
+                int samplerCount = BitConverter.ToUInt16(bytes, materialHeaderOff + 6);
+                matHeader = new { shaderKeyCount, constantCount, samplerCount };
+
+                int keysOff = materialHeaderOff + 12;
+                shaderKeys = new List<object>();
+                for (int i = 0; i < shaderKeyCount && keysOff + 8 * (i + 1) <= bytes.Length; i++)
+                {
+                    uint cat = BitConverter.ToUInt32(bytes, keysOff + i * 8);
+                    uint val = BitConverter.ToUInt32(bytes, keysOff + i * 8 + 4);
+                    shaderKeys.Add(new { category = $"0x{cat:X8}", value = $"0x{val:X8}" });
+                }
+            }
+
+            if (dataSetSize == 2048 && dataSetOff + 2048 <= bytes.Length)
+            {
+                ctRows = new[] { 0, 1, 2, 3, 4, 6, 14, 15, 16, 28, 29, 30, 31 }
+                    .Select(row => ProbeCtRow(bytes, dataSetOff, row))
+                    .ToList();
+            }
+
+            return new
+            {
+                exists = true,
+                fileSize = bytes.Length,
+                shaderPackage = shpkName,
+                additionalFlags = $"0x{flags:X8}",
+                hasColorTable = (flags & 0x04) != 0,
+                dataSetSize,
+                materialHeader = matHeader,
+                shaderKeys,
+                ctRowProbes = ctRows,
+            };
+        }
+        catch (Exception ex)
+        {
+            return new { exists = true, error = ex.Message };
+        }
+    }
+
+    private static string ReadCString(byte[] bytes, int offset)
+    {
+        if (offset < 0 || offset >= bytes.Length) return "";
+        int end = Array.IndexOf(bytes, (byte)0, offset);
+        if (end < 0) end = bytes.Length;
+        return System.Text.Encoding.ASCII.GetString(bytes, offset, end - offset);
+    }
+
+    private static object ProbeCtRow(byte[] bytes, int ctOff, int row)
+    {
+        float ReadHalf(int col)
+        {
+            int off = ctOff + (row * 32 + col) * 2;
+            if (off + 2 > bytes.Length) return float.NaN;
+            return (float)BitConverter.ToHalf(bytes.AsSpan(off, 2));
+        }
+        return new
+        {
+            row,
+            diffR = ReadHalf(0), diffG = ReadHalf(1), diffB = ReadHalf(2),
+            specR = ReadHalf(4), specG = ReadHalf(5), specB = ReadHalf(6),
+            rough = ReadHalf(16),
+            emR = ReadHalf(8),
+            emG = ReadHalf(9),
+            emB = ReadHalf(10),
+            animSpeed = ReadHalf(12),
+            animAmp = ReadHalf(13),
+            animMode = ReadHalf(14),
+            emR_B = ReadHalf(17),
+            emG_B = ReadHalf(18),
+            emB_B = ReadHalf(19),
+        };
+    }
+
+    // Reads vanilla skin.shpk + parses + rebuilds without patches; bytesDiffer=0
+    // means the parser/writer pair is byte-faithful.
+    [Route(HttpVerbs.Post, "/test/shpk-roundtrip")]
+    public object TestShpkRoundtrip()
+    {
+        try
+        {
+            var pack = _preview.GetSqPackInstanceForDiag();
+            if (pack == null) return new { error = "SqPack unavailable" };
+            var sq = pack.GetFile("shader/sm5/shpk/skin.shpk");
+            if (sq == null) return new { error = "vanilla skin.shpk not found" };
+            var vanilla = sq.Value.file.RawData.ToArray();
+
+            var rebuilt = Services.SkinShpkPatcher.RoundTripForDiag(vanilla);
+            if (rebuilt == null) return new { error = "round-trip rebuild returned null" };
+
+            int firstDiff = -1;
+            int diffCount = 0;
+            int minLen = Math.Min(vanilla.Length, rebuilt.Length);
+            for (int i = 0; i < minLen; i++)
+            {
+                if (vanilla[i] != rebuilt[i])
+                {
+                    if (firstDiff < 0) firstDiff = i;
+                    diffCount++;
+                }
+            }
+            if (vanilla.Length != rebuilt.Length) diffCount += Math.Abs(vanilla.Length - rebuilt.Length);
+
+            return new
+            {
+                vanillaLen = vanilla.Length,
+                rebuiltLen = rebuilt.Length,
+                bytesDiffer = diffCount,
+                firstDiffOffset = firstDiff < 0 ? null : (int?)firstDiff,
+                firstDiffOffsetHex = firstDiff < 0 ? null : $"0x{firstDiff:X}",
+                identical = (vanilla.Length == rebuilt.Length && diffCount == 0),
+            };
+        }
+        catch (Exception ex)
+        {
+            return new { error = ex.Message, stack = ex.StackTrace };
+        }
+    }
+
     [Route(HttpVerbs.Post, "/test/run-library-suite")]
     public async Task<object> TestRunLibrarySuite()
     {

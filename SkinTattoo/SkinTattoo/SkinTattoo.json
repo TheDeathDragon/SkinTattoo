@@ -6,7 +6,7 @@
   "Description": "Composites image decals onto character skin textures (diffuse + normal) in real time via Penumbra. No game file modification. Supports per-layer emissive, iris glow, ColorTable PBR, and Mod (.pmp) export. Under active development - feedback welcome via Issues or Discord. Type /skintattoo to open.",
   "AssemblyVersion": "0.0.0.1",
   "ApplicableVersion": "any",
-  "DalamudApiLevel": 14,
+  "DalamudApiLevel": 15,
   "IconUrl": "https://raw.githubusercontent.com/TheDeathDragon/SkinTattoo/master/images/icon.png",
   "Tags": [
     "texture",

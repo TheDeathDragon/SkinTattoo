@@ -1,10 +1,10 @@
 [submodule "Penumbra.Api"]
 	path = Penumbra.Api
 	url = https://github.com/MeowZWR/Penumbra.Api.git
-	branch = cn-temp
+	branch = cn
 [submodule "Lumina"]
 	path = Lumina
-	url = https://github.com/AtmoOmen/Lumina.git
+	url = https://github.com/NotAdam/Lumina.git
 [submodule "Meddle"]
 	path = Meddle
 	url = https://github.com/PassiveModding/Meddle.git

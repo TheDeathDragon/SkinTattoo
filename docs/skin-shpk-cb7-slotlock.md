@@ -425,3 +425,48 @@ changes -- cached files on user machines are reused via
 * `ShaderPatcher/reference/ps_019_EMISSIVE_disasm.txt` /
   `ps_019_PATCHED_disasm.txt` -- vanilla ValEmissive PS[19] and the earlier
   (pre-v10) patched variant.
+
+---
+
+## 7.5 update: animSpeed=0 div-by-zero (separate symptom, same area)
+
+After upgrading to game 7.5 a new variant of "neck seam / overall body
+darkens with emissive on" surfaced. Triaged via `/api/test/dry-export` +
+direct in-game A/B (Diffuse vs Normal target, anim modes None vs Pulse/etc):
+
+| target | anim | symptom |
+|---|---|---|
+| Diffuse | any | body darkens |
+| Normal  | None  | body darkens |
+| Normal  | Pulse/Flicker/Gradient/Ripple | clean |
+
+Pattern: only when the row sampled by vanilla pixels has `animSpeed = 0`.
+
+Root cause: the patched PS pulse formula divides by speed; speed=0 produces
+NaN/Inf which downstream blending clamps to a darkening value. `BuildSkinColorTablePerLayer`
+default-filled rows at `(em=0, speed=0, amp=0, mode=0)` and the per-layer code
+wrote `speed=0` for `AnimMode.None`. Vanilla pixels (alpha=255 → row 30/31)
+landed on those zero rows.
+
+Fix (`Services/MtrlFileWriter.cs`): write `speed=1` (not 0) in two places:
+1. Default fill loop in `BuildSkinColorTablePerLayer` writes col 12 = 1.
+2. Per-layer write maps `AnimMode.None → speed=1, amp=0` instead of all-zero.
+
+With `amp=0` the formula reduces to `em*(1+0*sin) = em` — visually identical
+to the desired static-emissive behavior, but numerically stable.
+
+The cb7 slot-lock theory in pass 1 above turned out to be a red herring for
+this 7.5 symptom: IDA confirmed `g_ShaderTypeParameter` is a 0x8000-byte
+single-instance static buffer (`sub_140277400` allocates it; `sub_1402798D0`
+binds the pointer to PS slot 7). It does not vary per shader-key. The actual
+breakage was in our own CT data, not in cb7 binding.
+
+### Diagnostic helpers added during this investigation
+
+- `POST /api/test/shpk-roundtrip` — parser+writer byte-equivalence test on
+  vanilla skin.shpk (verifies our v14.1 NodeAliasClusters opaque-preserve).
+- `POST /api/test/dry-export` — runs the export pipeline against a temp
+  staging dir and parses the resulting mtrl by hand (Lumina's MtrlFile
+  mis-aligns past Dawntrail's 2048-byte CT).
+- `GET /api/debug/state-dump` / `GET /api/debug/state-invariants` —
+  PreviewService state snapshot + cross-table consistency checks.

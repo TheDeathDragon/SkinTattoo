@@ -157,6 +157,50 @@ public class PreviewService : IDisposable
     // skin.shpk + patched ColorTable: tracks which MtrlGamePaths entered the skin CT
     // pipeline during Full Redraw. Background composite checks this to decide between
     // skin CT (build-from-scratch) vs PBR CT (clone-vanilla) vs legacy CBuffer paths.
+    // Per-group state container, keyed by TargetGroup reference (not mtrl path
+    // string) to avoid collisions when groups share a DiffuseGamePath. Dual-
+    // written alongside the legacy mtrl-keyed dicts during the migration.
+    private readonly ConcurrentDictionary<TargetGroup, GroupSession> groupSessions = new();
+
+    private GroupSession GetOrCreateSession(TargetGroup group)
+        => groupSessions.GetOrAdd(group, g => new GroupSession(g));
+
+    private GroupSession? FindSessionByMtrl(string mtrlGamePath)
+    {
+        if (string.IsNullOrEmpty(mtrlGamePath)) return null;
+        foreach (var s in groupSessions.Values)
+            if (string.Equals(s.MtrlGamePath, mtrlGamePath, StringComparison.OrdinalIgnoreCase))
+                return s;
+        return null;
+    }
+
+    // Session-first read with legacy fallback. Removing the legacy dict later
+    // collapses this to a trivial pass-through.
+    private string? GetMtrlDiskPath(string mtrlGamePath)
+    {
+        var s = FindSessionByMtrl(mtrlGamePath);
+        if (s?.MtrlDiskPath != null) return s.MtrlDiskPath;
+        return previewMtrlDiskPaths.GetValueOrDefault(mtrlGamePath);
+    }
+
+    private bool TryGetEmissiveOffset(string mtrlGamePath, out int offset)
+    {
+        var s = FindSessionByMtrl(mtrlGamePath);
+        if (s != null && s.EmissiveCBufferOffset > 0)
+        {
+            offset = s.EmissiveCBufferOffset;
+            return true;
+        }
+        return emissiveOffsets.TryGetValue(mtrlGamePath, out offset);
+    }
+
+    private bool IsSkinCtMaterial(string mtrlGamePath)
+    {
+        var s = FindSessionByMtrl(mtrlGamePath);
+        if (s != null) return s.UsesSkinCt;
+        return skinCtMaterials.ContainsKey(mtrlGamePath);
+    }
+
     private readonly ConcurrentDictionary<string, byte> skinCtMaterials =
         new(StringComparer.OrdinalIgnoreCase);
 
@@ -664,6 +708,16 @@ public class PreviewService : IDisposable
         var charBase = textureSwap?.GetLocalPlayerCharacterBase();
         if (charBase == null) return;
 
+        var painting = new List<GroupSession>();
+        foreach (var s in groupSessions.Values)
+        {
+            if (s.State == GroupSession.SessionState.Ready)
+            {
+                s.TransitionTo(GroupSession.SessionState.Painting, "ApplyPendingSwaps-begin");
+                painting.Add(s);
+            }
+        }
+
         foreach (var entry in batch.Textures)
         {
             var slot = textureSwap!.FindTextureSlot(charBase, entry.GamePath, entry.DiskPath);
@@ -703,8 +757,25 @@ public class PreviewService : IDisposable
 
             if (isDup) continue;
             lastAppliedEmissive[em.MtrlGamePath] = key;
+            var session = FindSessionByMtrl(em.MtrlGamePath);
+            if (session != null)
+            {
+                session.LastAppliedEmissiveColor = em.Color;
+                session.LastAppliedAnimMode = em.AnimMode;
+                session.LastAppliedAnimSpeed = em.AnimSpeed;
+                session.LastAppliedAnimAmp = em.AnimAmplitude;
+                session.HasLastApplied = true;
+            }
 
             textureSwap!.UpdateEmissiveViaColorTable(charBase, em.MtrlGamePath, em.MtrlDiskPath, em.Color);
+        }
+
+        // Skip sessions whose state changed mid-paint (e.g. invalidated by
+        // a UI action) -- their new state is authoritative.
+        foreach (var s in painting)
+        {
+            if (s.State == GroupSession.SessionState.Painting)
+                s.TransitionTo(GroupSession.SessionState.Ready, "ApplyPendingSwaps-end");
         }
 
         LastUpdateMode = "inplace";
@@ -729,13 +800,13 @@ public class PreviewService : IDisposable
         foreach (var group in project.Groups)
         {
             if (string.IsNullOrEmpty(group.MtrlGamePath)) continue;
-            if (skinCtMaterials.ContainsKey(group.MtrlGamePath!)) continue;
-            if (!emissiveOffsets.TryGetValue(group.MtrlGamePath!, out var emOff) || emOff <= 0) continue;
+            if (IsSkinCtMaterial(group.MtrlGamePath!)) continue;
+            if (!TryGetEmissiveOffset(group.MtrlGamePath!, out var emOff) || emOff <= 0) continue;
             if (!group.HasEmissiveLayers()) continue;
 
             var color = GetCombinedEmissiveColor(group.Layers);
             var (mode, speed, amp, colorB) = GetDominantEmissiveAnim(group.Layers);
-            var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
+            var mtrlDisk = GetMtrlDiskPath(group.MtrlGamePath!);
             emissiveHook.SetTargetByPath(charBase, group.MtrlGamePath!, mtrlDisk, color, mode, speed, amp, colorB);
         }
     }
@@ -750,9 +821,9 @@ public class PreviewService : IDisposable
         if (textureSwap == null) return;
         if (string.IsNullOrEmpty(group.MtrlGamePath)) return;
 
-        var mtrlDiskPath = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
+        var mtrlDiskPath = GetMtrlDiskPath(group.MtrlGamePath!);
 
-        emissiveOffsets.TryGetValue(group.MtrlGamePath!, out var cbufOffset);
+        TryGetEmissiveOffset(group.MtrlGamePath!, out var cbufOffset);
         textureSwap.UpdateEmissiveViaColorTable(charBase, group.MtrlGamePath!, mtrlDiskPath, color);
         if (emissiveHook != null && cbufOffset > 0)
         {
@@ -770,7 +841,7 @@ public class PreviewService : IDisposable
     {
         if (textureSwap == null) return false;
         if (string.IsNullOrEmpty(group.MtrlGamePath)) return false;
-        if (!skinCtMaterials.ContainsKey(group.MtrlGamePath!)) return false;
+        if (!IsSkinCtMaterial(group.MtrlGamePath!)) return false;
 
         DecalLayer? normalEmLayer = null;
         bool diffuseEmExists = false;
@@ -785,7 +856,7 @@ public class PreviewService : IDisposable
             : MtrlFileWriter.BuildSkinColorTablePerLayer(group.Layers);
         var ctHalfs = System.Runtime.InteropServices.MemoryMarshal
             .Cast<byte, Half>((ReadOnlySpan<byte>)ctBytes).ToArray();
-        var mtrlDiskPath = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
+        var mtrlDiskPath = GetMtrlDiskPath(group.MtrlGamePath!);
         textureSwap.ReplaceColorTableRaw(charBase, group.MtrlGamePath!, mtrlDiskPath, ctHalfs, 8, 32);
         return true;
     }
@@ -859,10 +930,38 @@ public class PreviewService : IDisposable
         penumbra.RedrawPlayer();
 
         DebugServer.AppendLog($"[PreviewService] Registering {redirects.Count} redirect paths");
+
+        // Iris mask paths (chara/common/texture/eye/*) are derived from mtrl
+        // resolution and aren't in the group's direct properties; attributed
+        // to the first iris session below.
+        var pathToGroup = new Dictionary<string, TargetGroup>(StringComparer.OrdinalIgnoreCase);
+        TargetGroup? irisGroup = null;
+        foreach (var g in project.Groups)
+        {
+            if (!string.IsNullOrEmpty(g.MtrlGamePath)) pathToGroup[g.MtrlGamePath] = g;
+            if (!string.IsNullOrEmpty(g.NormGamePath)) pathToGroup[g.NormGamePath] = g;
+            if (!string.IsNullOrEmpty(g.DiffuseGamePath)) pathToGroup[g.DiffuseGamePath] = g;
+            if (irisGroup == null && !string.IsNullOrEmpty(g.MtrlGamePath)
+                && g.MtrlGamePath.Contains("_iri_", StringComparison.OrdinalIgnoreCase))
+                irisGroup = g;
+        }
+
         foreach (var (gamePath, diskPath) in redirects)
         {
             initializedRedirects.TryAdd(gamePath, 0);
             previewDiskPaths[gamePath] = diskPath;
+            TargetGroup? owningGroup = null;
+            if (pathToGroup.TryGetValue(gamePath, out var direct))
+                owningGroup = direct;
+            else if (irisGroup != null
+                     && gamePath.StartsWith("chara/common/texture/eye/", StringComparison.OrdinalIgnoreCase))
+                owningGroup = irisGroup;
+            if (owningGroup != null)
+            {
+                var s = GetOrCreateSession(owningGroup);
+                s.InitializedRedirectKeys.Add(gamePath);
+                s.PreviewDiskPaths[gamePath] = diskPath;
+            }
         }
 
         activeProject = project;
@@ -917,7 +1016,7 @@ public class PreviewService : IDisposable
 
             previewDiskPaths.TryGetValue(group.DiffuseGamePath, out var diffDisk);
 
-            emissiveOffsets.TryGetValue(group.MtrlGamePath ?? "", out var emOff);
+            TryGetEmissiveOffset(group.MtrlGamePath ?? "", out var emOff);
 
             // v1 PBR: resolve index map path (cached) and look up its staged disk path
             var indexGame = GetIndexMapGamePath(group);
@@ -927,7 +1026,7 @@ public class PreviewService : IDisposable
 
             // skin.shpk ColorTable mode: set during Full Redraw when patched shader is active
             bool isSkinCt = !string.IsNullOrEmpty(group.MtrlGamePath)
-                            && skinCtMaterials.ContainsKey(group.MtrlGamePath!);
+                            && IsSkinCtMaterial(group.MtrlGamePath!);
 
             // Snapshot layer parameters so background thread reads stable data
             var snapshots = new List<LayerSnapshot>();
@@ -1062,7 +1161,7 @@ public class PreviewService : IDisposable
                         var skinCtHalfs = System.Runtime.InteropServices.MemoryMarshal
                             .Cast<byte, Half>((ReadOnlySpan<byte>)skinCtBytes).ToArray();
 
-                        var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(job.MtrlGamePath!);
+                        var mtrlDisk = GetMtrlDiskPath(job.MtrlGamePath!);
                         ctEntries.Add(new ColorTableEntry(
                             job.MtrlGamePath!, mtrlDisk, skinCtHalfs, 8, 32));
                         lastBuiltColorTables[job.MtrlGamePath!] = (skinCtHalfs, 8, 32);
@@ -1141,7 +1240,7 @@ public class PreviewService : IDisposable
                         && ColorTableBuilder.IsDawntrailLayout(vanilla.Width, vanilla.Height))
                     {
                         var modified = ColorTableBuilder.Build(vanilla.Data, vanilla.Width, vanilla.Height, allocatedLayers);
-                        var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(job.MtrlGamePath!);
+                        var mtrlDisk = GetMtrlDiskPath(job.MtrlGamePath!);
                         ctEntries.Add(new ColorTableEntry(
                             job.MtrlGamePath!, mtrlDisk, modified, vanilla.Width, vanilla.Height));
                         // Surface the modified table to the PBR inspector.
@@ -1178,8 +1277,8 @@ public class PreviewService : IDisposable
 
                         if (!string.IsNullOrEmpty(job.MtrlGamePath))
                         {
-                            var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(job.MtrlGamePath!);
-                            emissiveOffsets.TryGetValue(job.MtrlGamePath!, out var emOff);
+                            var mtrlDisk = GetMtrlDiskPath(job.MtrlGamePath!);
+                            TryGetEmissiveOffset(job.MtrlGamePath!, out var emOff);
                             var (animMode, animSpeed, animAmp, animColorB) = GetDominantEmissiveAnim(layers);
                             emEntries.Add(new EmissiveEntry(job.MtrlGamePath!, mtrlDisk, job.EmissiveColor, emOff,
                                 animMode, animSpeed, animAmp, animColorB));
@@ -1243,7 +1342,7 @@ public class PreviewService : IDisposable
                     if (!irisMaskHandled && AnyTargetMapLayer(layers, TargetMap.Mask)
                         && !string.IsNullOrEmpty(job.MtrlGamePath))
                     {
-                        var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(job.MtrlGamePath!)
+                        var mtrlDisk = GetMtrlDiskPath(job.MtrlGamePath!)
                                        ?? job.Group.OrigMtrlDiskPath ?? job.Group.MtrlDiskPath;
                         var maskGamePath = GetMaskGamePathFromMtrl(job.MtrlGamePath!, mtrlDisk);
                         if (!string.IsNullOrEmpty(maskGamePath))
@@ -1408,7 +1507,7 @@ public class PreviewService : IDisposable
             // After Penumbra redirect the live mtrl FileName contains the staged disk path,
             // not the original. Match by the staged path (falling back to orig for first-time
             // attempts before any redirect happened).
-            var matchDisk = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!)
+            var matchDisk = GetMtrlDiskPath(group.MtrlGamePath!)
                             ?? group.OrigMtrlDiskPath
                             ?? group.MtrlDiskPath;
 
@@ -1755,7 +1854,7 @@ public class PreviewService : IDisposable
             var charBase = GetCharacterBase();
             if (charBase != null)
             {
-                var mtrlDisk = previewMtrlDiskPaths.GetValueOrDefault(group.MtrlGamePath!);
+                var mtrlDisk = GetMtrlDiskPath(group.MtrlGamePath!);
                 emissiveHook.ClearTargetByPath(charBase, group.MtrlGamePath!, mtrlDisk);
             }
         }
@@ -1778,6 +1877,8 @@ public class PreviewService : IDisposable
             initializedRedirects.TryRemove(group.NormGamePath!, out _);
             previewDiskPaths.TryRemove(group.NormGamePath!, out _);
         }
+        if (groupSessions.TryGetValue(group, out var sess))
+            sess.Invalidate("InvalidateEmissiveForGroup");
         // Force CanSwap recompute next frame
         CanSwapInPlace = false;
     }
@@ -1807,6 +1908,14 @@ public class PreviewService : IDisposable
         indexMapGamePaths.Clear();
         lastAppliedEmissive.Clear();
         skinCtMaterials.Clear();
+        foreach (var s in groupSessions.Values)
+            s.Dispose("ResetSwapState");
+        groupSessions.Clear();
+        // patch-mode switch routes through here; clear so the next
+        // EnsurePatchedSkinShpkPath regenerates the file for the new mode.
+        patchedSkinShpkPath = null;
+        skinShpkConflictChecked = false;
+        shpkNodeDumped = false;
         lastGameSwapUtc = DateTime.MinValue;
         pendingIdleFlush = false;
         activeProject = null;
@@ -1828,6 +1937,12 @@ public class PreviewService : IDisposable
 
         if (string.IsNullOrEmpty(group.DiffuseGamePath))
             return redirects;
+
+        // Required when exporting without a prior preview run; otherwise the
+        // export falls through to the legacy CBuffer-only path and drops baked
+        // ColorTable animation params + shader-key routing.
+        if (group.Layers.Any(l => l.IsVisible && l.AffectsEmissive) && IsSkinMaterial(group))
+            EnsurePatchedSkinShpkPath();
 
         // Build a temporary list of visible layers (skip hidden / null-image)
         var visibleLayers = new List<DecalLayer>();
@@ -2211,6 +2326,10 @@ public class PreviewService : IDisposable
 
     private void ProcessGroup(TargetGroup group, Dictionary<string, string> redirects)
     {
+        var sess = GetOrCreateSession(group);
+        if (sess.State != GroupSession.SessionState.Initializing)
+            sess.TransitionTo(GroupSession.SessionState.Initializing, "ProcessGroup-enter");
+
         var baseTex = LoadBaseTexture(group);
         int w = baseTex.Width, h = baseTex.Height;
 
@@ -2337,6 +2456,9 @@ public class PreviewService : IDisposable
         if (useSkinColorTable)
         {
             skinCtMaterials[group.MtrlGamePath!] = 1;
+            var session = GetOrCreateSession(group);
+            session.UsesSkinCt = true;
+            session.MtrlGamePath = group.MtrlGamePath;
             DebugServer.AppendLog($"[SkinCT] Using ColorTable path for {group.Name}");
         }
         else if (!string.IsNullOrEmpty(group.MtrlGamePath))
@@ -2391,8 +2513,14 @@ public class PreviewService : IDisposable
                 {
                     redirects[group.MtrlGamePath!] = mtrlOutPath;
                     previewMtrlDiskPaths[group.MtrlGamePath!] = mtrlOutPath;
+                    var session = GetOrCreateSession(group);
+                    session.MtrlGamePath = group.MtrlGamePath;
+                    session.MtrlDiskPath = mtrlOutPath;
                     if (emOffset >= 0)
+                    {
                         emissiveOffsets[group.MtrlGamePath!] = emOffset;
+                        session.EmissiveCBufferOffset = emOffset;
+                    }
                     // Verify mtrl header
                     try
                     {
@@ -2431,8 +2559,14 @@ public class PreviewService : IDisposable
                 {
                     redirects[group.MtrlGamePath!] = mtrlOutPath;
                     previewMtrlDiskPaths[group.MtrlGamePath!] = mtrlOutPath;
+                    var session = GetOrCreateSession(group);
+                    session.MtrlGamePath = group.MtrlGamePath;
+                    session.MtrlDiskPath = mtrlOutPath;
                     if (emOffset >= 0)
+                    {
                         emissiveOffsets[group.MtrlGamePath!] = emOffset;
+                        session.EmissiveCBufferOffset = emOffset;
+                    }
                 }
 
                 if (hasEmissive && !string.IsNullOrEmpty(group.NormGamePath))
@@ -2490,6 +2624,9 @@ public class PreviewService : IDisposable
 
         ApplyUserNormalOverlay(group, w, h, redirects);
         ApplyUserMaskOverlay(group, redirects);
+
+        if (sess.State == GroupSession.SessionState.Initializing)
+            sess.TransitionTo(GroupSession.SessionState.Ready, "ProcessGroup-done");
     }
 
     private static bool AnyTargetMapLayer(List<DecalLayer> layers, TargetMap target)
@@ -2774,10 +2911,21 @@ public class PreviewService : IDisposable
         else
             Buffer.BlockCopy(cachedBytes, 0, output, 0, needLen);
 
-        // Zero alpha everywhere. Preserve G: skin.shpk-family shaders rely on the
-        // base normal.G (gloss/tangent data -- critical for oily-skin mods at night).
-        for (int i = 3; i < needLen; i += 4)
-            output[i] = 0;
+        // EmissiveMask: zero alpha and let per-layer fade-mask write the
+        // decal coverage. Skin.shpk patched variant uses normal.G for tangent
+        // data so we preserve G across the channel.
+        // RowIndex: PRESERVE vanilla alpha so cb7 ShaderTypeParameter slot
+        // lookups stay correct. Decal pixels override the alpha to rowPair*17
+        // below; non-decal pixels keep the vanilla skin-type encoding so the
+        // body doesn't experience the "wrong skin tone slot" shift documented
+        // in OverlayNormalEmissiveAlpha. With BuildSkinColorTablePerLayer's
+        // default em=0 fill on every row, vanilla alpha (typically 255 -> CT
+        // row 30/31) lands on no-emissive rows so the visual stays unchanged.
+        if (alphaMode == NormAlphaMode.EmissiveMask)
+        {
+            for (int i = 3; i < needLen; i += 4)
+                output[i] = 0;
+        }
 
         bool anyPainted = false;
         foreach (var layer in layers)
@@ -3290,48 +3438,10 @@ public class PreviewService : IDisposable
             catch { }
         }
 
-        if (patchedSkinShpkPath == null || !File.Exists(patchedSkinShpkPath))
-        {
-            // Mode-dependent cache name: we keep both v11b (ValEmissive) and v13 (ValBody)
-            // paths runnable side-by-side so the user can A/B compare seam vs bloom vs
-            // shadow artifacts without rebuilding. Bump whenever the patch logic in that
-            // branch changes so cached files get regenerated.
-            var candidateName = SkinShpkPatcher.Mode == SkinShpkPatcher.PatchMode.ValBody_v13
-                ? "skin_ct_v13.shpk"
-                : "skin_ct_v11c.shpk";
-            var candidate = Path.Combine(outputDir, candidateName);
-            if (!File.Exists(candidate))
-            {
-                // Runtime patch: read vanilla skin.shpk from SqPack and patch in memory
-                try
-                {
-                    var pack = meshExtractor.GetSqPackInstance();
-                    var sqResult = pack?.GetFile(VanillaSkinShpkGamePath);
-                    if (sqResult == null)
-                    {
-                        DebugServer.AppendLog("[ShpkPatch] Cannot read vanilla skin.shpk from SqPack");
-                        return;
-                    }
-                    var vanillaBytes = sqResult.Value.file.RawData.ToArray();
-                    var patched = SkinShpkPatcher.Patch(vanillaBytes);
-                    if (patched == null)
-                    {
-                        DebugServer.AppendLog("[ShpkPatch] Runtime patching failed");
-                        return;
-                    }
-                    File.WriteAllBytes(candidate, patched);
-                    DebugServer.AppendLog($"[ShpkPatch] Runtime-patched skin.shpk ({vanillaBytes.Length} -> {patched.Length} bytes)");
-                }
-                catch (Exception ex)
-                {
-                    DebugServer.AppendLog($"[ShpkPatch] Runtime patch failed: {ex.Message}");
-                    return;
-                }
-            }
-            patchedSkinShpkPath = candidate;
-        }
+        if (!EnsurePatchedSkinShpkPath())
+            return;
 
-        redirects[SkinShpkGamePath] = patchedSkinShpkPath;
+        redirects[SkinShpkGamePath] = patchedSkinShpkPath!;
         DebugServer.AppendLog("[ShpkPatch] Deployed patched skin.shpk for ColorTable emissive");
 
         // One-shot NodeSelector dump: parse the patched skin.shpk so we can see if
@@ -3342,12 +3452,54 @@ public class PreviewService : IDisposable
             shpkNodeDumped = true;
             try
             {
-                var bytes = File.ReadAllBytes(patchedSkinShpkPath);
+                var bytes = File.ReadAllBytes(patchedSkinShpkPath!);
                 SkinShpkPatcher.DumpFromBytes(bytes);
             }
             catch (Exception ex) { DebugServer.AppendLog($"[ShpkPatch] Dump failed: {ex.Message}"); }
         }
 
+    }
+
+    // Idempotent. Returns false if patching failed; caller should skip the
+    // skin_ct.shpk redirect. Shared by preview deploy and export paths.
+    private bool EnsurePatchedSkinShpkPath()
+    {
+        if (patchedSkinShpkPath != null && File.Exists(patchedSkinShpkPath))
+            return true;
+
+        var candidateName = SkinShpkPatcher.Mode == SkinShpkPatcher.PatchMode.ValBody_v13
+            ? "skin_ct_v13.shpk"
+            : "skin_ct_v11c.shpk";
+        var candidate = Path.Combine(outputDir, candidateName);
+        if (!File.Exists(candidate))
+        {
+            try
+            {
+                var pack = meshExtractor.GetSqPackInstance();
+                var sqResult = pack?.GetFile(VanillaSkinShpkGamePath);
+                if (sqResult == null)
+                {
+                    DebugServer.AppendLog("[ShpkPatch] Cannot read vanilla skin.shpk from SqPack");
+                    return false;
+                }
+                var vanillaBytes = sqResult.Value.file.RawData.ToArray();
+                var patched = SkinShpkPatcher.Patch(vanillaBytes);
+                if (patched == null)
+                {
+                    DebugServer.AppendLog("[ShpkPatch] Runtime patching failed");
+                    return false;
+                }
+                File.WriteAllBytes(candidate, patched);
+                DebugServer.AppendLog($"[ShpkPatch] Runtime-patched skin.shpk ({vanillaBytes.Length} -> {patched.Length} bytes)");
+            }
+            catch (Exception ex)
+            {
+                DebugServer.AppendLog($"[ShpkPatch] Runtime patch failed: {ex.Message}");
+                return false;
+            }
+        }
+        patchedSkinShpkPath = candidate;
+        return true;
     }
 
     /// <summary>
@@ -3821,6 +3973,175 @@ public class PreviewService : IDisposable
         catch { return null; }
     }
 
+    internal Meddle.Utils.Files.SqPack.SqPack? GetSqPackInstanceForDiag() => meshExtractor.GetSqPackInstance();
+
+    // Read-only snapshot for the /api/debug/state-dump endpoint. Safe to call
+    // from any thread; torn reads don't matter for diagnostics.
+    internal object DumpStateDiagnostics()
+    {
+        return new
+        {
+            disposed,
+            canSwapInPlace = CanSwapInPlace,
+            lastUpdateMode = LastUpdateMode,
+            lastCanSwapDenyReason,
+            activeProjectGroupCount = activeProject?.Groups.Count,
+            externalDirty = ExternalDirty,
+            compositeVersion,
+            composeRequestSeq,
+
+            patchedSkinShpkPath,
+            skinShpkConflictChecked,
+            shpkNodeDumped,
+            skinShpkModConflict = SkinShpkModConflict,
+
+            initializedRedirects = new { count = initializedRedirects.Count, keys = initializedRedirects.Keys.OrderBy(k => k).ToList() },
+            previewDiskPaths = new { count = previewDiskPaths.Count, keys = previewDiskPaths.Keys.OrderBy(k => k).ToList() },
+            previewMtrlDiskPaths = new { count = previewMtrlDiskPaths.Count, keys = previewMtrlDiskPaths.Keys.OrderBy(k => k).ToList() },
+            emissiveOffsets = new { count = emissiveOffsets.Count, keys = emissiveOffsets.Keys.OrderBy(k => k).ToList() },
+            skinCtMaterials = new { count = skinCtMaterials.Count, keys = skinCtMaterials.Keys.OrderBy(k => k).ToList() },
+            lastAppliedEmissive = new { count = lastAppliedEmissive.Count, keys = lastAppliedEmissive.Keys.OrderBy(k => k).ToList() },
+            indexMapGamePaths = new { count = indexMapGamePaths.Count, keys = indexMapGamePaths.Keys.OrderBy(k => k).ToList() },
+            rowPairAllocators = new { count = rowPairAllocators.Count, keys = rowPairAllocators.Keys.OrderBy(k => k).ToList() },
+            skinShpkCtCache = new { count = skinShpkCtCache.Count },
+            maskSupportCache = new { count = maskSupportCache.Count },
+            vanillaColorTables = new { count = vanillaColorTables.Count, keys = vanillaColorTables.Keys.OrderBy(k => k).ToList() },
+            lastBuiltColorTables = new { count = lastBuiltColorTables.Count, keys = lastBuiltColorTables.Keys.OrderBy(k => k).ToList() },
+            baseTextureCache = new { count = baseTextureCache.Count, keys = baseTextureCache.Keys.OrderBy(k => k).ToList() },
+            groupScratch = new { count = groupScratch.Count, keys = groupScratch.Keys.OrderBy(k => k).ToList() },
+            compositeResults = new { count = compositeResults.Count, keys = compositeResults.Keys.OrderBy(k => k).ToList() },
+            emissiveHook = emissiveHook?.DumpStateDiagnostics(),
+            groupSessions = groupSessions.Values.Select(s => s.DumpDiagnostics()).ToList(),
+        };
+    }
+
+    // Cross-table consistency checks for /api/debug/state-invariants.
+    internal IReadOnlyList<object> CheckStateInvariants()
+    {
+        var v = new List<object>();
+        void Add(string code, string severity, string detail, object? extra = null)
+            => v.Add(new { code, severity, detail, extra });
+
+        // I1: skinCtMaterials should always have a corresponding previewMtrlDiskPaths entry.
+        // If it doesn't, TryWriteSkinCtDirect will report "skin-CT path" while disk lookups
+        // return null, leading to silent no-op CT swaps.
+        var orphanCt = skinCtMaterials.Keys
+            .Where(k => !previewMtrlDiskPaths.ContainsKey(k))
+            .ToArray();
+        if (orphanCt.Length > 0)
+            Add("I1_skinct_without_mtrl_disk", "warn",
+                "skinCtMaterials has entries that previewMtrlDiskPaths doesn't",
+                new { orphan = orphanCt });
+
+        // I2: previewMtrlDiskPaths should be a subset of initializedRedirects (or there
+        // exists a tracked mtrl with no redirect mount, which means we'll re-mount fully
+        // next preview). This is informational, not a bug.
+        var mtrlsWithoutRedirect = previewMtrlDiskPaths.Keys
+            .Where(k => !initializedRedirects.ContainsKey(k))
+            .ToArray();
+        if (mtrlsWithoutRedirect.Length > 0)
+            Add("I2_mtrl_disk_without_redirect", "info",
+                "previewMtrlDiskPaths has entries not in initializedRedirects (will full-redraw next time)",
+                new { paths = mtrlsWithoutRedirect });
+
+        // I3: emissiveOffsets without corresponding previewMtrlDiskPaths -- stale offsets
+        // that won't be reachable but consume memory.
+        var orphanOff = emissiveOffsets.Keys
+            .Where(k => !previewMtrlDiskPaths.ContainsKey(k))
+            .ToArray();
+        if (orphanOff.Length > 0)
+            Add("I3_emissive_offset_orphan", "warn",
+                "emissiveOffsets entries with no live previewMtrlDiskPaths counterpart",
+                new { orphan = orphanOff });
+
+        // I4: lastAppliedEmissive entries that no longer correspond to any active mtrl.
+        // The Invalidate path doesn't currently clear this, so the first re-init write
+        // could be deduped away.
+        var orphanLastEm = lastAppliedEmissive.Keys
+            .Where(k => !previewMtrlDiskPaths.ContainsKey(k))
+            .ToArray();
+        if (orphanLastEm.Length > 0)
+            Add("I4_last_applied_emissive_orphan", "warn",
+                "lastAppliedEmissive has entries for mtrls no longer tracked -- next emissive write may be deduped",
+                new { orphan = orphanLastEm });
+
+        // I5: project groups with MtrlGamePath that have no entry in any of the redirect
+        // dicts. Either the user just loaded the project and preview hasn't run, or a
+        // group is silently skipped.
+        if (activeProject != null)
+        {
+            var mtrlPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var g in activeProject.Groups)
+            {
+                if (!string.IsNullOrEmpty(g.MtrlGamePath))
+                    mtrlPaths.Add(g.MtrlGamePath);
+            }
+            // I6: redirect dicts referencing mtrls not in the active project (stale entries)
+            var staleInitialized = initializedRedirects.Keys
+                .Where(k => k.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase) && !mtrlPaths.Contains(k))
+                .ToArray();
+            if (staleInitialized.Length > 0)
+                Add("I6_initialized_redirect_for_unknown_mtrl", "warn",
+                    "initializedRedirects references mtrls not in active project",
+                    new { stale = staleInitialized });
+        }
+
+        // legacy <-> session dual-write parity checks
+        foreach (var mtrl in skinCtMaterials.Keys)
+        {
+            var s = FindSessionByMtrl(mtrl);
+            if (s == null || !s.UsesSkinCt)
+                Add("I8_skinct_session_mismatch", "warn",
+                    $"skinCtMaterials has '{mtrl}' but no GroupSession.UsesSkinCt=true",
+                    new { mtrl });
+        }
+        foreach (var (mtrl, off) in emissiveOffsets)
+        {
+            var s = FindSessionByMtrl(mtrl);
+            if (s == null || s.EmissiveCBufferOffset != off)
+                Add("I9_emissive_offset_session_mismatch", "warn",
+                    $"emissiveOffsets[{mtrl}]={off} but session offset={s?.EmissiveCBufferOffset}",
+                    new { mtrl, legacyOffset = off, sessionOffset = s?.EmissiveCBufferOffset });
+        }
+        foreach (var (mtrl, disk) in previewMtrlDiskPaths)
+        {
+            var s = FindSessionByMtrl(mtrl);
+            if (s == null || !string.Equals(s.MtrlDiskPath, disk, StringComparison.OrdinalIgnoreCase))
+                Add("I11_mtrl_disk_session_mismatch", "warn",
+                    $"previewMtrlDiskPaths[{mtrl}]={disk} but session disk={s?.MtrlDiskPath}",
+                    new { mtrl, legacyDisk = disk, sessionDisk = s?.MtrlDiskPath });
+        }
+        // shader/* paths are shared (not group-owned).
+        var allSessionKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in groupSessions.Values)
+            foreach (var k in s.InitializedRedirectKeys)
+                allSessionKeys.Add(k);
+        foreach (var key in initializedRedirects.Keys)
+        {
+            if (key.StartsWith("shader/", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!allSessionKeys.Contains(key))
+                Add("I12_initialized_redirect_orphan", "warn",
+                    $"initializedRedirects has '{key}' but no GroupSession owns it",
+                    new { path = key });
+        }
+        foreach (var s in groupSessions.Values)
+        {
+            foreach (var sv in s.AssertConsistent())
+                Add("I10_session_internal", "warn", sv);
+        }
+
+        // I7: rowPairAllocators with materials no longer tracked by skinCtMaterials.
+        var staleAllocators = rowPairAllocators.Keys
+            .Where(k => !skinCtMaterials.ContainsKey(k))
+            .ToArray();
+        if (staleAllocators.Length > 0)
+            Add("I7_row_pair_alloc_without_skinct", "info",
+                "rowPairAllocators kept for materials no longer in skin-CT mode (memory only)",
+                new { stale = staleAllocators });
+
+        return v;
+    }
+
     public void Dispose()
     {
         if (disposed) return;
@@ -3846,6 +4167,9 @@ public class PreviewService : IDisposable
         lastBuiltColorTables.Clear();
         indexMapGamePaths.Clear();
         lastAppliedEmissive.Clear();
+        foreach (var s in groupSessions.Values)
+            s.Dispose("PreviewService.Dispose");
+        groupSessions.Clear();
         emissiveHook?.ClearTargets();
     }
 }

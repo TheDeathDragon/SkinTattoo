@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -43,13 +44,13 @@ public unsafe class EmissiveCBufferHook : IDisposable
     private int errorCount;
 
     private delegate nint OnRenderMaterialDelegate(
-        nint modelRenderer, nint outFlags, nint param, nint material, uint materialIndex);
+        nint modelRenderer, nint param, nint material, uint materialIndex);
 
     public EmissiveCBufferHook(IGameInteropProvider interop, IPluginLog log)
     {
         this.log = log;
         hook = interop.HookFromSignature<OnRenderMaterialDelegate>(
-            "E8 ?? ?? ?? ?? 44 0F B7 28", Detour);
+            "E8 ?? ?? ?? ?? 40 38 75 ?? 74 ?? 8B 45", Detour);
     }
 
     public void Enable()
@@ -345,7 +346,41 @@ public unsafe class EmissiveCBufferHook : IDisposable
         return new DiagStats(targets.Count, offsetCache.Count, missCount, enabled);
     }
 
-    private nint Detour(nint modelRenderer, nint outFlags, nint param, nint materialPtr, uint materialIndex)
+    // Returns a JSON-shaped object with per-target dump for the diagnostic
+    // endpoint. MRH pointers are formatted as hex; we don't dereference them
+    // here because that requires the render thread.
+    internal object DumpStateDiagnostics()
+    {
+        int missCount;
+        string[] missList;
+        lock (loggedMisses)
+        {
+            missCount = loggedMisses.Count;
+            missList = loggedMisses.ToArray();
+        }
+        var targetSummary = targets
+            .Select(kv => new
+            {
+                mrh = $"0x{kv.Key:X16}",
+                color = new[] { kv.Value.BaseColor.X, kv.Value.BaseColor.Y, kv.Value.BaseColor.Z },
+                anim = kv.Value.AnimMode.ToString(),
+                speed = kv.Value.AnimSpeed,
+                amp = kv.Value.AnimAmplitude,
+            })
+            .ToArray();
+        return new
+        {
+            enabled,
+            errorCount,
+            targetCount = targets.Count,
+            offsetCacheCount = offsetCache.Count,
+            loggedMissCount = missCount,
+            loggedMisses = missList,
+            targets = targetSummary,
+        };
+    }
+
+    private nint Detour(nint modelRenderer, nint param, nint materialPtr, uint materialIndex)
     {
         if (materialPtr != 0)
         {
@@ -367,7 +402,7 @@ public unsafe class EmissiveCBufferHook : IDisposable
             }
         }
 
-        return hook.Original(modelRenderer, outFlags, param, materialPtr, materialIndex);
+        return hook.Original(modelRenderer, param, materialPtr, materialIndex);
     }
 
     private Vector3 ComputeModulatedColor(TargetData data)

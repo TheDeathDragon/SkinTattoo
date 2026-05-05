@@ -1063,6 +1063,7 @@ public static class SkinShpkPatcher
         public int UavCount;
         public int SysKeyCount, SceneKeyCount, MatKeyCount;
         public uint[] UnkAbc = new uint[3];
+        public uint Unk141A;
         public List<ShpkShader> Shaders = new();
         public byte[] MatParamsRaw = Array.Empty<byte>();
         public byte[] MatDefaultsRaw = Array.Empty<byte>();
@@ -1107,8 +1108,14 @@ public static class SkinShpkPatcher
         shpk.MatKeyCount = r.ReadInt32();
         int nodeCount = r.ReadInt32();
         int aliasCount = r.ReadInt32();
+        Log($"ShpkParse: version=0x{shpk.Version:X4} dx=0x{shpk.Dx:X4} vs={shpk.VsCount} ps={shpk.PsCount} nodes={nodeCount}");
         if (shpk.Version >= 0x0D01)
             for (int i = 0; i < 3; i++) shpk.UnkAbc[i] = r.ReadUInt32();
+        // v14.1 nodeAliasClusterCount; the cluster block sits between node aliases
+        // and AdditionalData. We don't inspect it -- those bytes round-trip via
+        // shpk.Additional and the round-trip test verifies byte equivalence.
+        if (shpk.Version >= 0x0E01)
+            shpk.Unk141A = r.ReadUInt32();
 
         // Shader entries
         int totalShaders = shpk.VsCount + shpk.PsCount;
@@ -1186,6 +1193,22 @@ public static class SkinShpkPatcher
         shpk.StringSection = new List<byte>(data[stringsOff..]);
 
         return shpk;
+    }
+
+    /// <summary>Parse + Rebuild round-trip. Used by /api/test/shpk-roundtrip
+    /// to verify parser/writer byte equivalence.</summary>
+    public static byte[]? RoundTripForDiag(byte[] vanillaBytes)
+    {
+        try
+        {
+            var shpk = ParseShpk(vanillaBytes);
+            return RebuildShpk(shpk);
+        }
+        catch (Exception ex)
+        {
+            Log($"RoundTripForDiag failed: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>Parse vanilla bytes and dump node selector table for diagnostics only. No patching.</summary>
@@ -1405,7 +1428,8 @@ public static class SkinShpkPatcher
         w.Write(shpk.SysKeyCount); w.Write(shpk.SceneKeyCount); w.Write(shpk.MatKeyCount);
         w.Write(nodeCount);
         w.Write(aliasCount);
-        foreach (var v in shpk.UnkAbc) w.Write(v);
+        if (shpk.Version >= 0x0D01) foreach (var v in shpk.UnkAbc) w.Write(v);
+        if (shpk.Version >= 0x0E01) w.Write(shpk.Unk141A);
 
         // Shader entries
         foreach (var s in shpk.Shaders)

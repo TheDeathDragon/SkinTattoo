@@ -101,9 +101,13 @@ The render thread then processes these commands, reading CPU data from `dataPtr`
 ## 3. OnRenderMaterial Function
 
 ```
-Address: sub_14026F790
-Signature: "E8 ?? ?? ?? ?? 44 0F B7 28" (matched via internal call)
-C# declaration: ModelRenderer.OnRenderMaterial(ushort* outFlags, OnRenderModelParams* param, Material* material, uint materialIndex)
+Address: sub_1402814D0 (game 7.5)
+Signature: "E8 ?? ?? ?? ?? 40 38 75 ?? 74 ?? 8B 45" (matched via internal call)
+C# declaration: ModelRenderer.OnRenderMaterial(OnRenderMaterialParams2* param, Material* material, uint materialIndex) -> ushort*
+
+Note: prior to game 7.5, the function was `sub_14026F790` with sig
+"E8 ?? ?? ?? ?? 44 0F B7 28" and a 5-arg form including a leading
+`ushort* outFlags`. 7.5 dropped that arg and consolidated the return.
 ```
 
 ### Execution Flow
@@ -222,7 +226,7 @@ Glamourer intercepts ColorTable texture preparation by hooking `PrepareColorSet`
 | CreateConstantBuffer | sub_140214640 | (caller) `E8 ?? ?? ?? ?? 48 89 47 ?? B0` |
 | InitBuffer | sub_14020D4C0 | - |
 | LoadSourcePointer | sub_14020D9A0 | `E8 ?? ?? ?? ?? 45 0F B6 FC 48 85 C0` |
-| OnRenderMaterial | sub_14026F790 | `E8 ?? ?? ?? ?? 44 0F B7 28` |
+| OnRenderMaterial | sub_1402814D0 (7.5) | `E8 ?? ?? ?? ?? 40 38 75 ?? 74 ?? 8B 45` |
 | RenderSubmit | sub_140229A10 | - |
 | Device global | qword_1427F0480 | - |
 | Frame index | dword_1427F9474 | - |

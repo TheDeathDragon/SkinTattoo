@@ -235,7 +235,7 @@ GPU buffers are created/uploaded on-demand by the render submission pipeline.
 
 **File**: `Interop/EmissiveCBufferHook.cs`
 
-**Hook target**: `ModelRenderer.OnRenderMaterial` (signature `"E8 ?? ?? ?? ?? 44 0F B7 28"`)
+**Hook target**: `ModelRenderer.OnRenderMaterial` (signature `"E8 ?? ?? ?? ?? 40 38 75 ?? 74 ?? 8B 45"`, game 7.5+; 4-arg delegate `(modelRenderer, param, material, materialIndex)`)
 
 **How it works**:
 1. Hook detour executes **before** the original function call
