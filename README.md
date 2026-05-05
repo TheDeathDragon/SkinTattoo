@@ -59,7 +59,7 @@ Do not manually unpack release archives into `devPlugins` -- you will not receiv
 
 ## Build from Source
 
-Requires Dalamud SDK 14 (XIVLauncher dev hooks):
+Requires Dalamud SDK 15 (XIVLauncher dev hooks, FFXIV 7.5+):
 
 ```bash
 git clone --recursive https://github.com/TheDeathDragon/SkinTattoo.git

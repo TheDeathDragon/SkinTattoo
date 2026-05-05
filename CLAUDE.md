@@ -27,7 +27,7 @@ SkinTattoo/SkinTattoo/                  # Main project
   Mesh/                               # Mesh extraction (MeshExtractor, MeshData, RayPicker)
   DirectX/                            # DX11 offscreen rendering (DxRenderer, MeshBuffer, OrbitCamera)
   Interop/                            # PenumbraBridge, TextureSwapService, EmissiveCBufferHook
-  Services/                           # PreviewService, TexFileWriter, DecalImageLoader, MtrlFileWriter
+  Services/                           # PreviewService, TexFileWriter, DecalImageLoader, MtrlFileWriter, GroupSession (per-TargetGroup state container)
   Shaders/                            # HLSL shaders (Model.hlsl)
   Http/                               # EmbedIO HTTP debug server (localhost:12580)
   Gui/                                # ImGui windows
@@ -55,7 +55,7 @@ docs/                                 # Technical documentation
   route-c-ida-research.md             # IDA decompilation of vanilla shader package loading
   skin-uv-mesh-matching.md            # SkinMeshResolver design rationale (body mod UV matching strategy)
   skin-shpk-colortable-implementation.md  # skin.shpk + ColorTable implementation (IDA逆向 + DXBC patch + 验证)
-  skin-shpk-cb7-slotlock.md           # cb7 slot-lock patch (消除上下半身接缝)
+  skin-shpk-cb7-slotlock.md           # cb7 slot-lock patch (消除上下半身接缝); 末尾 "7.5 update" 章节记录 animSpeed=0 div-by-zero + cb7 假设的推翻
 ```
 
 ## Key Conventions
@@ -100,6 +100,15 @@ The plugin serves a REST API at `http://localhost:12580/` after startup:
 - `GET /api/mesh/info` -- Mesh info
 - `GET /api/log` -- Recent log entries
 - `POST /api/export` -- Export mod (body: `{name, author?, version?, description?, target: "local"|"penumbra", outputPath?, groupIndices?: [int]}`)
+
+### Diagnostic endpoints (added during 7.5 adaptation)
+
+- `GET /api/debug/state-dump` -- Full PreviewService state + per-GroupSession snapshot
+- `GET /api/debug/state-invariants` -- 12 cross-table consistency checks (returns [] when clean)
+- `POST /api/test/dry-export` -- Run export pipeline to a temp dir, parse the resulting mtrl by hand (Lumina mis-aligns past Dawntrail CT) and return shader keys + CT row probes (em RGB, anim params, diff/spec defaults). Use to verify anim is being baked correctly.
+- `POST /api/test/shpk-roundtrip` -- Parse + rebuild vanilla skin.shpk without modification; `bytesDiffer=0` confirms parser/writer is byte-faithful (incl. v14.1 NodeAliasClusters opaque preservation).
+- `GET /api/debug/vanilla-mtrl?path=<gamePath>` -- Dump shader keys + ShaderPackage from any vanilla mtrl.
+- `GET /api/debug/vanilla-tex-stats?path=<gamePath>` -- Per-channel histogram of any vanilla tex.
 
 ## Core Pipeline
 
@@ -170,6 +179,13 @@ Uses the same EmissiveCBufferHook (g_EmissiveColor CRC 0x38A64362 exists in iris
 ### skin.shpk Emissive Limitation
 
 skin.shpk has a single g_EmissiveColor CBuffer constant per material. All layers sharing the same body material share one emissive color (combined/accumulated). Per-layer independent emissive colors require shader swap (Route C) which is not implemented.
+
+### Known 7.5 limitations (v0.3.0)
+
+- **Iris animation lost on export.** Real-time iris glow uses `EmissiveCBufferHook`; the exported .pmp has no equivalent runtime hook so the iris falls back to static emissive. Fixing this requires patching iris.shpk with the same DXBC injection as skin.shpk (significant work, not done).
+- **Lip rim glow on face emissive.** When face emissive is enabled, the lip rim region of `mt_c1401f0001_fac_a.mtrl` lights up regardless of decal position. Root cause: forcing `CategorySkinType=Emissive` routes fac_a through patched PS[19] (Emissive family) which has different rendering characteristics than the vanilla PS[Face] family the mtrl normally uses. The PS[19] family activates an emissive contribution at lip-rim mask regions independent of our CT data.
+- **Face/body neck seam on face emissive.** Same root cause: face on patched PS[19] vs body on vanilla PS[Body] produces visible color/shading mismatch at the neck boundary. Symmetric to the original upper/lower body seam fixed by v11c, but at a different mtrl boundary.
+- Workaround under consideration (see "next iteration"): fall back to `EmissiveCBufferHook` (static color, no animation, no shader patching) for face/body skin mtrls so they stay on vanilla PS routing — eliminates seams + lip rim at the cost of per-layer animation on those mtrls.
 
 ## Verified Technical Conclusions
 

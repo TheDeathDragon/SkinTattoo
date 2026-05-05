@@ -59,7 +59,7 @@ SkinTattoo 是一个 Dalamud 插件，可将图片贴花实时合成到《最终
 
 ## 源码构建
 
-需要 Dalamud SDK 14（XIVLauncher dev hooks）：
+需要 Dalamud SDK 15（XIVLauncher dev hooks，FFXIV 7.5+）：
 
 ```bash
 git clone --recursive https://github.com/TheDeathDragon/SkinTattoo.git
