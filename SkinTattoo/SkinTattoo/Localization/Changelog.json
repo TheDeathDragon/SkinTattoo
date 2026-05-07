@@ -1,6 +1,18 @@
 {
   "versions": [
     {
+      "version": "0.3.0.2",
+      "date": "2026-05-07",
+      "en": [
+        { "text": "Action required: due to the game update, please re-export your installed Mods and reinstall them in Penumbra, otherwise emissive may render incorrectly" },
+        { "text": "Known issue: enabling emissive on a face texture causes a glowing rim around the lips" }
+      ],
+      "zh": [
+        { "text": "需要操作：由于游戏版本更新，请重新导出 Mod 并安装到 Penumbra，否则发光会有问题" },
+        { "text": "已知问题：脸部贴图开启发光后，嘴唇会有一圈描边发光" }
+      ]
+    },
+    {
       "version": "0.3.0",
       "date": "2026-05-05",
       "en": [

@@ -96,6 +96,8 @@ public partial class MainWindow : Window, IDisposable
 
     // Tab control
     private bool requestSwitchToSettings;
+    private bool requestSwitchToChangelog;
+    private bool changelogAutoSwitchEvaluated;
 
     private List<DecalLayer>? copiedGroupLayers;
     private int copiedGroupSelectedLayerIndex = -1;
@@ -572,6 +574,25 @@ public partial class MainWindow : Window, IDisposable
             MarkPreviewDirty();
         }
 
+        // One-shot: jump to Changelog tab when the head entry's version differs
+        // from what the user last saw, so updates / breaking notices surface
+        // without relying on the user remembering to click that tab.
+        if (!changelogAutoSwitchEvaluated)
+        {
+            changelogAutoSwitchEvaluated = true;
+            var entries = changelogService.Entries;
+            if (entries.Count > 0)
+            {
+                var latest = entries[0].Version;
+                if (!string.Equals(config.LastSeenChangelogVersion, latest, StringComparison.Ordinal))
+                {
+                    requestSwitchToChangelog = true;
+                    config.LastSeenChangelogVersion = latest;
+                    config.Save();
+                }
+            }
+        }
+
         // -- Tab bar --
         if (ImGui.BeginTabBar("##MainTabs", ImGuiTabBarFlags.None))
         {
@@ -632,7 +653,12 @@ public partial class MainWindow : Window, IDisposable
             }
 
             // Tab 4: Changelog
-            if (ImGui.BeginTabItem(Strings.T("tab.changelog") + "##mainTab4"))
+            var changelogFlags = requestSwitchToChangelog
+                ? ImGuiTabItemFlags.SetSelected
+                : ImGuiTabItemFlags.None;
+            if (requestSwitchToChangelog) requestSwitchToChangelog = false;
+
+            if (ImGui.BeginTabItem(Strings.T("tab.changelog") + "##mainTab4", changelogFlags))
             {
                 DrawChangelogTab();
                 ImGui.EndTabItem();

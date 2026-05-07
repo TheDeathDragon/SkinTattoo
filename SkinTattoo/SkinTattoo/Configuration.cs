@@ -144,6 +144,12 @@ public class Configuration : IPluginConfiguration
     // Bit 0 = Ctrl, bit 1 = Shift, bit 2 = Alt. Default = Ctrl+Shift (3).
     public int DeleteModifierKeys { get; set; } = 3;
 
+    // Latest changelog version the user has been auto-presented with. Compared
+    // against the head of Changelog.json on window first-open; mismatch -> jump
+    // to the Changelog tab once and persist the new version. Empty default ->
+    // first install also surfaces the changelog.
+    public string LastSeenChangelogVersion { get; set; } = "";
+
     [NonSerialized]
     private IDalamudPluginInterface? pluginInterface;
 

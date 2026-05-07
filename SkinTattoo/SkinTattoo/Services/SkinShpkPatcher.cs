@@ -52,6 +52,17 @@ public static class SkinShpkPatcher
 
     public static PatchMode Mode { get; set; } = PatchMode.ValEmissive_v11b;
 
+    // Bump the per-mode suffix (e.g. v11c -> v11c.1) whenever the patcher's logic
+    // changes in a way that produces different bytes for the same vanilla input.
+    // The cache filename embeds this string, so old cached blobs become orphans
+    // automatically and the next preview re-patches from vanilla.
+    public static string SchemaVersion => Mode switch
+    {
+        PatchMode.ValEmissive_v11b => "v11c",
+        PatchMode.ValBody_v13      => "v13",
+        _ => "unknown",
+    };
+
     // ValEmissive pass[2] lighting PS indices (v11b path).
     private static readonly int[] EmissivePsIndices = {
         19, 28, 49, 58, 79, 88, 109, 118,

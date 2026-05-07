@@ -3462,44 +3462,116 @@ public class PreviewService : IDisposable
 
     // Idempotent. Returns false if patching failed; caller should skip the
     // skin_ct.shpk redirect. Shared by preview deploy and export paths.
+    //
+    // Cache key includes (a) SchemaVersion -- bumped by devs on patcher logic change --
+    // and (b) the first 8 hex chars of SHA256(vanilla skin.shpk), so a game patch that
+    // ships a new vanilla also forces a re-patch. A .sha256 sidecar guards against
+    // partial writes / disk corruption / manual tampering.
     private bool EnsurePatchedSkinShpkPath()
     {
         if (patchedSkinShpkPath != null && File.Exists(patchedSkinShpkPath))
             return true;
 
-        var candidateName = SkinShpkPatcher.Mode == SkinShpkPatcher.PatchMode.ValBody_v13
-            ? "skin_ct_v13.shpk"
-            : "skin_ct_v11c.shpk";
-        var candidate = Path.Combine(outputDir, candidateName);
-        if (!File.Exists(candidate))
+        try
         {
-            try
+            var pack = meshExtractor.GetSqPackInstance();
+            var sqResult = pack?.GetFile(VanillaSkinShpkGamePath);
+            if (sqResult == null)
             {
-                var pack = meshExtractor.GetSqPackInstance();
-                var sqResult = pack?.GetFile(VanillaSkinShpkGamePath);
-                if (sqResult == null)
-                {
-                    DebugServer.AppendLog("[ShpkPatch] Cannot read vanilla skin.shpk from SqPack");
-                    return false;
-                }
-                var vanillaBytes = sqResult.Value.file.RawData.ToArray();
-                var patched = SkinShpkPatcher.Patch(vanillaBytes);
-                if (patched == null)
-                {
-                    DebugServer.AppendLog("[ShpkPatch] Runtime patching failed");
-                    return false;
-                }
-                File.WriteAllBytes(candidate, patched);
-                DebugServer.AppendLog($"[ShpkPatch] Runtime-patched skin.shpk ({vanillaBytes.Length} -> {patched.Length} bytes)");
-            }
-            catch (Exception ex)
-            {
-                DebugServer.AppendLog($"[ShpkPatch] Runtime patch failed: {ex.Message}");
+                DebugServer.AppendLog("[ShpkPatch] Cannot read vanilla skin.shpk from SqPack");
                 return false;
             }
+            var vanillaBytes = sqResult.Value.file.RawData.ToArray();
+            var vanillaHash8 = Sha256Hex(vanillaBytes).Substring(0, 8);
+
+            var schemaVer = SkinShpkPatcher.SchemaVersion;
+            var baseName = $"skin_ct_{schemaVer}_{vanillaHash8}";
+            var candidate = Path.Combine(outputDir, baseName + ".shpk");
+            var sidecar = candidate + ".sha256";
+
+            CleanupOrphanShpkCache(baseName);
+
+            if (File.Exists(candidate) && File.Exists(sidecar))
+            {
+                try
+                {
+                    var cachedBytes = File.ReadAllBytes(candidate);
+                    var actual = Sha256Hex(cachedBytes);
+                    var expected = File.ReadAllText(sidecar).Trim();
+                    if (string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+                    {
+                        patchedSkinShpkPath = candidate;
+                        DebugServer.AppendLog($"[ShpkPatch] Cache hit {baseName}.shpk (hash verified)");
+                        return true;
+                    }
+                    DebugServer.AppendLog($"[ShpkPatch] Cache hash mismatch on {baseName}.shpk (expected {expected[..8]}, got {actual[..8]}); rebuilding");
+                }
+                catch (Exception ex)
+                {
+                    DebugServer.AppendLog($"[ShpkPatch] Cache verify failed: {ex.Message}; rebuilding");
+                }
+                TryDelete(candidate);
+                TryDelete(sidecar);
+            }
+
+            var patched = SkinShpkPatcher.Patch(vanillaBytes);
+            if (patched == null)
+            {
+                DebugServer.AppendLog("[ShpkPatch] Runtime patching failed");
+                return false;
+            }
+            var patchedHash = Sha256Hex(patched);
+            // Write shpk first, then sidecar -- if shpk write succeeds but sidecar
+            // fails, next session re-detects (no sidecar => rebuild) instead of
+            // silently trusting an unverified blob.
+            File.WriteAllBytes(candidate, patched);
+            File.WriteAllText(sidecar, patchedHash);
+            DebugServer.AppendLog($"[ShpkPatch] Runtime-patched skin.shpk ({vanillaBytes.Length} -> {patched.Length} bytes) -> {baseName}.shpk");
+            patchedSkinShpkPath = candidate;
+            return true;
         }
-        patchedSkinShpkPath = candidate;
-        return true;
+        catch (Exception ex)
+        {
+            DebugServer.AppendLog($"[ShpkPatch] Ensure failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    // Remove cache files from previous schema versions / vanilla hashes so outputDir
+    // doesn't accumulate orphaned 10MB blobs across plugin upgrades.
+    private void CleanupOrphanShpkCache(string keepBaseName)
+    {
+        var keepShpk = keepBaseName + ".shpk";
+        var keepSidecar = keepBaseName + ".shpk.sha256";
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(outputDir, "skin_ct_*"))
+            {
+                var name = Path.GetFileName(path);
+                if (name.Equals(keepShpk, StringComparison.OrdinalIgnoreCase)
+                 || name.Equals(keepSidecar, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!name.EndsWith(".shpk", StringComparison.OrdinalIgnoreCase)
+                 && !name.EndsWith(".shpk.sha256", StringComparison.OrdinalIgnoreCase)) continue;
+                TryDelete(path);
+                DebugServer.AppendLog($"[ShpkPatch] Removed orphan cache {name}");
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugServer.AppendLog($"[ShpkPatch] Orphan cleanup failed: {ex.Message}");
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch { /* best effort */ }
+    }
+
+    private static string Sha256Hex(byte[] data)
+    {
+        var hash = System.Security.Cryptography.SHA256.HashData(data);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     /// <summary>
