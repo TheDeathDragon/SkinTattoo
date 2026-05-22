@@ -1255,6 +1255,10 @@ public partial class MainWindow : Window, IDisposable
         var wheel = ImGui.GetIO().MouseWheel;
         if (MathF.Abs(wheel) < 0.01f) return false;
         value = Math.Clamp(value + wheel * step, min, max);
+        // Snap residual to exact zero when within half a step. Without this a prior
+        // drag-induced sub-step value (e.g., -0.0001) leaves the scroll output as
+        // -0.000 in %.3f display, which looks like a bug to the user.
+        if (MathF.Abs(value) < step * 0.5f) value = 0f;
         return true;
     }
 

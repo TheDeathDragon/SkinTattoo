@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using BCnEncoder.Decoder;
 using BCnEncoder.Shared;
@@ -20,6 +21,15 @@ public class DecalImageLoader
     private readonly ConcurrentDictionary<string, CacheEntry> imageCache =
         new(StringComparer.OrdinalIgnoreCase);
 
+    // Lazy mip chain per decal. Index 0 is full-res (alias of imageCache entry);
+    // each higher index is a 2x box-filter downsample, stopping at 8 px in any
+    // dimension. Used by projector-mode painting to pick a properly downsampled
+    // decal when the texel-to-decal-pixel ratio is > 1 (avoids aliasing and the
+    // "muddy when small" look without resorting to per-pixel supersampling).
+    private record MipChainEntry(List<(byte[] Data, int Width, int Height)> Mips, DateTime Mtime, long Size);
+    private readonly ConcurrentDictionary<string, MipChainEntry> mipChainCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
     // Dedup missing-file errors: spamming the log on every retry causes UI hitches.
     private readonly ConcurrentDictionary<string, byte> reportedMissing =
         new(StringComparer.OrdinalIgnoreCase);
@@ -30,7 +40,85 @@ public class DecalImageLoader
         this.dataManager = dataManager;
     }
 
-    public void ClearCache() => imageCache.Clear();
+    public void ClearCache()
+    {
+        imageCache.Clear();
+        mipChainCache.Clear();
+    }
+
+    /// <summary>
+    /// Return a mip-level downsample of the decal image. Level 0 = full resolution.
+    /// Each higher level is a 2x box-filter downsample of the previous. Chain stops
+    /// when either dimension would drop below 8 px. Cached per image path; the same
+    /// mtime/size key used by LoadImage so file changes invalidate.
+    /// </summary>
+    public (byte[] Data, int Width, int Height)? GetMipLevel(string path, int level)
+    {
+        if (level <= 0) return LoadImage(path);
+
+        var full = LoadImage(path);
+        if (full == null) return null;
+
+        FileInfo fi;
+        try { fi = new FileInfo(path); }
+        catch { return full; }
+        var key = Path.GetFullPath(path);
+        var mtime = fi.LastWriteTimeUtc;
+        var size = fi.Length;
+
+        if (!mipChainCache.TryGetValue(key, out var entry) || entry.Mtime != mtime || entry.Size != size)
+        {
+            entry = BuildMipChain(full.Value.Data, full.Value.Width, full.Value.Height, mtime, size);
+            mipChainCache[key] = entry;
+        }
+
+        int idx = Math.Min(level, entry.Mips.Count - 1);
+        return entry.Mips[idx];
+    }
+
+    private static MipChainEntry BuildMipChain(byte[] data, int w, int h, DateTime mtime, long size)
+    {
+        var mips = new List<(byte[] Data, int Width, int Height)> { (data, w, h) };
+        int cw = w, ch = h;
+        var cur = data;
+        while (cw >= 16 && ch >= 16)
+        {
+            int nw = cw / 2;
+            int nh = ch / 2;
+            if (nw < 8 || nh < 8) break;
+            var next = Downsample2x(cur, cw, ch);
+            mips.Add((next, nw, nh));
+            cur = next;
+            cw = nw;
+            ch = nh;
+        }
+        return new MipChainEntry(mips, mtime, size);
+    }
+
+    private static byte[] Downsample2x(byte[] src, int sw, int sh)
+    {
+        int dw = sw / 2;
+        int dh = sh / 2;
+        var dst = new byte[dw * dh * 4];
+        for (int y = 0; y < dh; y++)
+        {
+            int sy0 = y * 2;
+            int sy1 = sy0 + 1;
+            for (int x = 0; x < dw; x++)
+            {
+                int sx0 = x * 2;
+                int sx1 = sx0 + 1;
+                int i00 = (sy0 * sw + sx0) * 4;
+                int i10 = (sy0 * sw + sx1) * 4;
+                int i01 = (sy1 * sw + sx0) * 4;
+                int i11 = (sy1 * sw + sx1) * 4;
+                int dIdx = (y * dw + x) * 4;
+                for (int c = 0; c < 4; c++)
+                    dst[dIdx + c] = (byte)((src[i00 + c] + src[i10 + c] + src[i01 + c] + src[i11 + c] + 2) / 4);
+            }
+        }
+        return dst;
+    }
 
     /// <summary>Alpha looks like a baked-in emissive mask (>=10% transparent + >=0.1% lit).</summary>
     public static bool LooksLikeEmissiveMask(byte[] rgba)

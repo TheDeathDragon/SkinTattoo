@@ -73,6 +73,25 @@ public class DecalLayer
     public Vector2 UvScale { get; set; } = new(0.2f, 0.2f);
     public float RotationDeg { get; set; } = 0f;
 
+    // 3D projector anchor. When UseProjector is true, the compositor paints by
+    // projecting onto the mesh surface in world space instead of stamping a UV
+    // quad. Old layers stay on the UV path until first edited in the 3D editor.
+    public bool UseProjector { get; set; } = false;
+    public Vector3 ProjOrigin { get; set; } = Vector3.Zero;
+    public Vector3 ProjNormal { get; set; } = new(0f, 0f, 1f);
+    public Vector3 ProjTangent { get; set; } = new(1f, 0f, 0f);
+    public Vector2 ProjSize { get; set; } = new(0.1f, 0.1f);
+    public float ProjDepth { get; set; } = 0.025f;
+    // Max surface-normal-vs-projector-normal angle (degrees) for a triangle to
+    // receive paint. Lower values reject grazing-angle triangles that cause
+    // UV-overlap ghost artifacts at island junctions; higher values let the
+    // decal wrap further around curved surfaces.
+    public float ProjWrapAngleDeg { get; set; } = 78f;
+    // JFA seam padding radius in texels. 0 = disabled. Higher = better seam
+    // coverage but risks bleeding decal color across closely-packed UV islands
+    // (visible as ghost copies).
+    public int ProjPaddingRadius { get; set; } = 0;
+
     public float Opacity { get; set; } = 1.0f;
     public BlendMode BlendMode { get; set; } = BlendMode.Normal;
     public ClipMode Clip { get; set; } = ClipMode.None;
@@ -136,6 +155,14 @@ public class DecalLayer
             UvCenter = UvCenter,
             UvScale = UvScale,
             RotationDeg = RotationDeg,
+            UseProjector = UseProjector,
+            ProjOrigin = ProjOrigin,
+            ProjNormal = ProjNormal,
+            ProjTangent = ProjTangent,
+            ProjSize = ProjSize,
+            ProjDepth = ProjDepth,
+            ProjWrapAngleDeg = ProjWrapAngleDeg,
+            ProjPaddingRadius = ProjPaddingRadius,
             Opacity = Opacity,
             BlendMode = BlendMode,
             Clip = Clip,

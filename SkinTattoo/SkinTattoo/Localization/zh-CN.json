@@ -173,6 +173,7 @@
     "copy": "复制",
     "rotate_ccw_90": "逆时针 90°",
     "rotate_cw_90": "顺时针 90°",
+    "rotate_180": "翻转 180°",
     "mirror_x": "水平镜像",
     "mirror_y": "垂直镜像",
     "path": "路径",
@@ -244,7 +245,13 @@
     "open_perf_help": "打开性能监控\n查看进程内存与插件各缓存的条目数",
     "force_gc": "立即触发一次 GC.Collect 回收托管对象\n常用于对比前后内存以确认泄漏",
     "set_baseline": "将当前快照记为基线\n之后所有数字会显示相对基线的增量",
-    "hide_with_game_ui": "关闭后，切换游戏界面隐藏时插件窗口仍然可见。\n开启则与默认行为一致：随游戏界面一起隐藏。"
+    "hide_with_game_ui": "关闭后，切换游戏界面隐藏时插件窗口仍然可见。\n开启则与默认行为一致：随游戏界面一起隐藏。",
+    "projector_mode_no_layer": "选中图层后可切换",
+    "projector_mode_on_off": "开启后由 3D 编辑器放置贴花；UV 画布只读，跨 UV 岛自动散布",
+    "proj_origin": "3D 世界坐标系下的投影锚点 - 推荐在 3D 编辑器点击放置，这里仅做数值微调",
+    "proj_depth": "投影盒沿法线方向的半深度 - 控制贴花在曲面上的包裹程度，太大会穿到模型背面",
+    "proj_wrap_angle": "贴花跟随曲面的最大夹角 - 越小越严格、UV 重叠处 ghost 越少但包裹少；越大越能包裹但 UV 交接处容易出棱角。默认 78°",
+    "proj_padding": "UV 岛边缘往外扩散的 texel 数 - 修复 GPU 双线性采样在 UV 接缝处的白线。越大覆盖越宽但密集 UV 布局下会把相邻岛染色（ghost 重影）。默认 4"
   },
   "label": {
     "diffuse": "贴图",
@@ -316,7 +323,12 @@
     "tex_diffuse_header": "贴图 (Diffuse)",
     "tex_normal_header": "贴图 (Normal)",
     "copy_clipboard": "一键复制全部 (markdown)",
-    "canvas_map": "预览贴图"
+    "canvas_map": "预览贴图",
+    "proj_origin": "锚点",
+    "proj_size": "尺寸",
+    "proj_depth": "深度",
+    "proj_wrap_angle": "包裹角度",
+    "proj_padding": "接缝填充"
   },
   "project": {
     "table": {
@@ -429,7 +441,8 @@
     "hide_with_game_ui": "随游戏界面一起隐藏",
     "http_enable": "启用 HTTP 服务器##httpEn",
     "preview_current_layer": "仅预览当前图层",
-    "canvas_show_base": "显示基础贴图"
+    "canvas_show_base": "显示基础贴图",
+    "projector_mode": "投影模式"
   },
   "menu": {
     "copy_decal_group": "复制图层组",

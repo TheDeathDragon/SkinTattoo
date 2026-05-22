@@ -289,6 +289,110 @@ public partial class MainWindow
         if (!ImGui.CollapsingHeader(Strings.T("section.transform"), ImGuiTreeNodeFlags.DefaultOpen)) return;
 
         const float labelW = 80f;
+        bool isProjector = layer.UseProjector;
+
+        if (isProjector)
+        {
+            // Projector mode: hide UV-quad knobs; show 3D projector params instead.
+            // Position is typically placed via 3D editor click but editable here too
+            // for fine numeric tweaks.
+            var origin = layer.ProjOrigin;
+            ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.proj_origin") + " X"); ImGui.SameLine(labelW);
+            ImGui.SetNextItemWidth(-1);
+            var ox = origin.X;
+            if (ImGui.DragFloat("##projOriginX", ref ox, 0.001f, -10f, 10f, "%.3f"))
+            { layer.ProjOrigin = new Vector3(ox, origin.Y, origin.Z); MarkPreviewDirty(); }
+            if (ScrollAdjust(ref ox, 0.001f, -10f, 10f))
+            { layer.ProjOrigin = new Vector3(ox, origin.Y, origin.Z); MarkPreviewDirty(); }
+
+            ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.proj_origin") + " Y"); ImGui.SameLine(labelW);
+            ImGui.SetNextItemWidth(-1);
+            var oy = origin.Y;
+            if (ImGui.DragFloat("##projOriginY", ref oy, 0.001f, -10f, 10f, "%.3f"))
+            { layer.ProjOrigin = new Vector3(origin.X, oy, origin.Z); MarkPreviewDirty(); }
+            if (ScrollAdjust(ref oy, 0.001f, -10f, 10f))
+            { layer.ProjOrigin = new Vector3(origin.X, oy, origin.Z); MarkPreviewDirty(); }
+
+            ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.proj_origin") + " Z"); ImGui.SameLine(labelW);
+            ImGui.SetNextItemWidth(-1);
+            var oz = origin.Z;
+            if (ImGui.DragFloat("##projOriginZ", ref oz, 0.001f, -10f, 10f, "%.3f"))
+            { layer.ProjOrigin = new Vector3(origin.X, origin.Y, oz); MarkPreviewDirty(); }
+            if (ScrollAdjust(ref oz, 0.001f, -10f, 10f))
+            { layer.ProjOrigin = new Vector3(origin.X, origin.Y, oz); MarkPreviewDirty(); }
+
+            ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.proj_size")); ImGui.SameLine(labelW);
+            var size = layer.ProjSize;
+            var lockBtnWidth = ImGui.GetFrameHeight();
+            ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - lockBtnWidth - ImGui.GetStyle().ItemSpacing.X);
+            if (scaleLocked)
+            {
+                var s = MathF.Max(size.X, size.Y);
+                if (ImGui.DragFloat("##projSizeLocked", ref s, 0.005f, 0.001f, 5f, "%.3f m"))
+                { layer.ProjSize = new Vector2(s, s); MarkPreviewDirty(); }
+                if (ScrollAdjust(ref s, 0.005f, 0.001f, 5f))
+                { layer.ProjSize = new Vector2(s, s); MarkPreviewDirty(); }
+            }
+            else
+            {
+                if (ImGui.DragFloat2("##projSizeUnlocked", ref size, 0.005f, 0.001f, 5f, "%.3f m"))
+                { layer.ProjSize = size; MarkPreviewDirty(); }
+            }
+            ImGui.SameLine();
+            var lockIcon = scaleLocked ? FontAwesomeIcon.Link : FontAwesomeIcon.Unlink;
+            if (UiHelpers.SquareIconButton(30, lockIcon))
+                scaleLocked = !scaleLocked;
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(scaleLocked ? Strings.T("tooltip.lock_ratio") : Strings.T("tooltip.unlock_ratio"));
+
+            ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.proj_depth")); ImGui.SameLine(labelW);
+            ImGui.SetNextItemWidth(-1);
+            var depth = layer.ProjDepth;
+            if (ImGui.DragFloat("##projDepth", ref depth, 0.001f, 0.001f, 1f, "%.3f m"))
+            { layer.ProjDepth = depth; MarkPreviewDirty(); }
+            if (ScrollAdjust(ref depth, 0.001f, 0.001f, 1f))
+            { layer.ProjDepth = depth; MarkPreviewDirty(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(Strings.T("tooltip.proj_depth"));
+
+            ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.proj_wrap_angle")); ImGui.SameLine(labelW);
+            ImGui.SetNextItemWidth(-1);
+            var wrap = layer.ProjWrapAngleDeg;
+            if (ImGui.DragFloat("##projWrap", ref wrap, 1f, 0f, 90f, "%.0f\u00b0"))
+            { layer.ProjWrapAngleDeg = wrap; MarkPreviewDirty(); }
+            if (ScrollAdjust(ref wrap, 1f, 0f, 90f))
+            { layer.ProjWrapAngleDeg = wrap; MarkPreviewDirty(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(Strings.T("tooltip.proj_wrap_angle"));
+
+            ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.proj_padding")); ImGui.SameLine(labelW);
+            ImGui.SetNextItemWidth(-1);
+            var pad = layer.ProjPaddingRadius;
+            if (ImGui.DragInt("##projPad", ref pad, 0.2f, 0, 16, "%d px"))
+            { layer.ProjPaddingRadius = pad; MarkPreviewDirty(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(Strings.T("tooltip.proj_padding"));
+
+            ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.rotation")); ImGui.SameLine(labelW);
+            ImGui.SetNextItemWidth(-1);
+            var rot = layer.RotationDeg;
+            if (ImGui.DragFloat("##rot", ref rot, 1f, -180f, 180f, "%.1f\u00b0"))
+            { layer.RotationDeg = rot; MarkPreviewDirty(); }
+            if (ScrollAdjust(ref rot, 1f, -180f, 180f))
+            { layer.RotationDeg = rot; MarkPreviewDirty(); }
+
+            var buttonWidth = (ImGui.GetContentRegionAvail().X - ImGui.GetStyle().ItemSpacing.X) * 0.5f;
+            if (ImGui.Button(Strings.T("button.rotate_ccw_90"), new Vector2(buttonWidth, 0f)))
+            { layer.RotationDeg = ((layer.RotationDeg - 90f + 180f) % 360f + 360f) % 360f - 180f; MarkPreviewDirty(); }
+            ImGui.SameLine();
+            if (ImGui.Button(Strings.T("button.rotate_cw_90"), new Vector2(buttonWidth, 0f)))
+            { layer.RotationDeg = ((layer.RotationDeg + 90f + 180f) % 360f + 360f) % 360f - 180f; MarkPreviewDirty(); }
+
+            if (ImGui.Button(Strings.T("button.rotate_180"), new Vector2(ImGui.GetContentRegionAvail().X, 0f)))
+            { layer.RotationDeg = ((layer.RotationDeg + 180f + 180f) % 360f + 360f) % 360f - 180f; MarkPreviewDirty(); }
+
+            return;
+        }
+
         var cx = layer.UvCenter.X;
         var cy = layer.UvCenter.Y;
 
@@ -308,8 +412,8 @@ public partial class MainWindow
 
         ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.size")); ImGui.SameLine(labelW);
         var uvScale = layer.UvScale;
-        var lockBtnWidth = ImGui.GetFrameHeight();
-        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - lockBtnWidth - ImGui.GetStyle().ItemSpacing.X);
+        var lockBtnWidth2 = ImGui.GetFrameHeight();
+        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - lockBtnWidth2 - ImGui.GetStyle().ItemSpacing.X);
         // Aspect ratio correction: locked scale should be square in pixel space, not UV space.
         // For 1024x2048: texAspect = 0.5, so UvScale.Y = s * 0.5 keeps the decal square.
         var selGroup = project.SelectedGroup;
@@ -332,30 +436,33 @@ public partial class MainWindow
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(scaleLocked ? Strings.T("tooltip.scale_locked") : Strings.T("tooltip.scale_unlocked"));
         ImGui.SameLine();
-        var lockIcon = scaleLocked ? FontAwesomeIcon.Link : FontAwesomeIcon.Unlink;
-        if (UiHelpers.SquareIconButton(30, lockIcon))
+        var lockIcon2 = scaleLocked ? FontAwesomeIcon.Link : FontAwesomeIcon.Unlink;
+        if (UiHelpers.SquareIconButton(30, lockIcon2))
             scaleLocked = !scaleLocked;
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(scaleLocked ? Strings.T("tooltip.lock_ratio") : Strings.T("tooltip.unlock_ratio"));
 
         ImGui.AlignTextToFramePadding(); ImGui.Text(Strings.T("label.rotation")); ImGui.SameLine(labelW);
         ImGui.SetNextItemWidth(-1);
-        var rot = layer.RotationDeg;
-        if (ImGui.DragFloat("##rot", ref rot, 1f, -180f, 180f, "%.1f\u00b0"))
-        { layer.RotationDeg = rot; MarkPreviewDirty(); }
-        if (ScrollAdjust(ref rot, 1f, -180f, 180f))
-        { layer.RotationDeg = rot; MarkPreviewDirty(); }
+        var rot2 = layer.RotationDeg;
+        if (ImGui.DragFloat("##rot", ref rot2, 1f, -180f, 180f, "%.1f\u00b0"))
+        { layer.RotationDeg = rot2; MarkPreviewDirty(); }
+        if (ScrollAdjust(ref rot2, 1f, -180f, 180f))
+        { layer.RotationDeg = rot2; MarkPreviewDirty(); }
 
-        var buttonWidth = (ImGui.GetContentRegionAvail().X - ImGui.GetStyle().ItemSpacing.X) * 0.5f;
-        if (ImGui.Button(Strings.T("button.rotate_ccw_90"), new Vector2(buttonWidth, 0f)))
+        var buttonWidth2 = (ImGui.GetContentRegionAvail().X - ImGui.GetStyle().ItemSpacing.X) * 0.5f;
+        if (ImGui.Button(Strings.T("button.rotate_ccw_90"), new Vector2(buttonWidth2, 0f)))
             RotateLayer(layer, -90f);
         ImGui.SameLine();
-        if (ImGui.Button(Strings.T("button.rotate_cw_90"), new Vector2(buttonWidth, 0f)))
+        if (ImGui.Button(Strings.T("button.rotate_cw_90"), new Vector2(buttonWidth2, 0f)))
             RotateLayer(layer, 90f);
 
-        if (ImGui.Button(Strings.T("button.mirror_x"), new Vector2(buttonWidth, 0f)))
+        if (ImGui.Button(Strings.T("button.rotate_180"), new Vector2(ImGui.GetContentRegionAvail().X, 0f)))
+            RotateLayer(layer, 180f);
+
+        if (ImGui.Button(Strings.T("button.mirror_x"), new Vector2(buttonWidth2, 0f)))
             MirrorLayerHorizontally(layer);
         ImGui.SameLine();
-        if (ImGui.Button(Strings.T("button.mirror_y"), new Vector2(buttonWidth, 0f)))
+        if (ImGui.Button(Strings.T("button.mirror_y"), new Vector2(buttonWidth2, 0f)))
             MirrorLayerVertically(layer);
     }
 

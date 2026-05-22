@@ -396,16 +396,31 @@ public class ModelEditorWindow : Window, IDisposable
                 if (layer != null)
                 {
                     float factor = 1f + io.MouseWheel * 0.05f;
-                    layer.UvScale *= factor;
-                    layer.UvScale = new Vector2(
-                        (layer.UvScale.X < 0f ? -1f : 1f) * Math.Clamp(MathF.Abs(layer.UvScale.X), 0.01f, 10f),
-                        (layer.UvScale.Y < 0f ? -1f : 1f) * Math.Clamp(MathF.Abs(layer.UvScale.Y), 0.01f, 10f));
+                    if (layer.UseProjector)
+                    {
+                        var ps = layer.ProjSize * factor;
+                        ps.X = Math.Clamp(ps.X, 0.001f, 100f);
+                        ps.Y = Math.Clamp(ps.Y, 0.001f, 100f);
+                        layer.ProjSize = ps;
+                        // ProjDepth stays independent; user adjusts it via the
+                        // parameter panel. Coupling depth to size made shrinking
+                        // the decal also shrink the wrap tolerance, exaggerating
+                        // dilation halo artifacts on small decals.
+                    }
+                    else
+                    {
+                        layer.UvScale *= factor;
+                        layer.UvScale = new Vector2(
+                            (layer.UvScale.X < 0f ? -1f : 1f) * Math.Clamp(MathF.Abs(layer.UvScale.X), 0.01f, 10f),
+                            (layer.UvScale.Y < 0f ? -1f : 1f) * Math.Clamp(MathF.Abs(layer.UvScale.Y), 0.01f, 10f));
+                    }
                     previewService.MarkDirty();
                 }
             }
         }
 
-        // Left click/drag: place/move decal
+        // Left-mouse drag fires every frame -> projector tracks surface normal
+        // in real time as the cursor sweeps across the mesh.
         if (ImGui.IsMouseDown(ImGuiMouseButton.Left) && !isDraggingCamera)
         {
             var mesh = previewService.CurrentMesh;
@@ -425,17 +440,96 @@ public class ModelEditorWindow : Window, IDisposable
                     var layer = project.SelectedLayer;
                     if (layer != null)
                     {
-                        // Convert raw mesh UV to texture space [0,1].
-                        // Body models have UV X in [1,2] (tile 1), frac maps to [0,1].
-                        var rawUv = hit.Value.UV;
-                        layer.UvCenter = new Vector2(
-                            rawUv.X - MathF.Floor(rawUv.X),
-                            rawUv.Y - MathF.Floor(rawUv.Y));
+                        UpdateLayerProjectorFromHit(layer, mesh, hit.Value);
                         previewService.MarkDirty();
                     }
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Apply a 3D pick to the layer, respecting its current mode. Legacy (UV-quad)
+    /// layers only update UvCenter; projector layers update ProjOrigin/Normal and,
+    /// on first click after the projector mode toggle (ProjOrigin still at the
+    /// default zero), seed ProjTangent / ProjSize / ProjDepth from a mesh-relative
+    /// default. Projector mode is never auto-enabled by a 3D click -- the user
+    /// flips it via the UV canvas toolbar checkbox.
+    /// </summary>
+    private static void UpdateLayerProjectorFromHit(Core.DecalLayer layer, MeshData mesh, RayHit hit)
+    {
+        var rawUv = hit.UV;
+        var fractUv = new Vector2(
+            rawUv.X - MathF.Floor(rawUv.X),
+            rawUv.Y - MathF.Floor(rawUv.Y));
+
+        if (!layer.UseProjector)
+        {
+            layer.UvCenter = fractUv;
+            return;
+        }
+
+        bool needsInit = layer.ProjOrigin == Vector3.Zero;
+
+        layer.ProjOrigin = hit.WorldPosition;
+        var n = hit.Normal;
+        if (n.LengthSquared() < 1e-6f) n = new Vector3(0f, 0f, 1f);
+        layer.ProjNormal = Vector3.Normalize(n);
+
+        if (needsInit)
+        {
+            // World X projected onto the tangent plane is the simplest stable choice.
+            // MeshProjector.BuildFrame Gram-Schmidts and falls back if degenerate.
+            layer.ProjTangent = new Vector3(1f, 0f, 0f);
+            // Derive ProjSize from existing UvScale.X * UV-to-world. Use X only
+            // for both axes: in legacy UV-quad mode UvScale.Y is aspect-corrected
+            // by texAspect to keep pixels square, but projector-mode size lives in
+            // world coords so that correction would double-apply (decal looks
+            // squashed by texAspect). A 15% mesh-diag floor ensures first
+            // conversion is big enough to cross typical UV seams.
+            float uvToWorld = ComputeUvToWorldScale(mesh, hit);
+            float diag = GetMeshDiagonal(mesh);
+            float floor = MathF.Max(diag * 0.15f, 0.05f);
+            float baseSize = MathF.Max(MathF.Abs(layer.UvScale.X) * uvToWorld, floor);
+            layer.ProjSize = new Vector2(baseSize, baseSize);
+            layer.ProjDepth = baseSize * 0.5f;
+
+            Http.DebugServer.AppendLog(
+                $"[Projector] init '{layer.Name}': origin=({hit.WorldPosition.X:F3},{hit.WorldPosition.Y:F3},{hit.WorldPosition.Z:F3}) " +
+                $"normal=({layer.ProjNormal.X:F2},{layer.ProjNormal.Y:F2},{layer.ProjNormal.Z:F2}) " +
+                $"size={baseSize:F3} depth={layer.ProjDepth:F3} uvToWorld={uvToWorld:F3} tris={mesh.TriangleCount}");
+        }
+
+        // Keep UvCenter in sync for ripple animation, which reads from it even in
+        // projector mode (anim center anchored to last placement).
+        layer.UvCenter = fractUv;
+    }
+
+    private static float GetMeshDiagonal(MeshData mesh)
+    {
+        if (mesh.Vertices.Length == 0) return 1f;
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        foreach (var v in mesh.Vertices)
+        {
+            min = Vector3.Min(min, v.Position);
+            max = Vector3.Max(max, v.Position);
+        }
+        return (max - min).Length();
+    }
+
+    private static float ComputeUvToWorldScale(MeshData mesh, RayHit hit)
+    {
+        if (hit.TriangleIndex < 0 || hit.TriangleIndex >= mesh.TriangleCount) return 1f;
+        var (v0, v1, v2) = mesh.GetTriangle(hit.TriangleIndex);
+        var pe1 = v1.Position - v0.Position;
+        var pe2 = v2.Position - v0.Position;
+        var ue1 = v1.UV - v0.UV;
+        var ue2 = v2.UV - v0.UV;
+        float worldArea = Vector3.Cross(pe1, pe2).Length();
+        float uvArea = MathF.Abs(ue1.X * ue2.Y - ue1.Y * ue2.X);
+        if (uvArea < 1e-12f || worldArea < 1e-12f) return 1f;
+        return MathF.Sqrt(worldArea / uvArea);
     }
 
     private void TryUploadMesh()

@@ -1413,6 +1413,16 @@ public class PreviewService : IDisposable
         public float GradientOffset;
         public int AllocatedRowPair;
 
+        // Projector mode anchor -- without snapshotting these, the inplace swap
+        // path silently downgrades projector layers to legacy UV-quad because
+        // ToDecalLayer() returns UseProjector=false default.
+        public bool UseProjector;
+        public Vector3 ProjOrigin, ProjNormal, ProjTangent;
+        public Vector2 ProjSize;
+        public float ProjDepth;
+        public float ProjWrapAngleDeg;
+        public int ProjPaddingRadius;
+
         public LayerSnapshot(DecalLayer l)
         {
             Kind = l.Kind; Name = l.Name; IsVisible = l.IsVisible;
@@ -1432,6 +1442,11 @@ public class PreviewService : IDisposable
             GradientAngleDeg = l.GradientAngleDeg; GradientScale = l.GradientScale;
             GradientOffset = l.GradientOffset;
             AllocatedRowPair = l.AllocatedRowPair;
+            UseProjector = l.UseProjector;
+            ProjOrigin = l.ProjOrigin; ProjNormal = l.ProjNormal; ProjTangent = l.ProjTangent;
+            ProjSize = l.ProjSize; ProjDepth = l.ProjDepth;
+            ProjWrapAngleDeg = l.ProjWrapAngleDeg;
+            ProjPaddingRadius = l.ProjPaddingRadius;
         }
 
         public DecalLayer ToDecalLayer() => new()
@@ -1476,6 +1491,14 @@ public class PreviewService : IDisposable
             GradientScale = GradientScale,
             GradientOffset = GradientOffset,
             AllocatedRowPair = AllocatedRowPair,
+            UseProjector = UseProjector,
+            ProjOrigin = ProjOrigin,
+            ProjNormal = ProjNormal,
+            ProjTangent = ProjTangent,
+            ProjSize = ProjSize,
+            ProjDepth = ProjDepth,
+            ProjWrapAngleDeg = ProjWrapAngleDeg,
+            ProjPaddingRadius = ProjPaddingRadius,
         };
     }
 
@@ -2330,6 +2353,20 @@ public class PreviewService : IDisposable
         if (sess.State != GroupSession.SessionState.Initializing)
             sess.TransitionTo(GroupSession.SessionState.Initializing, "ProcessGroup-enter");
 
+        // Auto-load mesh when projector layers exist and currentMesh is missing
+        // (e.g., after plugin hot-reload). Without this the projector branch in
+        // CpuUvComposite silently skips the layer because meshSnapshot is null
+        // and the layer's paint never reaches the in-game texture.
+        bool needsMesh = false;
+        foreach (var l in group.Layers)
+            if (l.UseProjector) { needsMesh = true; break; }
+        if (needsMesh && currentMesh == null)
+        {
+            DebugServer.AppendLog($"[ProcessGroup] {group.Name}: projector layer present but mesh null, auto-loading");
+            try { LoadMeshForGroup(group); }
+            catch (Exception ex) { DebugServer.AppendLog($"[ProcessGroup] auto-load mesh failed: {ex.Message}"); }
+        }
+
         var baseTex = LoadBaseTexture(group);
         int w = baseTex.Width, h = baseTex.Height;
 
@@ -2736,58 +2773,102 @@ public class PreviewService : IDisposable
         // (where the ramp is authored to emissive=0). Decal-covered pixels get alpha reduced
         // toward 0 so UV.y lands near row 0.5 (where the ramp peaks at full emissive).
         // Multiple overlapping decals take min alpha so they accumulate emissive strength.
+        var meshSnapshotAlpha = currentMesh;
+        // Pre-scan: allocate paintMask up front if any qualifying projector layer
+        // requests padding. Lazy in-loop allocation would skip UV-quad layers that
+        // run before the first projector layer, leaving their painted texels at
+        // mask=0 and letting JFA overwrite them with projector seed color.
+        int dilateRadiusAlpha = 0;
+        foreach (var probeLayer in layers)
+        {
+            if (!probeLayer.IsVisible || probeLayer.TargetMap != TargetMap.Normal
+                || !probeLayer.AffectsEmissive || string.IsNullOrEmpty(probeLayer.ImagePath)) continue;
+            if (probeLayer.UseProjector && probeLayer.ProjPaddingRadius > 0 && meshSnapshotAlpha != null)
+            { dilateRadiusAlpha = probeLayer.ProjPaddingRadius; break; }
+        }
+        byte[]? paintMaskAlpha = dilateRadiusAlpha > 0 ? new byte[w * h] : null;
+        DirtyRect dilateRectAlpha = DirtyRect.Empty;
         foreach (var layer in layers)
         {
             if (!layer.IsVisible || layer.TargetMap != TargetMap.Normal || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
+            if (layer.UseProjector && meshSnapshotAlpha == null) continue;
 
             var decalImage = imageLoader.LoadImage(layer.ImagePath);
             if (decalImage == null) continue;
 
             var (decalData, decalW, decalH) = decalImage.Value;
-            var center = layer.UvCenter;
-            var scale = layer.UvScale;
             var opacity = layer.Opacity;
-            var rotRad = layer.RotationDeg * (MathF.PI / 180f);
-            var cosR = MathF.Cos(rotRad);
-            var sinR = MathF.Sin(rotRad);
-
-            GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
-
             var layerLocal = layer;
-            ParallelRows(pyMin, pyMax, py =>
+
+            void Paint(int px, int py, float ru, float rv)
             {
-                for (int px = pxMin; px <= pxMax; px++)
+                switch (layerLocal.Clip)
                 {
-                    float u = (px + 0.5f) / w;
-                    float v = (py + 0.5f) / h;
-                    float lu = (u - center.X) / scale.X;
-                    float lv = (v - center.Y) / scale.Y;
-                    float ru = lu * cosR + lv * sinR;
-                    float rv = -lu * sinR + lv * cosR;
-                    if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
-                    switch (layerLocal.Clip)
-                    {
-                        case ClipMode.ClipLeft when ru < 0f: continue;
-                        case ClipMode.ClipRight when ru >= 0f: continue;
-                        case ClipMode.ClipTop when rv < 0f: continue;
-                        case ClipMode.ClipBottom when rv >= 0f: continue;
-                    }
-
-                    float du = (ru + 0.5f) * decalW - 0.5f;
-                    float dv = (rv + 0.5f) * decalH - 0.5f;
-                    SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
-                    da *= opacity;
-                    if (da < 0.001f) continue;
-
-                    int oIdx = (py * w + px) * 4;
-                    // mask strength -> alpha drop (inverted encoding: stronger decal = lower alpha).
-                    int current = buf[oIdx + 3];
-                    int drop = (int)(da * 255);
-                    int target = current - drop;
-                    if (target < 0) target = 0;
-                    if (target < current) buf[oIdx + 3] = (byte)target;
+                    case ClipMode.ClipLeft when ru < 0f: return;
+                    case ClipMode.ClipRight when ru >= 0f: return;
+                    case ClipMode.ClipTop when rv < 0f: return;
+                    case ClipMode.ClipBottom when rv >= 0f: return;
                 }
-            });
+
+                float du = (ru + 0.5f) * decalW - 0.5f;
+                float dv = (rv + 0.5f) * decalH - 0.5f;
+                SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
+                da *= opacity;
+                if (da < 0.001f) return;
+
+                int oIdx = (py * w + px) * 4;
+                int current = buf[oIdx + 3];
+                int drop = (int)(da * 255);
+                int target = current - drop;
+                if (target < 0) target = 0;
+                if (target < current) buf[oIdx + 3] = (byte)target;
+                if (paintMaskAlpha != null)
+                    paintMaskAlpha[py * w + px] = da >= 0.5f ? (byte)2 : (byte)1;
+            }
+
+            if (layerLocal.UseProjector)
+            {
+                float rotRad = layerLocal.RotationDeg * (MathF.PI / 180f);
+                float cutoff = MathF.Cos(layerLocal.ProjWrapAngleDeg * (MathF.PI / 180f));
+                var layerRect = Mesh.MeshProjector.ComputeUvBbox(meshSnapshotAlpha!, w, h,
+                    layerLocal.ProjOrigin, layerLocal.ProjNormal, layerLocal.ProjTangent,
+                    layerLocal.ProjSize, layerLocal.ProjDepth, rotRad, cutoff);
+                dilateRectAlpha = DirtyRect.Union(dilateRectAlpha, layerRect);
+                Mesh.MeshProjector.Rasterize(meshSnapshotAlpha!, w, h,
+                    layerLocal.ProjOrigin, layerLocal.ProjNormal, layerLocal.ProjTangent,
+                    layerLocal.ProjSize, layerLocal.ProjDepth, rotRad, Paint, cutoff);
+            }
+            else
+            {
+                var center = layerLocal.UvCenter;
+                var scale = layerLocal.UvScale;
+                var rotRad = layerLocal.RotationDeg * (MathF.PI / 180f);
+                var cosR = MathF.Cos(rotRad);
+                var sinR = MathF.Sin(rotRad);
+                GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
+
+                ParallelRows(pyMin, pyMax, py =>
+                {
+                    for (int px = pxMin; px <= pxMax; px++)
+                    {
+                        float u = (px + 0.5f) / w;
+                        float v = (py + 0.5f) / h;
+                        float lu = (u - center.X) / scale.X;
+                        float lv = (v - center.Y) / scale.Y;
+                        float ru = lu * cosR + lv * sinR;
+                        float rv = -lu * sinR + lv * cosR;
+                        if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
+                        Paint(px, py, ru, rv);
+                    }
+                });
+            }
+        }
+
+        if (paintMaskAlpha != null && !dilateRectAlpha.IsEmpty)
+        {
+            dilateRectAlpha = InflateForDilation(dilateRectAlpha, w, h, dilateRadiusAlpha);
+            JfaPadding(buf, paintMaskAlpha, w, h, dilateRectAlpha,
+                dilateRadiusAlpha, DilateChannels.A);
         }
     }
 
@@ -2928,11 +3009,29 @@ public class PreviewService : IDisposable
         }
 
         bool anyPainted = false;
+        var meshSnapshotNorm = currentMesh;
+        // Projector seam dilation: collect painted alpha into a paintMask so we
+        // can extend the painted edge into mask=0 (UV-seam side) and avoid GPU
+        // bilinear-sampling-induced fringes at UV island boundaries.
+        // Pre-scan and allocate up front so UV-quad layers iterated before the
+        // first projector also get their texels marked.
+        int dilateRadiusNorm = 0;
+        foreach (var probeLayer in layers)
+        {
+            if (!probeLayer.IsVisible || !probeLayer.AffectsEmissive || string.IsNullOrEmpty(probeLayer.ImagePath)) continue;
+            if (probeLayer.TargetMap != TargetMap.Diffuse && probeLayer.TargetMap != TargetMap.Normal) continue;
+            if (alphaMode == NormAlphaMode.RowIndex && probeLayer.AllocatedRowPair < 0) continue;
+            if (probeLayer.UseProjector && probeLayer.ProjPaddingRadius > 0 && meshSnapshotNorm != null)
+            { dilateRadiusNorm = probeLayer.ProjPaddingRadius; break; }
+        }
+        byte[]? paintMaskNorm = dilateRadiusNorm > 0 ? new byte[w * h] : null;
+        DirtyRect dilateRectNorm = DirtyRect.Empty;
         foreach (var layer in layers)
         {
             if (!layer.IsVisible || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
             if (layer.TargetMap != TargetMap.Diffuse && layer.TargetMap != TargetMap.Normal) continue;
             if (alphaMode == NormAlphaMode.RowIndex && layer.AllocatedRowPair < 0) continue;
+            if (layer.UseProjector && meshSnapshotNorm == null) continue;
 
             var decalImage = imageLoader.LoadImage(layer.ImagePath);
             if (decalImage == null) continue;
@@ -2944,87 +3043,121 @@ public class PreviewService : IDisposable
             bool applyFadeMask = layer.TargetMap == TargetMap.Diffuse;
 
             var (decalData, decalW, decalH) = decalImage.Value;
-            var center = layer.UvCenter;
-            var scale = layer.UvScale;
             var opacity = layer.Opacity;
-            var rotRad = layer.RotationDeg * (MathF.PI / 180f);
-            var cosR = MathF.Cos(rotRad);
-            var sinR = MathF.Sin(rotRad);
-
-            GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
-
             var layerLocal = layer;
             var rowByteLocal = rowByte;
-            ParallelRows(pyMin, pyMax, py =>
+
+            void Paint(int px, int py, float ru, float rv)
             {
-                for (int px = pxMin; px <= pxMax; px++)
+                switch (layerLocal.Clip)
                 {
-                    float u = (px + 0.5f) / w;
-                    float v = (py + 0.5f) / h;
-                    float lu = (u - center.X) / scale.X;
-                    float lv = (v - center.Y) / scale.Y;
-                    float ru = lu * cosR + lv * sinR;
-                    float rv = -lu * sinR + lv * cosR;
-                    if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
-                    switch (layerLocal.Clip)
-                    {
-                        case ClipMode.ClipLeft when ru < 0f: continue;
-                        case ClipMode.ClipRight when ru >= 0f: continue;
-                        case ClipMode.ClipTop when rv < 0f: continue;
-                        case ClipMode.ClipBottom when rv >= 0f: continue;
-                    }
-
-                    float du = (ru + 0.5f) * decalW - 0.5f;
-                    float dv = (rv + 0.5f) * decalH - 0.5f;
-                    SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
-                    da *= opacity;
-                    if (da < 0.001f) continue;
-
-                    float maskValue;
-                    if (!applyFadeMask)
-                    {
-                        maskValue = da;
-                    }
-                    else if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
-                    {
-                        maskValue = ComputeDirectionalGradient(ru, rv, da,
-                            layerLocal.GradientAngleDeg, layerLocal.GradientScale,
-                            layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
-                    }
-                    else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
-                    {
-                        float sum = 0; int cnt = 0;
-                        for (int dy = -1; dy <= 1; dy++)
-                            for (int dx = -1; dx <= 1; dx++)
-                            {
-                                if (dx == 0 && dy == 0) continue;
-                                SampleBilinear(decalData, decalW, decalH, du + dx, dv + dy,
-                                    out _, out _, out _, out float na);
-                                sum += na * opacity; cnt++;
-                            }
-                        maskValue = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
-                    }
-                    else
-                    {
-                        maskValue = ComputeFadeMaskWeight(layerLocal.FadeMask,
-                            layerLocal.FadeMaskFalloff, ru, rv, da);
-                    }
-
-                    int oIdx = (py * w + px) * 4;
-                    if (alphaMode == NormAlphaMode.EmissiveMask)
-                    {
-                        byte emByte = (byte)Math.Clamp(maskValue * 255f, 0, 255);
-                        output[oIdx + 3] = (byte)Math.Max(output[oIdx + 3], emByte);
-                    }
-                    else if (maskValue >= 0.5f)
-                    {
-                        // Write row-index into alpha only; leave G untouched so the base
-                        // normal map's gloss/tangent data survives for the lighting pass.
-                        output[oIdx + 3] = rowByteLocal;
-                    }
+                    case ClipMode.ClipLeft when ru < 0f: return;
+                    case ClipMode.ClipRight when ru >= 0f: return;
+                    case ClipMode.ClipTop when rv < 0f: return;
+                    case ClipMode.ClipBottom when rv >= 0f: return;
                 }
-            });
+
+                float du = (ru + 0.5f) * decalW - 0.5f;
+                float dv = (rv + 0.5f) * decalH - 0.5f;
+                SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
+                da *= opacity;
+                if (da < 0.001f) return;
+
+                float maskValue;
+                if (!applyFadeMask)
+                {
+                    maskValue = da;
+                }
+                else if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
+                {
+                    maskValue = ComputeDirectionalGradient(ru, rv, da,
+                        layerLocal.GradientAngleDeg, layerLocal.GradientScale,
+                        layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
+                }
+                else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
+                {
+                    float sum = 0; int cnt = 0;
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            if (dx == 0 && dy == 0) continue;
+                            SampleBilinear(decalData, decalW, decalH, du + dx, dv + dy,
+                                out _, out _, out _, out float na);
+                            sum += na * opacity; cnt++;
+                        }
+                    maskValue = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
+                }
+                else
+                {
+                    maskValue = ComputeFadeMaskWeight(layerLocal.FadeMask,
+                        layerLocal.FadeMaskFalloff, ru, rv, da);
+                }
+
+                int oIdx = (py * w + px) * 4;
+                if (alphaMode == NormAlphaMode.EmissiveMask)
+                {
+                    byte emByte = (byte)Math.Clamp(maskValue * 255f, 0, 255);
+                    output[oIdx + 3] = (byte)Math.Max(output[oIdx + 3], emByte);
+                    if (paintMaskNorm != null && maskValue >= 0.5f) paintMaskNorm[py * w + px] = 2;
+                    else if (paintMaskNorm != null) paintMaskNorm[py * w + px] = 1;
+                }
+                else if (maskValue >= 0.5f)
+                {
+                    // Write row-index into alpha only; leave G untouched so the base
+                    // normal map's gloss/tangent data survives for the lighting pass.
+                    output[oIdx + 3] = rowByteLocal;
+                    if (paintMaskNorm != null) paintMaskNorm[py * w + px] = 2;
+                }
+                else if (paintMaskNorm != null)
+                {
+                    paintMaskNorm[py * w + px] = 1;
+                }
+            }
+
+            if (layerLocal.UseProjector)
+            {
+                float rotRad = layerLocal.RotationDeg * (MathF.PI / 180f);
+                float cutoff = MathF.Cos(layerLocal.ProjWrapAngleDeg * (MathF.PI / 180f));
+                var layerRect = Mesh.MeshProjector.ComputeUvBbox(meshSnapshotNorm!, w, h,
+                    layerLocal.ProjOrigin, layerLocal.ProjNormal, layerLocal.ProjTangent,
+                    layerLocal.ProjSize, layerLocal.ProjDepth, rotRad, cutoff);
+                dilateRectNorm = DirtyRect.Union(dilateRectNorm, layerRect);
+                Mesh.MeshProjector.Rasterize(meshSnapshotNorm!, w, h,
+                    layerLocal.ProjOrigin, layerLocal.ProjNormal, layerLocal.ProjTangent,
+                    layerLocal.ProjSize, layerLocal.ProjDepth, rotRad, Paint, cutoff);
+            }
+            else
+            {
+                var center = layerLocal.UvCenter;
+                var scale = layerLocal.UvScale;
+                var rotRad = layerLocal.RotationDeg * (MathF.PI / 180f);
+                var cosR = MathF.Cos(rotRad);
+                var sinR = MathF.Sin(rotRad);
+                GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
+
+                ParallelRows(pyMin, pyMax, py =>
+                {
+                    for (int px = pxMin; px <= pxMax; px++)
+                    {
+                        float u = (px + 0.5f) / w;
+                        float v = (py + 0.5f) / h;
+                        float lu = (u - center.X) / scale.X;
+                        float lv = (v - center.Y) / scale.Y;
+                        float ru = lu * cosR + lv * sinR;
+                        float rv = -lu * sinR + lv * cosR;
+                        if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
+                        Paint(px, py, ru, rv);
+                    }
+                });
+            }
             anyPainted = true;
+        }
+
+        if (paintMaskNorm != null && !dilateRectNorm.IsEmpty)
+        {
+            dilateRectNorm = InflateForDilation(dilateRectNorm, w, h, dilateRadiusNorm);
+            JfaPadding(output, paintMaskNorm, w, h, dilateRectNorm,
+                dilateRadiusNorm, DilateChannels.A);
         }
 
         return anyPainted ? output : null;
@@ -3039,77 +3172,119 @@ public class PreviewService : IDisposable
             output[i] = 0;
 
         bool any = false;
+        var meshSnapshotIris = currentMesh;
+        // Pre-scan: see CompositeNorm for rationale on up-front allocation.
+        int dilateRadiusIris = 0;
+        foreach (var probeLayer in layers)
+        {
+            if (!probeLayer.IsVisible || probeLayer.TargetMap != TargetMap.Diffuse
+                || !probeLayer.AffectsEmissive || string.IsNullOrEmpty(probeLayer.ImagePath)) continue;
+            if (probeLayer.UseProjector && probeLayer.ProjPaddingRadius > 0 && meshSnapshotIris != null)
+            { dilateRadiusIris = probeLayer.ProjPaddingRadius; break; }
+        }
+        byte[]? paintMaskIris = dilateRadiusIris > 0 ? new byte[mw * mh] : null;
+        DirtyRect dilateRectIris = DirtyRect.Empty;
         foreach (var layer in layers)
         {
             if (!layer.IsVisible || layer.TargetMap != TargetMap.Diffuse || !layer.AffectsEmissive || string.IsNullOrEmpty(layer.ImagePath)) continue;
+            if (layer.UseProjector && meshSnapshotIris == null) continue;
 
             var decalImage = imageLoader.LoadImage(layer.ImagePath);
             if (decalImage == null) continue;
 
             var (decalData, decalW, decalH) = decalImage.Value;
-            var center = layer.UvCenter;
-            var scale = layer.UvScale;
             var opacity = layer.Opacity;
-            var rotRad = layer.RotationDeg * (MathF.PI / 180f);
-            var cosR = MathF.Cos(rotRad);
-            var sinR = MathF.Sin(rotRad);
-
-            GetLayerPixelBounds(center, scale, mw, mh, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
-
             var layerLocal = layer;
-            ParallelRows(pyMin, pyMax, py =>
+
+            void Paint(int px, int py, float ru, float rv)
             {
-                for (int px = pxMin; px <= pxMax; px++)
+                switch (layerLocal.Clip)
                 {
-                    float u = (px + 0.5f) / mw;
-                    float v = (py + 0.5f) / mh;
-                    float lu = (u - center.X) / scale.X;
-                    float lv = (v - center.Y) / scale.Y;
-                    float ru = lu * cosR + lv * sinR;
-                    float rv = -lu * sinR + lv * cosR;
-                    if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
-                    switch (layerLocal.Clip)
-                    {
-                        case ClipMode.ClipLeft when ru < 0f: continue;
-                        case ClipMode.ClipRight when ru >= 0f: continue;
-                        case ClipMode.ClipTop when rv < 0f: continue;
-                        case ClipMode.ClipBottom when rv >= 0f: continue;
-                    }
-
-                    float du = (ru + 0.5f) * decalW - 0.5f;
-                    float dv = (rv + 0.5f) * decalH - 0.5f;
-                    SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
-                    da *= opacity;
-                    if (da < 0.001f) continue;
-
-                    float maskValue;
-                    if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
-                        maskValue = ComputeDirectionalGradient(ru, rv, da,
-                            layerLocal.GradientAngleDeg, layerLocal.GradientScale, layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
-                    else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
-                    {
-                        float sum = 0; int cnt = 0;
-                        for (int dy = -1; dy <= 1; dy++)
-                            for (int dx = -1; dx <= 1; dx++)
-                            {
-                                if (dx == 0 && dy == 0) continue;
-                                float ndu = du + dx; float ndv = dv + dy;
-                                SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
-                                sum += na * opacity; cnt++;
-                            }
-                        maskValue = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
-                    }
-                    else
-                        maskValue = ComputeFadeMaskWeight(layerLocal.FadeMask, layerLocal.FadeMaskFalloff, ru, rv, da);
-
-                    int oIdx = (py * mw + px) * 4;
-                    byte irisBlue = output[oIdx + 2];
-                    byte emByte = (byte)Math.Clamp((int)(maskValue * (irisBlue / 255f) * 255), 0, 255);
-                    output[oIdx] = (byte)Math.Max(output[oIdx], emByte);
+                    case ClipMode.ClipLeft when ru < 0f: return;
+                    case ClipMode.ClipRight when ru >= 0f: return;
+                    case ClipMode.ClipTop when rv < 0f: return;
+                    case ClipMode.ClipBottom when rv >= 0f: return;
                 }
-            });
+
+                float du = (ru + 0.5f) * decalW - 0.5f;
+                float dv = (rv + 0.5f) * decalH - 0.5f;
+                SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
+                da *= opacity;
+                if (da < 0.001f) return;
+
+                float maskValue;
+                if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
+                    maskValue = ComputeDirectionalGradient(ru, rv, da,
+                        layerLocal.GradientAngleDeg, layerLocal.GradientScale, layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
+                else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
+                {
+                    float sum = 0; int cnt = 0;
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            if (dx == 0 && dy == 0) continue;
+                            float ndu = du + dx; float ndv = dv + dy;
+                            SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
+                            sum += na * opacity; cnt++;
+                        }
+                    maskValue = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
+                }
+                else
+                    maskValue = ComputeFadeMaskWeight(layerLocal.FadeMask, layerLocal.FadeMaskFalloff, ru, rv, da);
+
+                int oIdx = (py * mw + px) * 4;
+                byte irisBlue = output[oIdx + 2];
+                byte emByte = (byte)Math.Clamp((int)(maskValue * (irisBlue / 255f) * 255), 0, 255);
+                output[oIdx] = (byte)Math.Max(output[oIdx], emByte);
+                if (paintMaskIris != null)
+                    paintMaskIris[py * mw + px] = maskValue >= 0.5f ? (byte)2 : (byte)1;
+            }
+
+            if (layerLocal.UseProjector)
+            {
+                float rotRad = layerLocal.RotationDeg * (MathF.PI / 180f);
+                float cutoff = MathF.Cos(layerLocal.ProjWrapAngleDeg * (MathF.PI / 180f));
+                var layerRect = Mesh.MeshProjector.ComputeUvBbox(meshSnapshotIris!, mw, mh,
+                    layerLocal.ProjOrigin, layerLocal.ProjNormal, layerLocal.ProjTangent,
+                    layerLocal.ProjSize, layerLocal.ProjDepth, rotRad, cutoff);
+                dilateRectIris = DirtyRect.Union(dilateRectIris, layerRect);
+                Mesh.MeshProjector.Rasterize(meshSnapshotIris!, mw, mh,
+                    layerLocal.ProjOrigin, layerLocal.ProjNormal, layerLocal.ProjTangent,
+                    layerLocal.ProjSize, layerLocal.ProjDepth, rotRad, Paint, cutoff);
+            }
+            else
+            {
+                var center = layerLocal.UvCenter;
+                var scale = layerLocal.UvScale;
+                var rotRad = layerLocal.RotationDeg * (MathF.PI / 180f);
+                var cosR = MathF.Cos(rotRad);
+                var sinR = MathF.Sin(rotRad);
+                GetLayerPixelBounds(center, scale, mw, mh, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
+
+                ParallelRows(pyMin, pyMax, py =>
+                {
+                    for (int px = pxMin; px <= pxMax; px++)
+                    {
+                        float u = (px + 0.5f) / mw;
+                        float v = (py + 0.5f) / mh;
+                        float lu = (u - center.X) / scale.X;
+                        float lv = (v - center.Y) / scale.Y;
+                        float ru = lu * cosR + lv * sinR;
+                        float rv = -lu * sinR + lv * cosR;
+                        if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
+                        Paint(px, py, ru, rv);
+                    }
+                });
+            }
 
             any = true;
+        }
+
+        if (paintMaskIris != null && !dilateRectIris.IsEmpty)
+        {
+            dilateRectIris = InflateForDilation(dilateRectIris, mw, mh, dilateRadiusIris);
+            JfaPadding(output, paintMaskIris, mw, mh, dilateRectIris,
+                dilateRadiusIris, DilateChannels.R);
         }
 
         return any ? output : null;
@@ -3161,6 +3336,19 @@ public class PreviewService : IDisposable
             Buffer.BlockCopy(cachedBytes, 0, output, 0, needLen);
         }
         bool anyWritten = false;
+        var meshSnapshotIdx = currentMesh;
+        // Pre-scan: see CompositeNorm for rationale on up-front allocation.
+        int dilateRadiusIdx = 0;
+        foreach (var probeLayer in allocatedLayers)
+        {
+            if (!probeLayer.IsVisible) continue;
+            if (probeLayer.AllocatedRowPair < 0) continue;
+            if (string.IsNullOrEmpty(probeLayer.ImagePath)) continue;
+            if (probeLayer.UseProjector && probeLayer.ProjPaddingRadius > 0 && meshSnapshotIdx != null)
+            { dilateRadiusIdx = probeLayer.ProjPaddingRadius; break; }
+        }
+        byte[]? paintMaskIdx = dilateRadiusIdx > 0 ? new byte[w * h] : null;
+        DirtyRect dilateRectIdx = DirtyRect.Empty;
 
         // z-order: iterate layers front-to-back so later layers overwrite earlier ones
         foreach (var layer in allocatedLayers)
@@ -3168,81 +3356,110 @@ public class PreviewService : IDisposable
             if (!layer.IsVisible) continue;
             if (layer.AllocatedRowPair < 0) continue;
             if (string.IsNullOrEmpty(layer.ImagePath)) continue;
+            if (layer.UseProjector && meshSnapshotIdx == null) continue;
 
             byte rowPairByte = (byte)Math.Clamp(layer.AllocatedRowPair * 17, 0, 255);
             var decalImage = imageLoader.LoadImage(layer.ImagePath);
             if (decalImage == null) continue;
             var (decalData, decalW, decalH) = decalImage.Value;
 
-            var center = layer.UvCenter;
-            var scale = layer.UvScale;
             var opacity = layer.Opacity;
-            var rotRad = layer.RotationDeg * (MathF.PI / 180f);
-            var cosR = MathF.Cos(rotRad);
-            var sinR = MathF.Sin(rotRad);
-
-            GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
-
-            // Per-row parallel  -- each row writes disjoint output pixels. anyWritten is a
-            // bool-set-to-true-only flag so concurrent races are benign.
             var layerLocal = layer;
+            var rowPairByteLocal = rowPairByte;
             var anyWrittenFlag = new int[1];
-            ParallelRows(pyMin, pyMax, py =>
+
+            void Paint(int px, int py, float ru, float rv)
             {
-                for (int px = pxMin; px <= pxMax; px++)
+                switch (layerLocal.Clip)
                 {
-                    float u = (px + 0.5f) / w;
-                    float v = (py + 0.5f) / h;
-                    float lu = (u - center.X) / scale.X;
-                    float lv = (v - center.Y) / scale.Y;
-                    float ru = lu * cosR + lv * sinR;
-                    float rv = -lu * sinR + lv * cosR;
-                    if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
-                    switch (layerLocal.Clip)
-                    {
-                        case ClipMode.ClipLeft when ru < 0f: continue;
-                        case ClipMode.ClipRight when ru >= 0f: continue;
-                        case ClipMode.ClipTop when rv < 0f: continue;
-                        case ClipMode.ClipBottom when rv >= 0f: continue;
-                    }
-
-                    float du = (ru + 0.5f) * decalW - 0.5f;
-                    float dv = (rv + 0.5f) * decalH - 0.5f;
-                    SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
-                    da *= opacity;
-                    if (da < 0.001f) continue;
-
-                    float weight;
-                    if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
-                        weight = ComputeDirectionalGradient(ru, rv, da,
-                            layerLocal.GradientAngleDeg, layerLocal.GradientScale, layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
-                    else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
-                    {
-                        float sum = 0; int cnt = 0;
-                        for (int dy = -1; dy <= 1; dy++)
-                            for (int dx = -1; dx <= 1; dx++)
-                            {
-                                if (dx == 0 && dy == 0) continue;
-                                float ndu = du + dx; float ndv = dv + dy;
-                                SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
-                                sum += na * opacity; cnt++;
-                            }
-                        weight = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
-                    }
-                    else
-                        weight = ComputeFadeMaskWeight(layerLocal.FadeMask, layerLocal.FadeMaskFalloff, ru, rv, da);
-
-                    weight = Math.Clamp(weight, 0f, 1f);
-                    if (weight <= 0.001f) continue;
-
-                    int oIdx = (py * w + px) * 4;
-                    output[oIdx + 0] = rowPairByte;                                  // .r = row pair * 17 (Penumbra MaterialExporter:136)
-                    output[oIdx + 1] = (byte)Math.Clamp((int)(weight * 255), 0, 255); // .g = weight (rowBlend = 1 - g/255, :137)
-                    // .b and .a left at vanilla values
-                    anyWrittenFlag[0] = 1;
+                    case ClipMode.ClipLeft when ru < 0f: return;
+                    case ClipMode.ClipRight when ru >= 0f: return;
+                    case ClipMode.ClipTop when rv < 0f: return;
+                    case ClipMode.ClipBottom when rv >= 0f: return;
                 }
-            });
+
+                float du = (ru + 0.5f) * decalW - 0.5f;
+                float dv = (rv + 0.5f) * decalH - 0.5f;
+                SampleBilinear(decalData, decalW, decalH, du, dv, out _, out _, out _, out float da);
+                da *= opacity;
+                if (da < 0.001f) return;
+
+                float weight;
+                if (layerLocal.FadeMask == LayerFadeMask.DirectionalGradient)
+                    weight = ComputeDirectionalGradient(ru, rv, da,
+                        layerLocal.GradientAngleDeg, layerLocal.GradientScale, layerLocal.FadeMaskFalloff, layerLocal.GradientOffset);
+                else if (layerLocal.FadeMask == LayerFadeMask.ShapeOutline)
+                {
+                    float sum = 0; int cnt = 0;
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            if (dx == 0 && dy == 0) continue;
+                            float ndu = du + dx; float ndv = dv + dy;
+                            SampleBilinear(decalData, decalW, decalH, ndu, ndv, out _, out _, out _, out float na);
+                            sum += na * opacity; cnt++;
+                        }
+                    weight = ComputeShapeOutline(da, layerLocal.FadeMaskFalloff, sum / cnt);
+                }
+                else
+                    weight = ComputeFadeMaskWeight(layerLocal.FadeMask, layerLocal.FadeMaskFalloff, ru, rv, da);
+
+                weight = Math.Clamp(weight, 0f, 1f);
+                if (weight <= 0.001f) return;
+
+                int oIdx = (py * w + px) * 4;
+                output[oIdx + 0] = rowPairByteLocal;                              // .r = row pair * 17 (Penumbra MaterialExporter:136)
+                output[oIdx + 1] = (byte)Math.Clamp((int)(weight * 255), 0, 255); // .g = weight (rowBlend = 1 - g/255, :137)
+                // .b and .a left at vanilla values
+                anyWrittenFlag[0] = 1;
+                if (paintMaskIdx != null)
+                    paintMaskIdx[py * w + px] = weight >= 0.5f ? (byte)2 : (byte)1;
+            }
+
+            if (layerLocal.UseProjector)
+            {
+                float rotRad = layerLocal.RotationDeg * (MathF.PI / 180f);
+                float cutoff = MathF.Cos(layerLocal.ProjWrapAngleDeg * (MathF.PI / 180f));
+                var layerRect = Mesh.MeshProjector.ComputeUvBbox(meshSnapshotIdx!, w, h,
+                    layerLocal.ProjOrigin, layerLocal.ProjNormal, layerLocal.ProjTangent,
+                    layerLocal.ProjSize, layerLocal.ProjDepth, rotRad, cutoff);
+                dilateRectIdx = DirtyRect.Union(dilateRectIdx, layerRect);
+                Mesh.MeshProjector.Rasterize(meshSnapshotIdx!, w, h,
+                    layerLocal.ProjOrigin, layerLocal.ProjNormal, layerLocal.ProjTangent,
+                    layerLocal.ProjSize, layerLocal.ProjDepth, rotRad, Paint, cutoff);
+            }
+            else
+            {
+                var center = layerLocal.UvCenter;
+                var scale = layerLocal.UvScale;
+                var rotRad = layerLocal.RotationDeg * (MathF.PI / 180f);
+                var cosR = MathF.Cos(rotRad);
+                var sinR = MathF.Sin(rotRad);
+                GetLayerPixelBounds(center, scale, w, h, out int pxMin, out int pxMax, out int pyMin, out int pyMax);
+
+                ParallelRows(pyMin, pyMax, py =>
+                {
+                    for (int px = pxMin; px <= pxMax; px++)
+                    {
+                        float u = (px + 0.5f) / w;
+                        float v = (py + 0.5f) / h;
+                        float lu = (u - center.X) / scale.X;
+                        float lv = (v - center.Y) / scale.Y;
+                        float ru = lu * cosR + lv * sinR;
+                        float rv = -lu * sinR + lv * cosR;
+                        if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
+                        Paint(px, py, ru, rv);
+                    }
+                });
+            }
             if (anyWrittenFlag[0] != 0) anyWritten = true;
+        }
+
+        if (paintMaskIdx != null && !dilateRectIdx.IsEmpty)
+        {
+            dilateRectIdx = InflateForDilation(dilateRectIdx, w, h, dilateRadiusIdx);
+            JfaPadding(output, paintMaskIdx, w, h, dilateRectIdx,
+                dilateRadiusIdx, DilateChannels.R | DilateChannels.G);
         }
 
         return anyWritten ? output : null;
@@ -3683,6 +3900,7 @@ public class PreviewService : IDisposable
 
         // Collect applicable layers + precompute their bboxes once.
         var applicable = new List<(DecalLayer Layer, DirtyRect Rect)>();
+        var meshSnapshot = currentMesh;
         foreach (var layer in layers)
         {
             if (!layer.IsVisible || string.IsNullOrEmpty(layer.ImagePath)) continue;
@@ -3692,7 +3910,20 @@ public class PreviewService : IDisposable
                 if (targetFilter == TargetMap.Diffuse && !layer.AffectsDiffuse) continue;
             }
 
-            var rect = ComputeLayerBbox(layer.UvCenter, layer.UvScale, w, h);
+            DirtyRect rect;
+            if (layer.UseProjector)
+            {
+                if (meshSnapshot == null) continue;
+                float cutoff = MathF.Cos(layer.ProjWrapAngleDeg * (MathF.PI / 180f));
+                rect = Mesh.MeshProjector.ComputeUvBbox(meshSnapshot, w, h,
+                    layer.ProjOrigin, layer.ProjNormal, layer.ProjTangent,
+                    layer.ProjSize, layer.ProjDepth,
+                    layer.RotationDeg * (MathF.PI / 180f), cutoff);
+            }
+            else
+            {
+                rect = ComputeLayerBbox(layer.UvCenter, layer.UvScale, w, h);
+            }
             if (rect.IsEmpty) continue;
             applicable.Add((layer, rect));
         }
@@ -3701,10 +3932,23 @@ public class PreviewService : IDisposable
         if (applicable.Count == 0 && (tracker == null || tracker.NeedsFullInit || tracker.LastUnion.IsEmpty))
             return null;
 
+        // Allocate paint mask if any projector layer requests seam padding. Used by
+        // JFA after all layers paint -- prevents UV-island-edge GPU bilinear
+        // sampling from reading unpainted base color into the rendered model.
+        // Skipped entirely when no projector layer has padding > 0.
+        int dilateRadius = 0;
+        foreach (var (l, _) in applicable)
+            if (l.UseProjector && l.ProjPaddingRadius > 0)
+            { dilateRadius = l.ProjPaddingRadius; break; }
+        byte[]? paintMask = dilateRadius > 0 ? new byte[w * h] : null;
+
         // Union of this cycle's layer bboxes
         var currentUnion = DirtyRect.Empty;
         foreach (var (_, r) in applicable)
             currentUnion = DirtyRect.Union(currentUnion, r);
+
+        if (dilateRadius > 0)
+            currentUnion = InflateForDilation(currentUnion, w, h, dilateRadius);
 
         // dirty = current U previous (or full on first init / no tracker)
         DirtyRect dirty = tracker == null
@@ -3727,129 +3971,201 @@ public class PreviewService : IDisposable
 
         foreach (var (layer, rect) in applicable)
         {
-            var decalImage = imageLoader.LoadImage(layer.ImagePath!);
-            if (decalImage == null) continue;
+            var probe = imageLoader.LoadImage(layer.ImagePath!);
+            if (probe == null) continue;
+            int probeRefW = probe.Value.Width;
+            int probeRefH = probe.Value.Height;
 
-            var (decalData, decalW, decalH) = decalImage.Value;
-            var center = layer.UvCenter;
-            var scale = layer.UvScale;
-            var opacity = layer.Opacity;
-            var rotRad = layer.RotationDeg * (MathF.PI / 180f);
-            var cosR = MathF.Cos(rotRad);
-            var sinR = MathF.Sin(rotRad);
-
-            int pxMin = rect.X;
-            int pxMax = rect.X + rect.W - 1;
-            int pyMin = rect.Y;
-            int pyMax = rect.Y + rect.H - 1;
-
-            // Per-row parallelism  -- each row writes to non-overlapping output pixels.
-            // Layer iteration stays sequential so blend modes still see prior layers.
-            // Locals are captured by the lambda; that's fine  -- they're stable for this layer.
-            var layerLocal = layer;
-            ParallelRows(pyMin, pyMax, py =>
+            // Pre-load mip chain for projector layers so per-triangle LOD selection
+            // (computed inside MeshProjector via Jacobian) can pick the right
+            // box-filtered downsample without per-pixel sampling cost. Legacy UV
+            // path doesn't need this -- it doesn't have varying local UV stretch.
+            const int maxLodLevels = 6;
+            byte[] decalData;
+            int decalW, decalH;
+            (byte[] D, int W, int H)[]? mipChain = null;
+            if (layer.UseProjector && meshSnapshot != null)
             {
-                for (int px = pxMin; px <= pxMax; px++)
+                mipChain = new (byte[], int, int)[maxLodLevels + 1];
+                for (int mi = 0; mi <= maxLodLevels; mi++)
                 {
-                    float u = (px + 0.5f) / w;
-                    float v = (py + 0.5f) / h;
-                    float lu = (u - center.X) / scale.X;
-                    float lv = (v - center.Y) / scale.Y;
-                    float ru = lu * cosR + lv * sinR;
-                    float rv = -lu * sinR + lv * cosR;
-                    if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
-                    switch (layerLocal.Clip)
+                    var m = imageLoader.GetMipLevel(layer.ImagePath!, mi);
+                    if (m == null)
                     {
-                        case ClipMode.ClipLeft when ru < 0f: continue;
-                        case ClipMode.ClipRight when ru >= 0f: continue;
-                        case ClipMode.ClipTop when rv < 0f: continue;
-                        case ClipMode.ClipBottom when rv >= 0f: continue;
+                        Array.Resize(ref mipChain, mi);
+                        break;
                     }
-
-                    float du = (ru + 0.5f) * decalW - 0.5f;
-                    float dv = (rv + 0.5f) * decalH - 0.5f;
-
-                    SampleBilinear(decalData, decalW, decalH, du, dv,
-                        out float dr, out float dg, out float db, out float da);
-                    da *= opacity;
-
-                    if (da < 0.001f) continue;
-
-                    // Previously this clipped the diffuse to the emissive feather-mask
-                    // boundary (mv >= 0.5) so the diffuse couldn't extend past the
-                    // emissive region. That caused the underlying decal to disappear
-                    // whenever the user combined "show decal" + emissive + a feather --
-                    // and if emissive was black, nothing rendered at all.
-                    // Now diffuse always paints the full decal shape; emissive coverage
-                    // is independently controlled by the normal.a row-index composite.
-
-                    int oIdx = (py * w + px) * 4;
-                    float br = output[oIdx] / 255f;
-                    float bg = output[oIdx + 1] / 255f;
-                    float bb = output[oIdx + 2] / 255f;
-
-                    float rr, rg, rb;
-                    switch (layerLocal.BlendMode)
-                    {
-                        case BlendMode.Multiply:
-                            rr = br * dr; rg = bg * dg; rb = bb * db;
-                            break;
-                        case BlendMode.Screen:
-                            rr = 1f - (1f - br) * (1f - dr);
-                            rg = 1f - (1f - bg) * (1f - dg);
-                            rb = 1f - (1f - bb) * (1f - db);
-                            break;
-                        case BlendMode.Overlay:
-                            rr = br < 0.5f ? 2f * br * dr : 1f - 2f * (1f - br) * (1f - dr);
-                            rg = bg < 0.5f ? 2f * bg * dg : 1f - 2f * (1f - bg) * (1f - dg);
-                            rb = bb < 0.5f ? 2f * bb * db : 1f - 2f * (1f - bb) * (1f - db);
-                            break;
-                        case BlendMode.SoftLight:
-                            rr = (1f - 2f * dr) * br * br + 2f * dr * br;
-                            rg = (1f - 2f * dg) * bg * bg + 2f * dg * bg;
-                            rb = (1f - 2f * db) * bb * bb + 2f * db * bb;
-                            break;
-                        case BlendMode.HardLight:
-                            rr = dr < 0.5f ? 2f * br * dr : 1f - 2f * (1f - br) * (1f - dr);
-                            rg = dg < 0.5f ? 2f * bg * dg : 1f - 2f * (1f - bg) * (1f - dg);
-                            rb = db < 0.5f ? 2f * bb * db : 1f - 2f * (1f - bb) * (1f - db);
-                            break;
-                        case BlendMode.Darken:
-                            rr = Math.Min(br, dr); rg = Math.Min(bg, dg); rb = Math.Min(bb, db);
-                            break;
-                        case BlendMode.Lighten:
-                            rr = Math.Max(br, dr); rg = Math.Max(bg, dg); rb = Math.Max(bb, db);
-                            break;
-                        case BlendMode.ColorDodge:
-                            rr = dr >= 1f ? 1f : Math.Min(1f, br / (1f - dr));
-                            rg = dg >= 1f ? 1f : Math.Min(1f, bg / (1f - dg));
-                            rb = db >= 1f ? 1f : Math.Min(1f, bb / (1f - db));
-                            break;
-                        case BlendMode.ColorBurn:
-                            rr = dr <= 0f ? 0f : Math.Max(0f, 1f - (1f - br) / dr);
-                            rg = dg <= 0f ? 0f : Math.Max(0f, 1f - (1f - bg) / dg);
-                            rb = db <= 0f ? 0f : Math.Max(0f, 1f - (1f - bb) / db);
-                            break;
-                        case BlendMode.Difference:
-                            rr = Math.Abs(br - dr); rg = Math.Abs(bg - dg); rb = Math.Abs(bb - db);
-                            break;
-                        case BlendMode.Exclusion:
-                            rr = br + dr - 2f * br * dr;
-                            rg = bg + dg - 2f * bg * dg;
-                            rb = bb + db - 2f * bb * db;
-                            break;
-                        default:
-                            rr = dr; rg = dg; rb = db;
-                            break;
-                    }
-
-                    output[oIdx] = (byte)Math.Clamp((int)((rr * da + br * (1 - da)) * 255), 0, 255);
-                    output[oIdx + 1] = (byte)Math.Clamp((int)((rg * da + bg * (1 - da)) * 255), 0, 255);
-                    output[oIdx + 2] = (byte)Math.Clamp((int)((rb * da + bb * (1 - da)) * 255), 0, 255);
-                    if (!preserveAlpha) output[oIdx + 3] = 255;
+                    mipChain[mi] = (m.Value.Data, m.Value.Width, m.Value.Height);
                 }
-            });
+                if (mipChain == null || mipChain.Length == 0)
+                    mipChain = new[] { (probe.Value.Data, probe.Value.Width, probe.Value.Height) };
+                (decalData, decalW, decalH) = mipChain[0];
+            }
+            else
+            {
+                (decalData, decalW, decalH) = (probe.Value.Data, probe.Value.Width, probe.Value.Height);
+            }
+
+            var opacity = layer.Opacity;
+            var layerLocal = layer;
+
+            // Per-texel write. Both UV-quad scan and projector rasterizer call this
+            // with decal-local coords (ru, rv) in [-0.5, 0.5]; rotation is already
+            // applied (UV path rotates lu/lv before calling; projector path bakes
+            // rotation into ProjTangent).
+            void Paint(int px, int py, float ru, float rv)
+            {
+                bool clipped = false;
+                switch (layerLocal.Clip)
+                {
+                    case ClipMode.ClipLeft when ru < 0f: clipped = true; break;
+                    case ClipMode.ClipRight when ru >= 0f: clipped = true; break;
+                    case ClipMode.ClipTop when rv < 0f: clipped = true; break;
+                    case ClipMode.ClipBottom when rv >= 0f: clipped = true; break;
+                }
+
+                // Mesh-visited mark goes here regardless of decal alpha. mask=1
+                // means "this texel is inside the projector's mesh footprint but
+                // not a dilation source" -- protects the decal's natural alpha
+                // fade and clipped regions from being overwritten by dilation.
+                // mask=0 means "outside mesh footprint" -- safe to dilate into.
+                if (paintMask != null) paintMask[py * w + px] = 1;
+                if (clipped) return;
+
+                float du = (ru + 0.5f) * decalW - 0.5f;
+                float dv = (rv + 0.5f) * decalH - 0.5f;
+
+                SampleBilinear(decalData, decalW, decalH, du, dv,
+                    out float dr, out float dg, out float db, out float da);
+                da *= opacity;
+                if (da < 0.001f) return;
+
+                int oIdx = (py * w + px) * 4;
+                float br = output[oIdx] / 255f;
+                float bg = output[oIdx + 1] / 255f;
+                float bb = output[oIdx + 2] / 255f;
+
+                float rr, rg, rb;
+                switch (layerLocal.BlendMode)
+                {
+                    case BlendMode.Multiply:
+                        rr = br * dr; rg = bg * dg; rb = bb * db;
+                        break;
+                    case BlendMode.Screen:
+                        rr = 1f - (1f - br) * (1f - dr);
+                        rg = 1f - (1f - bg) * (1f - dg);
+                        rb = 1f - (1f - bb) * (1f - db);
+                        break;
+                    case BlendMode.Overlay:
+                        rr = br < 0.5f ? 2f * br * dr : 1f - 2f * (1f - br) * (1f - dr);
+                        rg = bg < 0.5f ? 2f * bg * dg : 1f - 2f * (1f - bg) * (1f - dg);
+                        rb = bb < 0.5f ? 2f * bb * db : 1f - 2f * (1f - bb) * (1f - db);
+                        break;
+                    case BlendMode.SoftLight:
+                        rr = (1f - 2f * dr) * br * br + 2f * dr * br;
+                        rg = (1f - 2f * dg) * bg * bg + 2f * dg * bg;
+                        rb = (1f - 2f * db) * bb * bb + 2f * db * bb;
+                        break;
+                    case BlendMode.HardLight:
+                        rr = dr < 0.5f ? 2f * br * dr : 1f - 2f * (1f - br) * (1f - dr);
+                        rg = dg < 0.5f ? 2f * bg * dg : 1f - 2f * (1f - bg) * (1f - dg);
+                        rb = db < 0.5f ? 2f * bb * db : 1f - 2f * (1f - bb) * (1f - db);
+                        break;
+                    case BlendMode.Darken:
+                        rr = Math.Min(br, dr); rg = Math.Min(bg, dg); rb = Math.Min(bb, db);
+                        break;
+                    case BlendMode.Lighten:
+                        rr = Math.Max(br, dr); rg = Math.Max(bg, dg); rb = Math.Max(bb, db);
+                        break;
+                    case BlendMode.ColorDodge:
+                        rr = dr >= 1f ? 1f : Math.Min(1f, br / (1f - dr));
+                        rg = dg >= 1f ? 1f : Math.Min(1f, bg / (1f - dg));
+                        rb = db >= 1f ? 1f : Math.Min(1f, bb / (1f - db));
+                        break;
+                    case BlendMode.ColorBurn:
+                        rr = dr <= 0f ? 0f : Math.Max(0f, 1f - (1f - br) / dr);
+                        rg = dg <= 0f ? 0f : Math.Max(0f, 1f - (1f - bg) / dg);
+                        rb = db <= 0f ? 0f : Math.Max(0f, 1f - (1f - bb) / db);
+                        break;
+                    case BlendMode.Difference:
+                        rr = Math.Abs(br - dr); rg = Math.Abs(bg - dg); rb = Math.Abs(bb - db);
+                        break;
+                    case BlendMode.Exclusion:
+                        rr = br + dr - 2f * br * dr;
+                        rg = bg + dg - 2f * bg * dg;
+                        rb = bb + db - 2f * bb * db;
+                        break;
+                    default:
+                        rr = dr; rg = dg; rb = db;
+                        break;
+                }
+
+                output[oIdx] = (byte)Math.Clamp((int)((rr * da + br * (1 - da)) * 255), 0, 255);
+                output[oIdx + 1] = (byte)Math.Clamp((int)((rg * da + bg * (1 - da)) * 255), 0, 255);
+                output[oIdx + 2] = (byte)Math.Clamp((int)((rb * da + bb * (1 - da)) * 255), 0, 255);
+                if (!preserveAlpha) output[oIdx + 3] = 255;
+                // Promote to solid (mask=2) only when alpha is high enough to use
+                // as a dilation source. Lower alpha texels stay at mask=1 (visited
+                // but not a source), so their mostly-base color doesn't leak out.
+                if (paintMask != null && da >= 0.5f) paintMask[py * w + px] = 2;
+            }
+
+            if (layerLocal.UseProjector && meshSnapshot != null)
+            {
+                // Projector path is single-threaded for now (MeshProjector iterates
+                // triangles sequentially). Parallelizing requires sharding triangles.
+                float rotRad = layerLocal.RotationDeg * (MathF.PI / 180f);
+                float cutoff = MathF.Cos(layerLocal.ProjWrapAngleDeg * (MathF.PI / 180f));
+                var chain = mipChain!;
+                int lastLod = -1;
+                Action<int> lodCb = lod =>
+                {
+                    if (lod == lastLod) return;
+                    int idx = Math.Min(lod, chain.Length - 1);
+                    lastLod = lod;
+                    (decalData, decalW, decalH) = chain[idx];
+                };
+                Mesh.MeshProjector.Rasterize(meshSnapshot, w, h,
+                    layerLocal.ProjOrigin, layerLocal.ProjNormal, layerLocal.ProjTangent,
+                    layerLocal.ProjSize, layerLocal.ProjDepth, rotRad, Paint, cutoff,
+                    lodCb, probeRefW, probeRefH, chain.Length - 1);
+            }
+            else
+            {
+                var center = layerLocal.UvCenter;
+                var scale = layerLocal.UvScale;
+                var rotRad = layerLocal.RotationDeg * (MathF.PI / 180f);
+                var cosR = MathF.Cos(rotRad);
+                var sinR = MathF.Sin(rotRad);
+                int pxMin = rect.X;
+                int pxMax = rect.X + rect.W - 1;
+                int pyMin = rect.Y;
+                int pyMax = rect.Y + rect.H - 1;
+
+                ParallelRows(pyMin, pyMax, py =>
+                {
+                    for (int px = pxMin; px <= pxMax; px++)
+                    {
+                        float u = (px + 0.5f) / w;
+                        float v = (py + 0.5f) / h;
+                        float lu = (u - center.X) / scale.X;
+                        float lv = (v - center.Y) / scale.Y;
+                        float ru = lu * cosR + lv * sinR;
+                        float rv = -lu * sinR + lv * cosR;
+                        if (ru < -0.5f || ru > 0.5f || rv < -0.5f || rv > 0.5f) continue;
+                        Paint(px, py, ru, rv);
+                    }
+                });
+            }
         }
+
+        // Seam dilation: extend painted area by 3 texels into surrounding base so
+        // GPU bilinear sampling at UV island boundaries doesn't expose unpainted
+        // base color as a visible seam line on the 3D model. Only runs when any
+        // projector layer is present (legacy UV-quad layers paint a contiguous
+        // rectangle and don't suffer from this).
+        if (paintMask != null && !currentUnion.IsEmpty)
+            JfaPadding(output, paintMask, w, h, currentUnion, dilateRadius);
 
         tracker?.Commit(currentUnion, dirty);
         return output;
@@ -3887,6 +4203,238 @@ public class PreviewService : IDisposable
                 Thread.Sleep(10 * (attempt + 1));
             }
         }
+    }
+
+    /// <summary>
+    /// Dilate the SOLID-painted region (mask=2) by N texels into unpainted (mask=0)
+    /// texels to fix UV seam artifacts when projector-mode painting maps to multiple
+    /// UV islands. Soft-fade texels (mask=1) are preserved: never overwritten and
+    /// never used as a dilation source, so the decal's natural alpha falloff stays
+    /// clean instead of bleeding mostly-base color outward.
+    ///
+    /// Algorithm: K passes of 4-neighbor morphological dilation. Each pass collects
+    /// unpainted texels adjacent to a solid one, then commits all updates after the
+    /// scan so propagation is exactly one step per pass.
+    /// </summary>
+    [System.Flags]
+    private enum DilateChannels : byte
+    {
+        None = 0,
+        R = 1, G = 2, B = 4, A = 8,
+        RGB = R | G | B,
+        RGBA = RGB | A,
+    }
+
+    /// <summary>
+    /// Jump Flood Algorithm padding: each unpainted texel within <paramref name="maxDist"/>
+    /// inherits color from its nearest solid (mask=2) texel. Produces isotropic, Euclidean-
+    /// correct dilation in O(log(maxDist)) passes -- Substance Painter's "infinite padding"
+    /// model capped at a finite radius so we don't bleed across distant UV islands. The
+    /// fundamental upgrade over <see cref="DilatePaintedRegion"/> is that diagonal neighbors
+    /// participate, so dilation rounds at corners instead of producing rectangular staircases.
+    /// </summary>
+    private static void JfaPadding(byte[] output, byte[] mask, int w, int h,
+        DirtyRect rect, int maxDist, DilateChannels channels = DilateChannels.RGBA)
+    {
+        if (maxDist <= 0 || channels == DilateChannels.None) return;
+        int xMin = Math.Max(0, rect.X);
+        int yMin = Math.Max(0, rect.Y);
+        int xMax = Math.Min(w - 1, rect.X + rect.W - 1);
+        int yMax = Math.Min(h - 1, rect.Y + rect.H - 1);
+        if (xMax < xMin || yMax < yMin) return;
+
+        int rw = xMax - xMin + 1;
+        int rh = yMax - yMin + 1;
+        int rArea = rw * rh;
+
+        // Two int buffers ping-pong each JFA pass. Stored as global texel linear
+        // index (idx = y*w + x), -1 = no seed.
+        var src = new int[rArea];
+        var dst = new int[rArea];
+
+        // Init: solid (mask==2) texels seed themselves.
+        for (int ly = 0; ly < rh; ly++)
+        {
+            int gy = yMin + ly;
+            int gRow = gy * w;
+            int rRow = ly * rw;
+            for (int lx = 0; lx < rw; lx++)
+            {
+                int gx = xMin + lx;
+                int gIdx = gRow + gx;
+                src[rRow + lx] = mask[gIdx] == 2 ? gIdx : -1;
+            }
+        }
+
+        // JFA passes: jump starts at next power-of-two >= maxDist, halving to 1.
+        // log2(maxDist)+1 passes is enough to cover seeds within maxDist of any texel.
+        int initialJump = 1;
+        while (initialJump < maxDist) initialJump *= 2;
+
+        for (int step = initialJump; step >= 1; step /= 2)
+        {
+            int stepLocal = step;
+            var srcLocal = src;
+            var dstLocal = dst;
+            int rwLocal = rw, rhLocal = rh, wLocal = w, xMinLocal = xMin, yMinLocal = yMin;
+
+            System.Threading.Tasks.Parallel.For(0, rhLocal, ly =>
+            {
+                int rRow = ly * rwLocal;
+                int gy = yMinLocal + ly;
+                for (int lx = 0; lx < rwLocal; lx++)
+                {
+                    int gx = xMinLocal + lx;
+                    int rIdx = rRow + lx;
+
+                    int bestSeed = srcLocal[rIdx];
+                    int bestDistSq;
+                    if (bestSeed >= 0)
+                    {
+                        int sx = bestSeed - (bestSeed / wLocal) * wLocal;
+                        int sy = bestSeed / wLocal;
+                        int ddx = gx - sx;
+                        int ddy = gy - sy;
+                        bestDistSq = ddx * ddx + ddy * ddy;
+                    }
+                    else bestDistSq = int.MaxValue;
+
+                    for (int dyDir = -1; dyDir <= 1; dyDir++)
+                    {
+                        int nly = ly + dyDir * stepLocal;
+                        if (nly < 0 || nly >= rhLocal) continue;
+                        int nRowBase = nly * rwLocal;
+                        for (int dxDir = -1; dxDir <= 1; dxDir++)
+                        {
+                            if (dxDir == 0 && dyDir == 0) continue;
+                            int nlx = lx + dxDir * stepLocal;
+                            if (nlx < 0 || nlx >= rwLocal) continue;
+                            int nSeed = srcLocal[nRowBase + nlx];
+                            if (nSeed < 0) continue;
+                            int sx = nSeed - (nSeed / wLocal) * wLocal;
+                            int sy = nSeed / wLocal;
+                            int ddx = gx - sx;
+                            int ddy = gy - sy;
+                            int distSq = ddx * ddx + ddy * ddy;
+                            if (distSq < bestDistSq)
+                            {
+                                bestDistSq = distSq;
+                                bestSeed = nSeed;
+                            }
+                        }
+                    }
+                    dstLocal[rIdx] = bestSeed;
+                }
+            });
+
+            (src, dst) = (dst, src);
+        }
+
+        // Copy color from nearest seed, capped by maxDist^2 so far-away texels stay
+        // base. Preserves mask=1 (soft-fade / clipped) and mask=2 (already painted).
+        int maxDistSq = maxDist * maxDist;
+        bool copyR = (channels & DilateChannels.R) != 0;
+        bool copyG = (channels & DilateChannels.G) != 0;
+        bool copyB = (channels & DilateChannels.B) != 0;
+        bool copyA = (channels & DilateChannels.A) != 0;
+
+        for (int ly = 0; ly < rh; ly++)
+        {
+            int gy = yMin + ly;
+            int gRow = gy * w;
+            int rRow = ly * rw;
+            for (int lx = 0; lx < rw; lx++)
+            {
+                int gx = xMin + lx;
+                int gIdx = gRow + gx;
+                if (mask[gIdx] != 0) continue;
+                int seed = src[rRow + lx];
+                if (seed < 0) continue;
+                int sx = seed - (seed / w) * w;
+                int sy = seed / w;
+                int ddx = gx - sx;
+                int ddy = gy - sy;
+                if (ddx * ddx + ddy * ddy > maxDistSq) continue;
+
+                int oDst = gIdx * 4;
+                int oSrc = seed * 4;
+                if (copyR) output[oDst] = output[oSrc];
+                if (copyG) output[oDst + 1] = output[oSrc + 1];
+                if (copyB) output[oDst + 2] = output[oSrc + 2];
+                if (copyA) output[oDst + 3] = output[oSrc + 3];
+                mask[gIdx] = 2;
+            }
+        }
+    }
+
+    private static void DilatePaintedRegion(byte[] output, byte[] mask, int w, int h,
+        DirtyRect rect, int passes, DilateChannels channels = DilateChannels.RGBA)
+    {
+        if (passes <= 0 || channels == DilateChannels.None) return;
+        int xMin = Math.Max(0, rect.X);
+        int yMin = Math.Max(0, rect.Y);
+        int xMax = Math.Min(w - 1, rect.X + rect.W - 1);
+        int yMax = Math.Min(h - 1, rect.Y + rect.H - 1);
+        if (xMax < xMin || yMax < yMin) return;
+
+        bool copyR = (channels & DilateChannels.R) != 0;
+        bool copyG = (channels & DilateChannels.G) != 0;
+        bool copyB = (channels & DilateChannels.B) != 0;
+        bool copyA = (channels & DilateChannels.A) != 0;
+
+        var added = new List<(int idx, int srcIdx)>(1024);
+        for (int pass = 0; pass < passes; pass++)
+        {
+            added.Clear();
+            for (int py = yMin; py <= yMax; py++)
+            {
+                int rowStart = py * w;
+                for (int px = xMin; px <= xMax; px++)
+                {
+                    int idx = rowStart + px;
+                    if (mask[idx] != 0) continue;
+
+                    // Source must be solid (value 2). Skipping mask=1 (soft-fade) so
+                    // we don't carry mostly-base alpha-blended color outward.
+                    int srcIdx = -1;
+                    if (py > yMin && mask[idx - w] == 2) srcIdx = idx - w;
+                    else if (py < yMax && mask[idx + w] == 2) srcIdx = idx + w;
+                    else if (px > xMin && mask[idx - 1] == 2) srcIdx = idx - 1;
+                    else if (px < xMax && mask[idx + 1] == 2) srcIdx = idx + 1;
+                    if (srcIdx < 0) continue;
+
+                    added.Add((idx, srcIdx));
+                }
+            }
+            if (added.Count == 0) break;
+
+            foreach (var (idx, srcIdx) in added)
+            {
+                int oDst = idx * 4;
+                int oSrc = srcIdx * 4;
+                if (copyR) output[oDst] = output[oSrc];
+                if (copyG) output[oDst + 1] = output[oSrc + 1];
+                if (copyB) output[oDst + 2] = output[oSrc + 2];
+                if (copyA) output[oDst + 3] = output[oSrc + 3];
+                // Promote dilated texel to solid so next pass can extend further.
+                mask[idx] = 2;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Compute the inflated dirty rect needed when post-process dilation will run.
+    /// Inflating before commit lets the dirty tracker know halo texels belong to
+    /// this cycle; otherwise next cycle won't restore base over them.
+    /// </summary>
+    private static DirtyRect InflateForDilation(DirtyRect rect, int w, int h, int passes)
+    {
+        if (rect.IsEmpty || passes <= 0) return rect;
+        int x0 = Math.Max(0, rect.X - passes);
+        int y0 = Math.Max(0, rect.Y - passes);
+        int x1 = Math.Min(w - 1, rect.X + rect.W - 1 + passes);
+        int y1 = Math.Min(h - 1, rect.Y + rect.H - 1 + passes);
+        return new DirtyRect(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
     }
 
     private static void SampleBilinear(byte[] data, int w, int h, float fx, float fy,

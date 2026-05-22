@@ -173,6 +173,7 @@
     "copy": "Copy",
     "rotate_ccw_90": "CCW 90°",
     "rotate_cw_90": "CW 90°",
+    "rotate_180": "Flip 180°",
     "mirror_x": "Mirror X",
     "mirror_y": "Mirror Y",
     "path": "Paths",
@@ -244,7 +245,13 @@
     "open_perf_help": "Open performance monitor\nView process memory and plugin cache sizes",
     "force_gc": "Trigger an immediate GC.Collect to reclaim managed objects\nUseful for diffing memory before/after to confirm leaks",
     "set_baseline": "Pin the current snapshot as baseline\nAll values will then show delta against it",
-    "hide_with_game_ui": "Disable to keep the plugin window visible when you toggle the game UI.\nLeave enabled to follow the default behavior."
+    "hide_with_game_ui": "Disable to keep the plugin window visible when you toggle the game UI.\nLeave enabled to follow the default behavior.",
+    "projector_mode_no_layer": "Select a layer to toggle",
+    "projector_mode_on_off": "Place via 3D editor; UV canvas becomes read-only and the decal auto-scatters across UV islands",
+    "proj_origin": "Projector anchor in world coords - typically placed via 3D editor click; edit here for fine-tuning",
+    "proj_depth": "Half-depth of the projector box along its normal - controls wrap on curves; too large lets the decal punch through to the back",
+    "proj_wrap_angle": "Max angle between surface and projector normal where the decal still paints. Lower = stricter, fewer UV-overlap ghost artifacts but less wrap. Default 78°",
+    "proj_padding": "Texels bled outward from UV island edges to hide GPU bilinear sampling seam lines. Higher = wider coverage but tight UV layouts may pick up ghost copies on neighboring islands. Default 4"
   },
   "label": {
     "diffuse": "Diffuse",
@@ -316,7 +323,12 @@
     "tex_diffuse_header": "Texture (Diffuse)",
     "tex_normal_header": "Texture (Normal)",
     "copy_clipboard": "Copy to Clipboard (markdown)",
-    "canvas_map": "Preview Map"
+    "canvas_map": "Preview Map",
+    "proj_origin": "Anchor",
+    "proj_size": "Size",
+    "proj_depth": "Depth",
+    "proj_wrap_angle": "Wrap angle",
+    "proj_padding": "Seam padding"
   },
   "project": {
     "table": {
@@ -429,7 +441,8 @@
     "hide_with_game_ui": "Hide with game UI",
     "http_enable": "Enable HTTP Server##httpEn",
     "preview_current_layer": "Current Layer Only",
-    "canvas_show_base": "Show Base"
+    "canvas_show_base": "Show Base",
+    "projector_mode": "Projector Mode"
   },
   "menu": {
     "copy_diffuse_path": "Copy Diffuse Path",

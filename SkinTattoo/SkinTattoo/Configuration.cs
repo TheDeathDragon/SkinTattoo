@@ -69,6 +69,25 @@ public class SavedLayer
     public float SheenRate { get; set; } = 0.1f;
     public float SheenTint { get; set; } = 0.2f;
     public float SheenAperture { get; set; } = 5.0f;
+
+    // 3D projector anchor. Default UseProjector=false keeps legacy saves on the
+    // UV-quad path. Vector fields default to zero/identity so an unflagged layer
+    // never accidentally activates the projector path.
+    public bool UseProjector { get; set; } = false;
+    public float ProjOriginX { get; set; }
+    public float ProjOriginY { get; set; }
+    public float ProjOriginZ { get; set; }
+    public float ProjNormalX { get; set; }
+    public float ProjNormalY { get; set; }
+    public float ProjNormalZ { get; set; } = 1f;
+    public float ProjTangentX { get; set; } = 1f;
+    public float ProjTangentY { get; set; }
+    public float ProjTangentZ { get; set; }
+    public float ProjSizeX { get; set; } = 0.1f;
+    public float ProjSizeY { get; set; } = 0.1f;
+    public float ProjDepth { get; set; } = 0.025f;
+    public float ProjWrapAngleDeg { get; set; } = 78f;
+    public int ProjPaddingRadius { get; set; } = 0;
 }
 
 [Serializable]

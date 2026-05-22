@@ -785,6 +785,151 @@ internal sealed class ApiController : WebApiController
         }
     }
 
+    /// <summary>
+    /// Dry-run the selected layer's projector against the currently loaded mesh.
+    /// Returns ProjOrigin/Size/etc + painted-texel count + UV bbox + sample triangle
+    /// normals. Useful to diagnose why a projector layer paints nothing (mesh missing,
+    /// normals inverted, size too small, etc.).
+    /// </summary>
+    [Route(HttpVerbs.Get, "/debug/projector")]
+    public object GetProjectorDryRun()
+    {
+        try
+        {
+            var group = _project.SelectedGroup;
+            if (group == null) return new { error = "no group selected" };
+            var layer = group.SelectedLayer;
+            if (layer == null) return new { error = "no layer selected" };
+
+            var mesh = _preview.CurrentMesh;
+            var baseTex = mesh != null ? _preview.GetBaseTextureSize(group) : (0, 0);
+            int w = baseTex.Item1;
+            int h = baseTex.Item2;
+
+            object? rasterResult = null;
+            object[]? sampleTris = null;
+
+            if (layer.UseProjector && mesh != null && w > 0 && h > 0)
+            {
+                float rotRad = layer.RotationDeg * (MathF.PI / 180f);
+                float cutoff = MathF.Cos(layer.ProjWrapAngleDeg * (MathF.PI / 180f));
+                int painted = 0;
+                int minPx = int.MaxValue, maxPx = int.MinValue, minPy = int.MaxValue, maxPy = int.MinValue;
+
+                SkinTattoo.Mesh.MeshProjector.Rasterize(mesh, w, h,
+                    layer.ProjOrigin, layer.ProjNormal, layer.ProjTangent,
+                    layer.ProjSize, layer.ProjDepth, rotRad,
+                    (px, py, lu, lv) =>
+                    {
+                        painted++;
+                        if (px < minPx) minPx = px;
+                        if (px > maxPx) maxPx = px;
+                        if (py < minPy) minPy = py;
+                        if (py > maxPy) maxPy = py;
+                    }, cutoff);
+
+                var bbox = SkinTattoo.Mesh.MeshProjector.ComputeUvBbox(mesh, w, h,
+                    layer.ProjOrigin, layer.ProjNormal, layer.ProjTangent,
+                    layer.ProjSize, layer.ProjDepth, rotRad, cutoff);
+
+                rasterResult = new
+                {
+                    texWidth = w,
+                    texHeight = h,
+                    paintedTexels = painted,
+                    paintedBbox = painted > 0
+                        ? (object)new { x = minPx, y = minPy, w = maxPx - minPx + 1, h = maxPy - minPy + 1 }
+                        : null,
+                    uvBbox = bbox.IsEmpty
+                        ? null
+                        : (object)new { x = bbox.X, y = bbox.Y, w = bbox.W, h = bbox.H },
+                };
+
+                // Sample 5 triangles closest to ProjOrigin in 3D to inspect their normals.
+                // If the projector paints nothing, comparing these normals against ProjNormal
+                // tells us whether backface culling is the issue.
+                var candidates = new List<(int idx, float dist, Vector3 centroid, Vector3 faceN, Vector3 avgVN)>();
+                for (int t = 0; t < mesh.TriangleCount; t++)
+                {
+                    var (v0, v1, v2) = mesh.GetTriangle(t);
+                    var c = (v0.Position + v1.Position + v2.Position) / 3f;
+                    float d = (c - layer.ProjOrigin).LengthSquared();
+                    var fN = Vector3.Cross(v1.Position - v0.Position, v2.Position - v0.Position);
+                    if (fN.LengthSquared() > 1e-12f) fN = Vector3.Normalize(fN);
+                    var avgVN = v0.Normal + v1.Normal + v2.Normal;
+                    if (avgVN.LengthSquared() > 1e-12f) avgVN = Vector3.Normalize(avgVN);
+                    candidates.Add((t, d, c, fN, avgVN));
+                }
+                sampleTris = candidates.OrderBy(x => x.dist).Take(5).Select(x => (object)new
+                {
+                    tri = x.idx,
+                    dist3D = MathF.Sqrt(x.dist),
+                    centroid = new { x = x.centroid.X, y = x.centroid.Y, z = x.centroid.Z },
+                    faceNormal = new { x = x.faceN.X, y = x.faceN.Y, z = x.faceN.Z },
+                    avgVertexNormal = new { x = x.avgVN.X, y = x.avgVN.Y, z = x.avgVN.Z },
+                    dotProjNormal = Vector3.Dot(x.avgVN, Vector3.Normalize(layer.ProjNormal)),
+                }).ToArray();
+            }
+
+            return new
+            {
+                groupName = group.Name,
+                layerName = layer.Name,
+                useProjector = layer.UseProjector,
+                projOrigin = new { x = layer.ProjOrigin.X, y = layer.ProjOrigin.Y, z = layer.ProjOrigin.Z },
+                projNormal = new { x = layer.ProjNormal.X, y = layer.ProjNormal.Y, z = layer.ProjNormal.Z },
+                projTangent = new { x = layer.ProjTangent.X, y = layer.ProjTangent.Y, z = layer.ProjTangent.Z },
+                projSize = new { x = layer.ProjSize.X, y = layer.ProjSize.Y },
+                projDepth = layer.ProjDepth,
+                rotationDeg = layer.RotationDeg,
+                uvCenter = new { x = layer.UvCenter.X, y = layer.UvCenter.Y },
+                uvScale = new { x = layer.UvScale.X, y = layer.UvScale.Y },
+                meshLoaded = mesh != null,
+                meshTriangles = mesh?.TriangleCount ?? 0,
+                meshVertices = mesh?.Vertices.Length ?? 0,
+                rasterDryRun = rasterResult,
+                nearestTriangles = sampleTris,
+            };
+        }
+        catch (Exception ex)
+        {
+            return new { error = ex.Message, stack = ex.StackTrace };
+        }
+    }
+
+    /// <summary>
+    /// Override projector size/depth on the selected layer for diagnostic experiments.
+    /// POST /api/debug/projector/size?w=&amp;h=&amp;d=  (any subset of w/h/d).
+    /// </summary>
+    [Route(HttpVerbs.Post, "/debug/projector/size")]
+    public object PostProjectorSize()
+    {
+        var layer = _project.SelectedLayer;
+        if (layer == null) return new { error = "no layer selected" };
+
+        var q = HttpContext.Request.QueryString;
+        float? w = TryParseFloat(q["w"]);
+        float? h = TryParseFloat(q["h"]);
+        float? d = TryParseFloat(q["d"]);
+
+        var size = layer.ProjSize;
+        if (w.HasValue) size = new Vector2(w.Value, size.Y);
+        if (h.HasValue) size = new Vector2(size.X, h.Value);
+        layer.ProjSize = size;
+        if (d.HasValue) layer.ProjDepth = d.Value;
+        layer.UseProjector = true;
+        _preview.MarkDirty();
+        return new
+        {
+            ok = true,
+            projSize = new { x = layer.ProjSize.X, y = layer.ProjSize.Y },
+            projDepth = layer.ProjDepth,
+        };
+    }
+
+    private static float? TryParseFloat(string? s)
+        => float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
+
     [Route(HttpVerbs.Get, "/debug/state-invariants")]
     public object GetStateInvariants()
     {

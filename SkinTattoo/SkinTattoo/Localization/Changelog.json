@@ -1,6 +1,20 @@
 {
   "versions": [
     {
+      "version": "0.3.1.0",
+      "date": "2026-05-22",
+      "en": [
+        { "text": "New: 3D decal projection. Place decals by clicking on the model in the 3D editor; mesh-aware compositor maps the decal across all UV islands that cover the 3D footprint automatically (handles mirrored / stitched UV layouts)." },
+        { "text": "Per-layer projector controls: anchor / size / depth / wrap angle / seam padding, all editable in the parameter panel." },
+        { "text": "UV canvas adapts: projector layers render the actual mesh-aware decal coverage (transparent areas stay transparent) and are read-only; UV-quad layers behave as before." }
+      ],
+      "zh": [
+        { "text": "新功能：3D 贴花投影。在 3D 编辑器中点击模型放置贴花，合成器自动按网格把贴花画到 3D 占用范围覆盖的所有 UV 岛（支持镜像 / 拼接 UV 布局）。" },
+        { "text": "图层级参数：锚点 / 尺寸 / 深度 / 包裹角度 / 接缝填充，参数面板可调。" },
+        { "text": "UV 画布适配：投影器图层显示实际 mesh-aware 涂抹结果（透明区保持透明），只读；UV-quad 图层行为不变。" }
+      ]
+    },
+    {
       "version": "0.3.0.2",
       "date": "2026-05-07",
       "en": [

@@ -252,6 +252,21 @@ public class DecalProject
         SheenRate = l.SheenRate,
         SheenTint = l.SheenTint,
         SheenAperture = l.SheenAperture,
+        UseProjector = l.UseProjector,
+        ProjOriginX = l.ProjOrigin.X,
+        ProjOriginY = l.ProjOrigin.Y,
+        ProjOriginZ = l.ProjOrigin.Z,
+        ProjNormalX = l.ProjNormal.X,
+        ProjNormalY = l.ProjNormal.Y,
+        ProjNormalZ = l.ProjNormal.Z,
+        ProjTangentX = l.ProjTangent.X,
+        ProjTangentY = l.ProjTangent.Y,
+        ProjTangentZ = l.ProjTangent.Z,
+        ProjSizeX = l.ProjSize.X,
+        ProjSizeY = l.ProjSize.Y,
+        ProjDepth = l.ProjDepth,
+        ProjWrapAngleDeg = l.ProjWrapAngleDeg,
+        ProjPaddingRadius = l.ProjPaddingRadius,
     };
 
     private static DecalLayer DeserializeLayer(SavedLayer s, bool legacyFallback)
@@ -316,6 +331,16 @@ public class DecalProject
         l.SheenRate = s.SheenRate;
         l.SheenTint = s.SheenTint;
         l.SheenAperture = s.SheenAperture;
+        l.UseProjector = s.UseProjector;
+        l.ProjOrigin = new Vector3(s.ProjOriginX, s.ProjOriginY, s.ProjOriginZ);
+        l.ProjNormal = new Vector3(s.ProjNormalX, s.ProjNormalY, s.ProjNormalZ);
+        l.ProjTangent = new Vector3(s.ProjTangentX, s.ProjTangentY, s.ProjTangentZ);
+        l.ProjSize = new Vector2(s.ProjSizeX, s.ProjSizeY);
+        l.ProjDepth = s.ProjDepth;
+        // Legacy saves default to 0 (deserialized) but should treat that as the
+        // default wrap angle since the field didn't exist when saved.
+        l.ProjWrapAngleDeg = s.ProjWrapAngleDeg > 0f ? s.ProjWrapAngleDeg : 78f;
+        l.ProjPaddingRadius = Math.Max(0, s.ProjPaddingRadius);
     }
 
     /// <summary>After LoadFromConfig: resolve each layer's ImageHash to a library

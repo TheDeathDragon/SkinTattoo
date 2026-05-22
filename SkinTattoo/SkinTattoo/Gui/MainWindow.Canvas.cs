@@ -4,6 +4,7 @@ using System.IO;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
+using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
@@ -30,6 +31,21 @@ public partial class MainWindow
     private sealed record CanvasBaseWrapEntry(IDalamudTextureWrap Wrap, byte[] Data, int Width, int Height);
     private readonly Dictionary<string, CanvasBaseWrapEntry> canvasBaseWrapCache =
         new(StringComparer.OrdinalIgnoreCase);
+
+    // Per-layer projector overlay cache: mesh-aware rasterization of the decal
+    // image into UV space. Re-rasterizes when any projector param / decal image
+    // changes. Transparent decal pixels stay transparent in the canvas overlay so
+    // multi-UV-island scatter shows up correctly without bleeding into untouched
+    // regions.
+    private sealed class ProjectorOverlayEntry
+    {
+        public long Hash;
+        public byte[]? Data;
+        public int Width;
+        public int Height;
+        public IDalamudTextureWrap? Wrap;
+    }
+    private readonly Dictionary<DecalLayer, ProjectorOverlayEntry> projectorOverlayCache = new();
 
     private IDalamudTextureWrap? GetCanvasBaseWrap(TargetGroup group, string? gamePath)
     {
@@ -71,6 +87,142 @@ public partial class MainWindow
             try { entry.Wrap.Dispose(); } catch { }
         }
         canvasBaseWrapCache.Clear();
+
+        foreach (var entry in projectorOverlayCache.Values)
+        {
+            try { entry.Wrap?.Dispose(); } catch { }
+        }
+        projectorOverlayCache.Clear();
+    }
+
+    /// <summary>
+    /// Mesh-aware UV-space rasterization of a projector layer's decal image.
+    /// Output is texW x texH RGBA with transparent background; opaque only where
+    /// the decal actually paints. Cached by params hash; re-runs when any input
+    /// changes. Result is drawn as the canvas overlay for projector-mode layers.
+    /// </summary>
+    private IDalamudTextureWrap? GetProjectorOverlayWrap(DecalLayer layer, Mesh.MeshData mesh, int texW, int texH)
+    {
+        if (imageLoader == null || string.IsNullOrEmpty(layer.ImagePath)) return null;
+        if (mesh == null || mesh.TriangleCount == 0) return null;
+        if (texW <= 0 || texH <= 0) return null;
+
+        long hash = ComputeProjectorOverlayHash(layer, mesh, texW, texH);
+
+        if (!projectorOverlayCache.TryGetValue(layer, out var entry))
+        {
+            entry = new ProjectorOverlayEntry();
+            projectorOverlayCache[layer] = entry;
+        }
+        if (entry.Hash == hash && entry.Wrap != null && entry.Width == texW && entry.Height == texH)
+            return entry.Wrap;
+
+        var decalImage = imageLoader.LoadImage(layer.ImagePath);
+        if (decalImage == null) return null;
+        var (decalData, decalW, decalH) = decalImage.Value;
+
+        int needLen = texW * texH * 4;
+        if (entry.Data == null || entry.Data.Length < needLen)
+            entry.Data = new byte[needLen];
+        else
+            Array.Clear(entry.Data, 0, needLen);
+        var bytes = entry.Data;
+
+        float rotRad = layer.RotationDeg * (MathF.PI / 180f);
+        float opacity = layer.Opacity;
+        var clipMode = layer.Clip;
+        float cutoff = MathF.Cos(layer.ProjWrapAngleDeg * (MathF.PI / 180f));
+
+        Mesh.MeshProjector.Rasterize(mesh, texW, texH,
+            layer.ProjOrigin, layer.ProjNormal, layer.ProjTangent,
+            layer.ProjSize, layer.ProjDepth, rotRad,
+            (px, py, lu, lv) =>
+            {
+                switch (clipMode)
+                {
+                    case ClipMode.ClipLeft when lu < 0f: return;
+                    case ClipMode.ClipRight when lu >= 0f: return;
+                    case ClipMode.ClipTop when lv < 0f: return;
+                    case ClipMode.ClipBottom when lv >= 0f: return;
+                }
+                float du = (lu + 0.5f) * decalW - 0.5f;
+                float dv = (lv + 0.5f) * decalH - 0.5f;
+                SampleDecalBilinear(decalData, decalW, decalH, du, dv,
+                    out float r, out float g, out float b, out float a);
+                a *= opacity;
+                if (a < 0.001f) return;
+
+                int idx = (py * texW + px) * 4;
+                bytes[idx] = (byte)Math.Clamp((int)(r * 255f), 0, 255);
+                bytes[idx + 1] = (byte)Math.Clamp((int)(g * 255f), 0, 255);
+                bytes[idx + 2] = (byte)Math.Clamp((int)(b * 255f), 0, 255);
+                bytes[idx + 3] = (byte)Math.Clamp((int)(a * 255f), 0, 255);
+            }, cutoff);
+
+        try
+        {
+            var newWrap = textureProvider.CreateFromRaw(
+                RawImageSpecification.Rgba32(texW, texH),
+                bytes,
+                $"SkinTattoo/projector/{layer.ImageHash ?? layer.Name}");
+            try { entry.Wrap?.Dispose(); } catch { }
+            entry.Wrap = newWrap;
+            entry.Width = texW;
+            entry.Height = texH;
+            entry.Hash = hash;
+            return newWrap;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static long ComputeProjectorOverlayHash(DecalLayer layer, Mesh.MeshData mesh, int texW, int texH)
+    {
+        // RuntimeHelpers gives reference identity for the mesh so a fresh
+        // mesh (group switch / reload) invalidates the cache automatically.
+        var h = new HashCode();
+        h.Add(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(mesh));
+        h.Add(layer.ProjOrigin);
+        h.Add(layer.ProjNormal);
+        h.Add(layer.ProjTangent);
+        h.Add(layer.ProjSize);
+        h.Add(layer.ProjDepth);
+        h.Add(layer.ProjWrapAngleDeg);
+        h.Add(layer.RotationDeg);
+        h.Add(layer.Opacity);
+        h.Add((int)layer.Clip);
+        h.Add(layer.ImagePath);
+        h.Add(layer.ImageHash);
+        h.Add(texW);
+        h.Add(texH);
+        return ((long)h.ToHashCode() << 32) ^ (uint)mesh.TriangleCount;
+    }
+
+    private static void SampleDecalBilinear(byte[] data, int w, int h, float fx, float fy,
+        out float r, out float g, out float b, out float a)
+    {
+        int x0 = Math.Clamp((int)MathF.Floor(fx), 0, w - 1);
+        int y0 = Math.Clamp((int)MathF.Floor(fy), 0, h - 1);
+        int x1 = Math.Min(x0 + 1, w - 1);
+        int y1 = Math.Min(y0 + 1, h - 1);
+        float tx = fx - MathF.Floor(fx);
+        float ty = fy - MathF.Floor(fy);
+
+        int i00 = (y0 * w + x0) * 4;
+        int i10 = (y0 * w + x1) * 4;
+        int i01 = (y1 * w + x0) * 4;
+        int i11 = (y1 * w + x1) * 4;
+
+        float Lerp(int ch) =>
+            (data[i00 + ch] * (1 - tx) + data[i10 + ch] * tx) * (1 - ty) +
+            (data[i01 + ch] * (1 - tx) + data[i11 + ch] * tx) * ty;
+
+        r = Lerp(0) / 255f;
+        g = Lerp(1) / 255f;
+        b = Lerp(2) / 255f;
+        a = Lerp(3) / 255f;
     }
 
     private static string? GuessMaskPathFromSibling(string? texPath)
@@ -239,6 +391,28 @@ public partial class MainWindow
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(Strings.T("tooltip.canvas_show_base"));
+
+        // Projector mode toggle for the selected layer. When enabled, the layer
+        // paints via 3D mesh projection (mesh-aware, scatters across UV islands
+        // automatically) and the UV canvas becomes read-only -- placement must
+        // happen in the 3D editor. Disabled = legacy UV-quad path with canvas drag.
+        ImGui.SameLine();
+        var selectedForToggle = project.SelectedLayer;
+        using (ImRaii.Disabled(selectedForToggle == null))
+        {
+            var projMode = selectedForToggle?.UseProjector ?? false;
+            if (ImGui.Checkbox(Strings.T("checkbox.projector_mode") + "##projectorMode", ref projMode) && selectedForToggle != null)
+            {
+                selectedForToggle.UseProjector = projMode;
+                MarkPreviewDirty();
+            }
+        }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            ImGui.SetTooltip(selectedForToggle == null
+                ? Strings.T("tooltip.projector_mode_no_layer")
+                : Strings.T("tooltip.projector_mode_on_off"));
+        }
 
         var avail = ImGui.GetContentRegionAvail();
         var canvasSize = new Vector2(avail.X, avail.Y);
@@ -592,6 +766,7 @@ public partial class MainWindow
         var group = project.SelectedGroup;
         if (group == null) return;
 
+        var meshForProjector = previewService.CurrentMesh;
         for (var i = 0; i < group.Layers.Count; i++)
         {
             var layer = group.Layers[i];
@@ -603,6 +778,14 @@ public partial class MainWindow
                 continue;
 
             var isSelected = group.SelectedLayerIndex == i;
+
+            if (layer.UseProjector && meshForProjector != null
+                && lastBaseTexWidth > 0 && lastBaseTexHeight > 0)
+            {
+                DrawProjectorOutline(drawList, layer, meshForProjector,
+                    uvOrigin, fitSize, uvScale, texOffset, isSelected);
+                continue;
+            }
 
             // texture UV -> virtual UV -> screen
             var pCenter = uvOrigin + (texOffset + layer.UvCenter * uvScale) * fitSize;
@@ -744,6 +927,162 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>
+    /// Draws a projector layer's actual mesh-aware UV painting onto the canvas.
+    /// Calls GetProjectorOverlayWrap which rasterizes the decal image through
+    /// MeshProjector (transparent decal pixels stay transparent, so multi-UV-island
+    /// scatter shows up exactly as it will be painted in the texture). A thin bbox
+    /// border is drawn for selected layers as a placement hint.
+    /// </summary>
+    private void DrawProjectorOutline(ImDrawListPtr drawList, DecalLayer layer,
+        Mesh.MeshData mesh, Vector2 uvOrigin, Vector2 fitSize, Vector2 uvScale,
+        Vector2 texOffset, bool isSelected)
+    {
+        int texW = lastBaseTexWidth;
+        int texH = lastBaseTexHeight;
+        if (texW <= 0 || texH <= 0) return;
+
+        // Texture region in screen space -- the rasterized overlay maps [0,1] UV
+        // onto exactly this rectangle, so painted texels land at the right canvas
+        // position automatically.
+        var texScreenMin = uvOrigin + texOffset * fitSize;
+        var texScreenMax = uvOrigin + (texOffset + uvScale) * fitSize;
+
+        var wrap = GetProjectorOverlayWrap(layer, mesh, texW, texH);
+        if (wrap != null)
+        {
+            var alpha = (uint)(layer.Opacity * 255) << 24 | 0x00FFFFFF;
+            // Wrap already has decal RGB * alpha; draw with white tint preserving
+            // its internal opacity. Opacity is double-applied (in rasterize and
+            // here) -- keep tint at full so the rasterized alpha drives blend.
+            drawList.AddImage(wrap.Handle,
+                texScreenMin, texScreenMax,
+                Vector2.Zero, Vector2.One);
+        }
+
+        if (isSelected)
+        {
+            float rotRad = layer.RotationDeg * (MathF.PI / 180f);
+            float cutoff = MathF.Cos(layer.ProjWrapAngleDeg * (MathF.PI / 180f));
+            var bbox = Mesh.MeshProjector.ComputeUvBbox(mesh, texW, texH,
+                layer.ProjOrigin, layer.ProjNormal, layer.ProjTangent,
+                layer.ProjSize, layer.ProjDepth, rotRad, cutoff);
+            var borderColor = ImGui.GetColorU32(new Vector4(1f, 0.8f, 0.2f, 0.8f));
+
+            if (!bbox.IsEmpty)
+            {
+                Vector2 TexToScreen(int px, int py)
+                {
+                    var texUv = new Vector2((px + 0.5f) / texW, (py + 0.5f) / texH);
+                    return uvOrigin + (texOffset + texUv * uvScale) * fitSize;
+                }
+                var rectMin = TexToScreen(bbox.X, bbox.Y);
+                var rectMax = TexToScreen(bbox.X + bbox.W - 1, bbox.Y + bbox.H - 1);
+                drawList.AddRect(rectMin, rectMax, borderColor, 0, ImDrawFlags.None, 1.5f);
+            }
+            else
+            {
+                var center = uvOrigin + (texOffset + layer.UvCenter * uvScale) * fitSize;
+                float c = 6f;
+                drawList.AddLine(center - new Vector2(c, 0), center + new Vector2(c, 0), borderColor, 1.5f);
+                drawList.AddLine(center - new Vector2(0, c), center + new Vector2(0, c), borderColor, 1.5f);
+            }
+        }
+    }
+
+    private static void DrawProjectorTriangleOutlines(ImDrawListPtr drawList, DecalLayer layer,
+        Mesh.MeshData mesh, int texW, int texH, float rotRad,
+        Vector2 uvOrigin, Vector2 fitSize, Vector2 uvScale, Vector2 texOffset, uint color)
+    {
+        var n = layer.ProjNormal;
+        if (n.LengthSquared() < 1e-8f) return;
+        n = Vector3.Normalize(n);
+
+        var tIn = layer.ProjTangent - Vector3.Dot(layer.ProjTangent, n) * n;
+        if (tIn.LengthSquared() < 1e-8f)
+        {
+            var fallback = MathF.Abs(n.X) < 0.9f ? new Vector3(1, 0, 0) : new Vector3(0, 1, 0);
+            tIn = fallback - Vector3.Dot(fallback, n) * n;
+        }
+        tIn = Vector3.Normalize(tIn);
+        var bIn = Vector3.Cross(n, tIn);
+        float cosR = MathF.Cos(rotRad);
+        float sinR = MathF.Sin(rotRad);
+        var t = cosR * tIn + sinR * bIn;
+        var b = Vector3.Cross(n, t);
+
+        float halfX = layer.ProjSize.X * 0.5f;
+        float halfY = layer.ProjSize.Y * 0.5f;
+        float halfZ = layer.ProjDepth;
+        float ex = MathF.Abs(t.X) * halfX + MathF.Abs(b.X) * halfY + MathF.Abs(n.X) * halfZ;
+        float ey = MathF.Abs(t.Y) * halfX + MathF.Abs(b.Y) * halfY + MathF.Abs(n.Y) * halfZ;
+        float ez = MathF.Abs(t.Z) * halfX + MathF.Abs(b.Z) * halfY + MathF.Abs(n.Z) * halfZ;
+        var boxMin = layer.ProjOrigin - new Vector3(ex, ey, ez);
+        var boxMax = layer.ProjOrigin + new Vector3(ex, ey, ez);
+
+        var verts = mesh.Vertices;
+        var indices = mesh.Indices;
+        int triCount = indices.Length / 3;
+        int drawn = 0;
+        const int maxDraw = 600;
+
+        Vector2 UvToScreen(Vector2 uv)
+        {
+            var fract = new Vector2(uv.X - MathF.Floor(uv.X), uv.Y - MathF.Floor(uv.Y));
+            return uvOrigin + (texOffset + fract * uvScale) * fitSize;
+        }
+
+        for (int tIdx = 0; tIdx < triCount && drawn < maxDraw; tIdx++)
+        {
+            int i0 = indices[tIdx * 3];
+            int i1 = indices[tIdx * 3 + 1];
+            int i2 = indices[tIdx * 3 + 2];
+            if (i0 >= verts.Length || i1 >= verts.Length || i2 >= verts.Length) continue;
+
+            var p0 = verts[i0].Position;
+            var p1 = verts[i1].Position;
+            var p2 = verts[i2].Position;
+
+            float triMinX = MathF.Min(p0.X, MathF.Min(p1.X, p2.X));
+            float triMaxX = MathF.Max(p0.X, MathF.Max(p1.X, p2.X));
+            if (triMaxX < boxMin.X || triMinX > boxMax.X) continue;
+            float triMinY = MathF.Min(p0.Y, MathF.Min(p1.Y, p2.Y));
+            float triMaxY = MathF.Max(p0.Y, MathF.Max(p1.Y, p2.Y));
+            if (triMaxY < boxMin.Y || triMinY > boxMax.Y) continue;
+            float triMinZ = MathF.Min(p0.Z, MathF.Min(p1.Z, p2.Z));
+            float triMaxZ = MathF.Max(p0.Z, MathF.Max(p1.Z, p2.Z));
+            if (triMaxZ < boxMin.Z || triMinZ > boxMax.Z) continue;
+
+            var avgN = verts[i0].Normal + verts[i1].Normal + verts[i2].Normal;
+            if (Vector3.Dot(avgN, n) < 0f) continue;
+
+            // Quick projector-volume membership: at least one vertex must lie
+            // within the OBB to count this triangle as "painted".
+            bool any = false;
+            for (int k = 0; k < 3; k++)
+            {
+                var pos = k == 0 ? p0 : k == 1 ? p1 : p2;
+                var rel = pos - layer.ProjOrigin;
+                float ln = Vector3.Dot(rel, n);
+                if (ln < -halfZ || ln > halfZ) continue;
+                float lu = Vector3.Dot(rel, t) / layer.ProjSize.X;
+                if (lu < -0.5f || lu > 0.5f) continue;
+                float lv = Vector3.Dot(rel, b) / layer.ProjSize.Y;
+                if (lv < -0.5f || lv > 0.5f) continue;
+                any = true; break;
+            }
+            if (!any) continue;
+
+            var s0 = UvToScreen(verts[i0].UV);
+            var s1 = UvToScreen(verts[i1].UV);
+            var s2 = UvToScreen(verts[i2].UV);
+            drawList.AddLine(s0, s1, color, 1f);
+            drawList.AddLine(s1, s2, color, 1f);
+            drawList.AddLine(s2, s0, color, 1f);
+            drawn++;
+        }
+    }
+
     private void HandleCanvasInput(Vector2 canvasPos, Vector2 canvasSize, Vector2 uvOrigin, Vector2 fitSize,
         Vector2 uvScale, Vector2 texOffset)
     {
@@ -769,7 +1108,12 @@ public partial class MainWindow
             canvasPanning = false;
         }
 
-        if (hasActiveLayer && group != null)
+        // Projector-mode layers are read-only on the UV canvas: skip right-click
+        // resize/rotate and left-click drag start. Layer selection (click on another
+        // layer's UV ghost-box) still works so users can switch layers from here.
+        var selectedIsProjector = selectedLayer?.UseProjector ?? false;
+
+        if (hasActiveLayer && group != null && !selectedIsProjector)
         {
             if (ImGui.IsMouseClicked(ImGuiMouseButton.Right))
             {
@@ -822,7 +1166,7 @@ public partial class MainWindow
             if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
             {
                 canvasDraggingLayer = false;
-                if (hasActiveLayer)
+                if (hasActiveLayer && !selectedIsProjector)
                 {
                     var pCenter = uvOrigin + (texOffset + selectedLayer!.UvCenter * uvScale) * fitSize;
                     var pHalfSize = GetScaleAbs(selectedLayer.UvScale) * texScreenSize * 0.5f;
@@ -844,14 +1188,15 @@ public partial class MainWindow
                             group.SelectedLayerIndex = i;
                             SyncImagePathBuf();
                             SyncCanvasMapToSelectedLayerIfEnabled();
-                            canvasDraggingLayer = true;
+                            canvasDraggingLayer = !l.UseProjector;
                             break;
                         }
                     }
                 }
             }
 
-            if (canvasDraggingLayer && ImGui.IsMouseDragging(ImGuiMouseButton.Left) && group.SelectedLayer != null)
+            if (canvasDraggingLayer && ImGui.IsMouseDragging(ImGuiMouseButton.Left)
+                && group.SelectedLayer != null && !group.SelectedLayer.UseProjector)
             {
                 var layer = group.SelectedLayer;
                 // Convert mouse delta to texture UV delta
