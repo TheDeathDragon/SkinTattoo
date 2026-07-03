@@ -774,6 +774,7 @@ internal sealed class ApiController : WebApiController
                         layerCount = g.Layers.Count,
                         visibleLayers = g.Layers.Count(l => l.IsVisible),
                         emissiveLayers = g.Layers.Count(l => l.AffectsEmissive),
+                        liveBindingIsGhost = g.LiveBindingIsGhost,
                     }).ToList(),
                 },
                 preview = _preview.DumpStateDiagnostics(),

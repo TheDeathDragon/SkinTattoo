@@ -255,6 +255,25 @@ public sealed class SkinMeshResolver
         }
     }
 
+    /// <summary>
+    /// True when the resolution only matched vanilla SqPack fallbacks: none of the
+    /// modded disk mdls the character currently wears references this mtrl. Textures
+    /// bound to such a material still load, but no visible mesh samples them.
+    /// Body/face/hair/tail only; other slots legitimately resolve without disk mdls.
+    /// Shared by the resource-browser ghost-card filter and the preview stale-binding
+    /// warning.
+    /// </summary>
+    public static bool IsVanillaFallbackOnly(Resolution resolution, string mtrlGamePath)
+    {
+        var parsed = TexPathParser.ParseFromMtrl(mtrlGamePath);
+        if (!parsed.IsValid) return false;
+        if (parsed.SlotKind != "body" && parsed.SlotKind != "face"
+            && parsed.SlotKind != "hair" && parsed.SlotKind != "tail")
+            return false;
+        if (resolution.MeshSlots.Count == 0) return false;
+        return resolution.MeshSlots.All(s => string.IsNullOrEmpty(s.DiskPath));
+    }
+
     /// <summary>Normalize skin mtrl filename: strip race/slot digits, keep letter suffix.</summary>
     public static string NormalizeSkinMtrlName(string mtrlPath)
     {

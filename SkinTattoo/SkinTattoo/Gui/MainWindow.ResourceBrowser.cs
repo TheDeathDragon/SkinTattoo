@@ -12,6 +12,7 @@ using Penumbra.Api.Enums;
 using Penumbra.Api.Helpers;
 using SkinTattoo.Core;
 using SkinTattoo.Http;
+using SkinTattoo.Mesh;
 using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo.Gui;
@@ -188,16 +189,9 @@ public partial class MainWindow
     {
         if (card.MtrlPaths.Count == 0) return false;
         var mtrlPath = card.MtrlPaths[0];
-        var parsed = TexPathParser.ParseFromMtrl(mtrlPath);
-        if (!parsed.IsValid) return false;
-        if (parsed.SlotKind != "body" && parsed.SlotKind != "face"
-            && parsed.SlotKind != "hair" && parsed.SlotKind != "tail")
-            return false;
-
         var resolution = GetCachedResolution(mtrlPath);
         if (resolution == null || !resolution.Success) return false;
-        if (resolution.MeshSlots.Count == 0) return false;
-        return resolution.MeshSlots.All(s => string.IsNullOrEmpty(s.DiskPath));
+        return SkinMeshResolver.IsVanillaFallbackOnly(resolution, mtrlPath);
     }
 
     /// <summary>Append mtrl variant suffix (e.g. "[bibo]" / "[a]") when multiple

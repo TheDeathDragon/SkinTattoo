@@ -606,6 +606,9 @@
     "material": "Material: {0}",
     "copy_hint": "(Right-click menu to copy paths)"
   },
+  "warn": {
+    "stale_binding": "Group {0} is bound to a material not used by any model the character currently wears -- decals will not show. Re-detect in the resource browser and add the currently visible skin material"
+  },
   "diag": {
     "mtrl_count": "Material ({0})",
     "live_mdl_count": "Models (resource tree, current: {0})",

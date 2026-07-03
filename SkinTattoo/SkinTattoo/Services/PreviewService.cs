@@ -931,6 +931,8 @@ public class PreviewService : IDisposable
 
         DebugServer.AppendLog($"[PreviewService] Registering {redirects.Count} redirect paths");
 
+        EvaluateStaleBindings(project);
+
         // Iris mask paths (chara/common/texture/eye/*) are derived from mtrl
         // resolution and aren't in the group's direct properties; attributed
         // to the first iris session below.
@@ -3618,6 +3620,48 @@ public class PreviewService : IDisposable
     /// UI should display this as a warning to the user.
     /// </summary>
     public string? SkinShpkModConflict { get; private set; }
+
+    /// <summary>
+    /// Flag groups whose mtrl no modded disk mdl currently references -- their redirects
+    /// mount fine but nothing visible samples the texture, so the preview silently shows
+    /// nothing (classic after a body-mod option or gear change invalidates a saved
+    /// project binding). Tree snapshot is taken on the calling (framework) thread; the
+    /// mdl file reads run in the background. UI surfaces TargetGroup.LiveBindingIsGhost.
+    /// </summary>
+    private void EvaluateStaleBindings(DecalProject project)
+    {
+        Dictionary<ushort, Penumbra.Api.Helpers.ResourceTreeDto>? trees;
+        try { trees = penumbra.GetPlayerTrees(withUiData: false); }
+        catch { return; }
+        if (trees == null || trees.Count == 0) return;
+
+        var groups = project.Groups
+            .Where(g => g.Layers.Count > 0 && !string.IsNullOrEmpty(g.MtrlGamePath))
+            .ToList();
+        if (groups.Count == 0) return;
+
+        _ = Task.Run(() =>
+        {
+            var resolver = new SkinMeshResolver(meshExtractor);
+            foreach (var group in groups)
+            {
+                try
+                {
+                    var res = resolver.Resolve(group.MtrlGamePath!, trees);
+                    var ghost = res.Success && SkinMeshResolver.IsVanillaFallbackOnly(res, group.MtrlGamePath!);
+                    if (ghost && !group.LiveBindingIsGhost)
+                        DebugServer.AppendLog($"[PreviewService] WARN: group '{group.Name}' mtrl '{group.MtrlGamePath}' " +
+                            "is not referenced by any modded mdl the character currently wears; decals will not be visible. " +
+                            "Re-detect the target material in the resource browser.");
+                    group.LiveBindingIsGhost = ghost;
+                }
+                catch (Exception ex)
+                {
+                    DebugServer.AppendLog($"[PreviewService] Stale-binding check failed for '{group.Name}': {ex.Message}");
+                }
+            }
+        });
+    }
 
     /// <summary>
     /// If any group uses emissive, deploy the patched skin.shpk that supports ColorTable sampling.

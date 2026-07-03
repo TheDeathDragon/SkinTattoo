@@ -15,6 +15,7 @@ using Penumbra.Api.Helpers;
 using SkinTattoo.Core;
 using SkinTattoo.Http;
 using SkinTattoo.Interop;
+using SkinTattoo.Mesh;
 using SkinTattoo.Services;
 using SkinTattoo.Services.Localization;
 
@@ -626,6 +627,7 @@ public partial class MainWindow : Window, IDisposable
                 if (loading) ImGui.BeginDisabled();
 
                 DrawToolbar();
+                DrawStaleBindingWarning();
                 ImGui.Separator();
 
                 var totalWidth = ImGui.GetContentRegionAvail().X;
@@ -773,6 +775,7 @@ public partial class MainWindow : Window, IDisposable
 
         var newRes = skinMeshResolver.Resolve(group.MtrlGamePath!, trees);
         if (!newRes.Success) return;
+        group.LiveBindingIsGhost = SkinMeshResolver.IsVanillaFallbackOnly(newRes, group.MtrlGamePath!);
         if (newRes.LiveTreeHash == group.LiveTreeHash) return;
 
         group.MeshSlots = newRes.MeshSlots;
@@ -881,6 +884,21 @@ public partial class MainWindow : Window, IDisposable
     }
 
     // -- Toolbar --------------------------------------------------------------
+
+    // Orange banner under the toolbar when any painted group is bound to a material
+    // no currently-worn modded mdl references (see TargetGroup.LiveBindingIsGhost).
+    private void DrawStaleBindingWarning()
+    {
+        List<string>? staleNames = null;
+        foreach (var g in project.Groups)
+            if (g.LiveBindingIsGhost && g.Layers.Count > 0)
+                (staleNames ??= []).Add(g.Name);
+        if (staleNames == null) return;
+
+        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.65f, 0.25f, 1f));
+        ImGui.TextWrapped(Strings.T("warn.stale_binding", string.Join(", ", staleNames)));
+        ImGui.PopStyleColor();
+    }
 
     private void DrawToolbar()
     {

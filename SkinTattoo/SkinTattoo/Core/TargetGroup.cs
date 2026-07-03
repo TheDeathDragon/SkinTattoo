@@ -23,6 +23,12 @@ public class TargetGroup
     // Stable hash for detecting equipment/body-mod swaps via 1Hz polling
     public string? LiveTreeHash { get; set; }
 
+    // Runtime-only, not persisted: true when the live-tree resolver only matched
+    // vanilla SqPack fallbacks for this group's mtrl, i.e. no modded disk mdl the
+    // character currently wears references it. The bound textures still load,
+    // but no visible mesh samples them, so previews silently show nothing.
+    public bool LiveBindingIsGhost { get; set; }
+
     public List<string> AllMeshPaths
     {
         get
