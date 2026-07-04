@@ -45,9 +45,44 @@ public class RowPairAllocator
         }
     }
 
+    /// <summary>
+    /// Scan a normal map's ALPHA channel for EXACT k*17 plateau values (skin CT path).
+    /// Only exact grid values can pass the v11f in-shader gate, so pairs whose exact
+    /// value covers >=0.5% of pixels (vanilla/mod skin-ID plateaus like Eve's) are
+    /// marked occupied -- painting a decal with that same row key would light the
+    /// whole plateau. Sparse exact hits (anti-aliased bands) stay allocatable; the
+    /// composite nudges those baseline pixels off-grid instead. Idempotent.
+    /// </summary>
+    public void ScanVanillaOccupationAlpha(byte[] normRgba, int width, int height)
+    {
+        Array.Clear(vanillaOccupied, 0, 16);
+        scanned = true;
+
+        if (normRgba == null || normRgba.Length < 4) return;
+        if (width <= 0 || height <= 0) return;
+
+        var histogram = new int[16];
+        for (int i = 3; i < normRgba.Length; i += 4)
+        {
+            int a = normRgba[i];
+            if (a != 0 && a < 255 && a % 17 == 0)
+                histogram[a / 17]++;
+        }
+
+        int threshold = Math.Max(1, width * height / 200);
+        for (int i = 1; i < 15; i++)
+        {
+            if (histogram[i] > threshold)
+                vanillaOccupied[i] = true;
+        }
+    }
+
     public int? TryAllocate()
     {
-        for (int i = 0; i < 16; i++)
+        // Pair 15 (alpha 255) is never assigned: the v11f in-shader grid gate treats
+        // k=15 as "vanilla lip mask" and forces it to row 0, so a decal placed there
+        // would go dark.
+        for (int i = 0; i < 15; i++)
         {
             if (!vanillaOccupied[i] && !assigned[i])
             {
@@ -78,7 +113,7 @@ public class RowPairAllocator
         get
         {
             int count = 0;
-            for (int i = 0; i < 16; i++)
+            for (int i = 0; i < 15; i++)
                 if (!vanillaOccupied[i] && !assigned[i]) count++;
             return count;
         }

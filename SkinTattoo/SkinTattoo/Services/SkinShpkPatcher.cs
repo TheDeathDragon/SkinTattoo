@@ -68,7 +68,7 @@ public static class SkinShpkPatcher
     // automatically and the next preview re-patches from vanilla.
     public static string SchemaVersion => Mode switch
     {
-        PatchMode.ValEmissive_v11b => "v11e",
+        PatchMode.ValEmissive_v11b => "v11f",
         PatchMode.ValBody_v13      => "v13",
         _ => "unknown",
     };
@@ -776,6 +776,42 @@ public static class SkinShpkPatcher
             0x00100046, 0x00000008,
             0x00107E46, normTex,
             0x00106000, normSamp,
+            // -- v11f k*17 grid gate. Alpha doubles as the engine's skin-type LUT
+            // index, so the composite must not quantize the texture (that mutated
+            // vanilla lip/body skin IDs -> thin lip outline + altered body shading).
+            // Alphas that are not exact k*17 multiples (k <= 14) are zeroed here so
+            // vanilla anti-aliased bands never sweep the allocated CT rows; k=15
+            // (vanilla lip-mask 255) is gated too and the allocator never assigns
+            // pair 15. NormalEmissive ramp CTs need the continuous sweep, so the
+            // gate is per-material switchable via col3 half15 (gateFlag) at row 0.
+            //   mul r8.z, r1.w, l(15)            ; a*15 (byte k*17 / 255 == k/15)
+            0x07000038, 0x00100042, 0x00000008, 0x0010003A, 0x00000001, 0x00004001, 0x41700000,
+            //   round_ne r8.w, r8.z              ; k
+            0x05000040, 0x00100082, 0x00000008, 0x0010002A, 0x00000008,
+            //   add r8.z, r8.z, -r8.w            ; grid distance in k-units
+            0x08000000, 0x00100042, 0x00000008, 0x0010002A, 0x00000008, 0x8010003A, 0x00000041, 0x00000008,
+            //   lt r8.z, |r8.z|, l(0.03)         ; on-grid (off-grid bytes >= 1/17 away)
+            0x08000031, 0x00100042, 0x00000008, 0x8010002A, 0x00000081, 0x00000008, 0x00004001, 0x3CF5C28F,
+            //   lt r8.w, r8.w, l(14.5)           ; k <= 14
+            0x07000031, 0x00100082, 0x00000008, 0x0010003A, 0x00000008, 0x00004001, 0x41680000,
+            //   and r8.z, r8.z, r8.w
+            0x07000001, 0x00100042, 0x00000008, 0x0010002A, 0x00000008, 0x0010003A, 0x00000008,
+            //   mov r9.x, l(0.4375)              ; col3 U
+            0x05000036, 0x00100012, 0x00000009, 0x00004001, 0x3EE00000,
+            //   mov r9.y, l(0.015625)            ; row 0 V
+            0x05000036, 0x00100022, 0x00000009, 0x00004001, 0x3C800000,
+            //   sample r9.xyzw, r9.xyxx, t[ct], s[ct]   ; r9.w = gateFlag
+            0x8B000045, 0x800000C2, 0x00155543,
+            0x001000F2, 0x00000009,
+            0x00100046, 0x00000009,
+            0x00107E46, ctTex,
+            0x00106000, ctSamp,
+            //   ge r9.x, l(0.5), r9.w            ; gate disabled?
+            0x0700001D, 0x00100012, 0x00000009, 0x00004001, 0x3F000000, 0x0010003A, 0x00000009,
+            //   or r8.z, r8.z, r9.x              ; keep = onGrid || gateOff
+            0x0700003C, 0x00100042, 0x00000008, 0x0010002A, 0x00000008, 0x0010000A, 0x00000009,
+            //   and r1.w, r1.w, r8.z             ; gated alpha (0 -> CT rows 0/1, black)
+            0x07000001, 0x00100082, 0x00000001, 0x0010003A, 0x00000001, 0x0010002A, 0x00000008,
             // mov r0.w, r1.w
             0x05000036, 0x00100082, 0x00000000, 0x0010003A, 0x00000001,
             // mad r1.y, r1.w, l(0.9375), l(0.015625)

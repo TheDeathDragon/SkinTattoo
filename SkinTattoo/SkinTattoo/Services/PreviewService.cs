@@ -2163,7 +2163,13 @@ public class PreviewService : IDisposable
             {
                 // skin.shpk + ColorTable export: per-layer emissive via embedded CT
                 var alloc = new RowPairAllocator();
-                alloc.ScanVanillaOccupation(new byte[] { 0, 0, 0, 0 }, 1, 1);
+                var exportNormScanSource = group.OrigNormDiskPath ?? group.NormDiskPath ?? group.NormGamePath;
+                var exportNormScan = !string.IsNullOrEmpty(exportNormScanSource)
+                    ? LoadRgbaResized(exportNormScanSource!, w, h) : null;
+                if (exportNormScan != null)
+                    alloc.ScanVanillaOccupationAlpha(exportNormScan, w, h);
+                else
+                    alloc.ScanVanillaOccupation(new byte[] { 0, 0, 0, 0 }, 1, 1);
                 alloc.TryAllocate(); // reserve row 0
                 foreach (var layer in visibleLayers)
                 {
@@ -2707,7 +2713,15 @@ public class PreviewService : IDisposable
                 var alloc = GetOrCreateAllocator(group);
                 if (!alloc.Scanned)
                 {
-                    alloc.ScanVanillaOccupation(new byte[] { 0, 0, 0, 0 }, 1, 1);
+                    // Real-baseline scan: exact k*17 alpha plateaus (mod skin IDs) pass
+                    // the v11f grid gate, so their pairs must never host a decal.
+                    var normScanSource = group.OrigNormDiskPath ?? group.NormDiskPath ?? group.NormGamePath;
+                    var normScan = !string.IsNullOrEmpty(normScanSource)
+                        ? LoadRgbaResized(normScanSource!, w, h) : null;
+                    if (normScan != null)
+                        alloc.ScanVanillaOccupationAlpha(normScan, w, h);
+                    else
+                        alloc.ScanVanillaOccupation(new byte[] { 0, 0, 0, 0 }, 1, 1);
                     alloc.TryAllocate(); // consume slot 0
                 }
                 foreach (var layer in group.Layers)
@@ -3231,17 +3245,35 @@ public class PreviewService : IDisposable
             for (int i = 3; i < needLen; i += 4)
                 output[i] = 0;
         }
+        // RowIndex mode keeps the baseline alpha essentially UNTOUCHED since v11f.
+        // Alpha doubles as the engine's skin-type LUT index, so the previous >=128
+        // plateau snap mutated vanilla shading (hardened lip contour, flattened
+        // body-mod skin IDs). The anti-aliased sweep that used to light allocated CT
+        // rows is suppressed in-shader instead: the v11f injection gates any alpha
+        // that is not an exact k*17 multiple (k <= 14) down to row 0.
+        //
+        // One residual leak remains: anti-aliased bands randomly contain EXACT k*17
+        // bytes (~1/18 of band pixels each) which pass the gate and light stray
+        // pixels along the lip contour. Nudge those off-grid by +1 -- a 1/255 shift
+        // of interpolation noise, invisible in the skin LUT. Large exact-value
+        // plateaus (legit mod skin IDs) are preserved; the allocator marks their
+        // pairs occupied so decals never share their row key.
         else if (alphaMode == NormAlphaMode.RowIndex)
         {
-            // Vanilla skin-type alpha is flat 0/255 plateaus, but the anti-aliased
-            // border between them sweeps every intermediate value -- the CT row
-            // lookup reads that sweep as row indices, so any allocated emissive row
-            // it crosses draws a glowing contour (the face lip-rim glow: lips are a
-            // 255 island in a 0 field). Snap to the nearest plateau: both 0 and 255
-            // land on reserved no-emissive rows, and cb7 skin-tone slot lookups
-            // still see valid plateau values (see the preserve rationale above).
+            var gridCount = new int[15];
             for (int i = 3; i < needLen; i += 4)
-                output[i] = output[i] >= 128 ? (byte)255 : (byte)0;
+            {
+                int a = output[i];
+                if (a != 0 && a < 255 && a % 17 == 0)
+                    gridCount[a / 17]++;
+            }
+            int plateauThreshold = Math.Max(1, needLen / 4 / 200);
+            for (int i = 3; i < needLen; i += 4)
+            {
+                int a = output[i];
+                if (a != 0 && a < 255 && a % 17 == 0 && gridCount[a / 17] <= plateauThreshold)
+                    output[i] = (byte)(a + 1);
+            }
         }
 
         bool anyPainted = false;

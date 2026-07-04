@@ -258,11 +258,15 @@ public static class MtrlFileWriter
         // Default fill. animSpeed=1 (not 0) because the patched PS pulse formula
         // divides by speed; speed=0 -> NaN -> darkens the surface. With amp=0
         // the formula collapses to em*(1+0*sin) = em, so vanilla rows stay dark.
+        // half15 = v11f grid-gate flag: per-layer CTs use exact k*17 row keys, so
+        // the shader gates every off-grid alpha (vanilla anti-aliased bands) to
+        // row 0. NormalEmissive ramp CTs leave it 0 (continuous sweep intended).
         for (int row = 0; row < 32; row++)
         {
             WriteHalf(row, 0, 1f); WriteHalf(row, 1, 1f); WriteHalf(row, 2, 1f);
             WriteHalf(row, 4, 1f); WriteHalf(row, 5, 1f); WriteHalf(row, 6, 1f);
             WriteHalf(row, 12, 1f);
+            WriteHalf(row, 15, 1f);
             WriteHalf(row, 16, 0.5f);
         }
 
