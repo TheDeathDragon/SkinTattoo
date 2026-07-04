@@ -205,6 +205,34 @@ public class PreviewService : IDisposable
     private readonly ConcurrentDictionary<string, byte> skinCtMaterials =
         new(StringComparer.OrdinalIgnoreCase);
 
+    // iris_ct preview unification: tracks which iris MtrlGamePaths entered the CT
+    // pipeline during Full Redraw. These materials get live updates via ColorTable
+    // swaps (per-eye color + anim params); the CBuffer hook path must never touch
+    // them -- UpdateEmissiveViaColorTable would stomp the per-eye rows with a
+    // uniform table.
+    private readonly ConcurrentDictionary<string, byte> irisCtMaterials =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private bool IsIrisCtMaterial(string mtrlGamePath)
+        => !string.IsNullOrEmpty(mtrlGamePath) && irisCtMaterials.ContainsKey(mtrlGamePath);
+
+    /// <summary>Build the iris CT from the group's current layer state (left = combined
+    /// emissive color, right = split layer's right-eye color when enabled).</summary>
+    private byte[] BuildIrisCtFromLayers(List<DecalLayer> layers, Vector3 leftColor)
+    {
+        var (mode, speed, amp, colorB) = GetDominantEmissiveAnim(layers);
+        DecalLayer? split = null;
+        foreach (var l in layers)
+        {
+            if (l.IsVisible && l.AffectsEmissive && l.EyeSplitEnabled
+                && !string.IsNullOrEmpty(l.ImagePath)) { split = l; break; }
+        }
+        var rightColor = split != null
+            ? split.EmissiveColorRight * split.EmissiveIntensityRight
+            : leftColor;
+        return MtrlFileWriter.BuildIrisColorTable(mode, speed, amp, colorB, leftColor, rightColor);
+    }
+
     // sampler ID for g_SamplerIndex per Penumbra ShpkFile.cs:17
     private const uint IndexSamplerId = 0x565F8FD8u;
     private const uint MaskSamplerId = 0x8A4E82B6u;
@@ -673,6 +701,7 @@ public class PreviewService : IDisposable
                 previewMtrlDiskPaths.TryRemove(group.MtrlGamePath, out _);
                 emissiveOffsets.TryRemove(group.MtrlGamePath, out _);
                 skinCtMaterials.TryRemove(group.MtrlGamePath, out _);
+                irisCtMaterials.TryRemove(group.MtrlGamePath, out _);
             }
         }
 
@@ -797,6 +826,10 @@ public class PreviewService : IDisposable
 
         foreach (var em in batch.Emissives)
         {
+            // iris CT materials never take the uniform-CT/CBuffer path (defensive --
+            // the worker's ctQueued guard already prevents these entries).
+            if (IsIrisCtMaterial(em.MtrlGamePath)) continue;
+
             // Legacy single-emissive path: only fires when no ColorTable entry was queued
             // for this material (skin.shpk fallback or non-Dawntrail layouts).
             // Dedupe: skip if this mtrl's color is identical to what we pushed last time  --
@@ -860,6 +893,7 @@ public class PreviewService : IDisposable
         {
             if (string.IsNullOrEmpty(group.MtrlGamePath)) continue;
             if (IsSkinCtMaterial(group.MtrlGamePath!)) continue;
+            if (IsIrisCtMaterial(group.MtrlGamePath!)) continue;
             if (!TryGetEmissiveOffset(group.MtrlGamePath!, out var emOff) || emOff <= 0) continue;
             if (!group.HasEmissiveLayers()) continue;
 
@@ -879,6 +913,9 @@ public class PreviewService : IDisposable
     {
         if (textureSwap == null) return;
         if (string.IsNullOrEmpty(group.MtrlGamePath)) return;
+        // iris CT materials update via ColorTable swap; the uniform-CT/CBuffer path
+        // below would clobber the per-eye rows.
+        if (IsIrisCtMaterial(group.MtrlGamePath!)) { TryWriteIrisCtDirect(charBase, group); return; }
 
         var mtrlDiskPath = GetMtrlDiskPath(group.MtrlGamePath!);
 
@@ -913,6 +950,25 @@ public class PreviewService : IDisposable
         var ctBytes = !diffuseEmExists && normalEmLayer != null
             ? MtrlFileWriter.BuildSkinColorTableNormalEmissive(normalEmLayer)
             : MtrlFileWriter.BuildSkinColorTablePerLayer(group.Layers);
+        var ctHalfs = System.Runtime.InteropServices.MemoryMarshal
+            .Cast<byte, Half>((ReadOnlySpan<byte>)ctBytes).ToArray();
+        var mtrlDiskPath = GetMtrlDiskPath(group.MtrlGamePath!);
+        textureSwap.ReplaceColorTableRaw(charBase, group.MtrlGamePath!, mtrlDiskPath, ctHalfs, 8, 32);
+        return true;
+    }
+
+    /// <summary>Iris CT live update: rebuild the per-eye ColorTable from current layer
+    /// state and swap it onto the live material. Returns true when the group is on the
+    /// iris CT path (preview unification) so callers skip the legacy CBuffer fallback.</summary>
+    public unsafe bool TryWriteIrisCtDirect(
+        FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CharacterBase* charBase, TargetGroup group)
+    {
+        if (textureSwap == null) return false;
+        if (string.IsNullOrEmpty(group.MtrlGamePath)) return false;
+        if (!IsIrisCtMaterial(group.MtrlGamePath!)) return false;
+
+        var leftColor = GetCombinedEmissiveColor(group.Layers);
+        var ctBytes = BuildIrisCtFromLayers(group.Layers, leftColor);
         var ctHalfs = System.Runtime.InteropServices.MemoryMarshal
             .Cast<byte, Half>((ReadOnlySpan<byte>)ctBytes).ToArray();
         var mtrlDiskPath = GetMtrlDiskPath(group.MtrlGamePath!);
@@ -1062,7 +1118,7 @@ public class PreviewService : IDisposable
         var jobs = new List<(TargetGroup Group, string DiffuseGamePath, string? DiskPath,
             string? NormGamePath, string? NormSourcePath, string? MtrlGamePath, int EmissiveOffset,
             string? IndexGamePath, string? IndexDiskPath,
-            List<LayerSnapshot> Layers, Vector3 EmissiveColor, bool IsSkinCt)>();
+            List<LayerSnapshot> Layers, Vector3 EmissiveColor, bool IsSkinCt, bool IsIrisCt)>();
 
         foreach (var group in project.Groups)
         {
@@ -1090,6 +1146,8 @@ public class PreviewService : IDisposable
             // skin.shpk ColorTable mode: set during Full Redraw when patched shader is active
             bool isSkinCt = !string.IsNullOrEmpty(group.MtrlGamePath)
                             && IsSkinCtMaterial(group.MtrlGamePath!);
+            bool isIrisCt = !string.IsNullOrEmpty(group.MtrlGamePath)
+                            && IsIrisCtMaterial(group.MtrlGamePath!);
 
             // Snapshot layer parameters so background thread reads stable data
             var snapshots = new List<LayerSnapshot>();
@@ -1105,7 +1163,7 @@ public class PreviewService : IDisposable
                 group.MtrlGamePath, emOff,
                 indexGame, indexDisk,
                 snapshots,
-                GetCombinedEmissiveColor(group.Layers), isSkinCt));
+                GetCombinedEmissiveColor(group.Layers), isSkinCt, isIrisCt));
         }
 
         Task.Run(() =>
@@ -1283,6 +1341,22 @@ public class PreviewService : IDisposable
                                     job.NormGamePath!, normDiskOut, normBgraBuf, baseTex.Width, baseTex.Height));
                             }
                         }
+                    }
+
+                    // iris CT (preview unification): rebuild the per-eye ColorTable so
+                    // color / anim / eye-split drags update in-place. Queuing a CT entry
+                    // sets ctQueued so the legacy CBuffer emissive entry below never
+                    // fires for this material.
+                    if (job.IsIrisCt && !string.IsNullOrEmpty(job.MtrlGamePath))
+                    {
+                        var irisCtBytes = BuildIrisCtFromLayers(layers, job.EmissiveColor);
+                        var irisCtHalfs = System.Runtime.InteropServices.MemoryMarshal
+                            .Cast<byte, Half>((ReadOnlySpan<byte>)irisCtBytes).ToArray();
+                        var mtrlDiskIris = GetMtrlDiskPath(job.MtrlGamePath!);
+                        ctEntries.Add(new ColorTableEntry(
+                            job.MtrlGamePath!, mtrlDiskIris, irisCtHalfs, 8, 32));
+                        lastBuiltColorTables[job.MtrlGamePath!] = (irisCtHalfs, 8, 32);
+                        ctQueued = true;
                     }
 
                     // Index map: rewrite R = rowPair*17, G = weight*255 (per Penumbra
@@ -1476,6 +1550,9 @@ public class PreviewService : IDisposable
         public float AnimSpeed, AnimAmplitude, AnimFreq, AnimDirAngle;
         public RippleDirMode AnimDirMode;
         public bool AnimDualColor;
+        public bool EyeSplitEnabled;
+        public Vector3 EmissiveColorRight;
+        public float EmissiveIntensityRight;
         public float Roughness, Metalness, SheenRate, SheenTint, SheenAperture;
         public float GradientAngleDeg;
         public float GradientScale;
@@ -1506,6 +1583,8 @@ public class PreviewService : IDisposable
             EmissiveColor = l.EmissiveColor; EmissiveColorB = l.EmissiveColorB; EmissiveIntensity = l.EmissiveIntensity;
             AnimMode = l.AnimMode; AnimSpeed = l.AnimSpeed; AnimAmplitude = l.AnimAmplitude; AnimFreq = l.AnimFreq;
             AnimDirMode = l.AnimDirMode; AnimDirAngle = l.AnimDirAngle; AnimDualColor = l.AnimDualColor;
+            EyeSplitEnabled = l.EyeSplitEnabled; EmissiveColorRight = l.EmissiveColorRight;
+            EmissiveIntensityRight = l.EmissiveIntensityRight;
             Roughness = l.Roughness; Metalness = l.Metalness;
             SheenRate = l.SheenRate; SheenTint = l.SheenTint; SheenAperture = l.SheenAperture;
             GradientAngleDeg = l.GradientAngleDeg; GradientScale = l.GradientScale;
@@ -1551,6 +1630,9 @@ public class PreviewService : IDisposable
             AnimDirMode = AnimDirMode,
             AnimDirAngle = AnimDirAngle,
             AnimDualColor = AnimDualColor,
+            EyeSplitEnabled = EyeSplitEnabled,
+            EmissiveColorRight = EmissiveColorRight,
+            EmissiveIntensityRight = EmissiveIntensityRight,
             Roughness = Roughness,
             Metalness = Metalness,
             SheenRate = SheenRate,
@@ -2000,6 +2082,7 @@ public class PreviewService : IDisposable
         indexMapGamePaths.Clear();
         lastAppliedEmissive.Clear();
         skinCtMaterials.Clear();
+        irisCtMaterials.Clear();
         foreach (var s in groupSessions.Values)
             s.Dispose("ResetSwapState");
         groupSessions.Clear();
@@ -2148,7 +2231,42 @@ public class PreviewService : IDisposable
                 var mtrlSource = group.OrigMtrlDiskPath ?? group.MtrlDiskPath ?? group.MtrlGamePath!;
                 var mtrlOut = StagingPathFor(stagingDir, group.MtrlGamePath!);
                 Directory.CreateDirectory(Path.GetDirectoryName(mtrlOut)!);
-                if (TryBuildEmissiveMtrl(mtrlSource, mtrlOut, emissiveColor, out _))
+
+                // Iris with animation or per-eye split: deploy the patched iris_ct.shpk so
+                // the exported mod keeps the glow pulse / per-eye colors in-shader (no
+                // EmissiveCBufferHook in a static pmp). Falls back to the plain
+                // static-glow mtrl when patching is unavailable.
+                bool irisCtDone = false;
+                if (IsIrisMaterial(group))
+                {
+                    var (irisAnimMode, irisAnimSpeed, irisAnimAmp, irisAnimColorB) =
+                        GetDominantEmissiveAnim(visibleLayers);
+                    var splitLayer = visibleLayers.FirstOrDefault(
+                        l => l.AffectsEmissive && l.EyeSplitEnabled);
+                    if ((irisAnimMode != EmissiveAnimMode.None || splitLayer != null)
+                        && EnsurePatchedIrisShpkPath())
+                    {
+                        var rightColor = splitLayer != null
+                            ? splitLayer.EmissiveColorRight * splitLayer.EmissiveIntensityRight
+                            : emissiveColor;
+                        var irisCt = MtrlFileWriter.BuildIrisColorTable(
+                            irisAnimMode, irisAnimSpeed, irisAnimAmp, irisAnimColorB,
+                            emissiveColor, rightColor);
+                        if (TryBuildIrisEmissiveMtrlWithColorTable(
+                                mtrlSource, mtrlOut, emissiveColor, irisCt, out _))
+                        {
+                            redirects[group.MtrlGamePath!] = ToForwardSlash(group.MtrlGamePath!);
+                            var irisShpkOut = StagingPathFor(stagingDir, IrisShpkGamePath);
+                            Directory.CreateDirectory(Path.GetDirectoryName(irisShpkOut)!);
+                            File.Copy(patchedIrisShpkPath!, irisShpkOut, overwrite: true);
+                            redirects[IrisShpkGamePath] = ToForwardSlash(IrisShpkGamePath);
+                            irisCtDone = true;
+                            DebugServer.AppendLog($"[Export] {group.Name}: iris_ct path (mode={irisAnimMode}, eyeSplit={splitLayer != null})");
+                        }
+                    }
+                }
+
+                if (!irisCtDone && TryBuildEmissiveMtrl(mtrlSource, mtrlOut, emissiveColor, out _))
                 {
                     redirects[group.MtrlGamePath!] = ToForwardSlash(group.MtrlGamePath!);
                 }
@@ -2661,7 +2779,44 @@ public class PreviewService : IDisposable
                 // Original paths: legacy emissive (CBuffer) + character.shpk PBR
                 var emissiveColor = GetCombinedEmissiveColor(group.Layers);
 
-                if (TryBuildEmissiveMtrl(mtrlDisk ?? group.MtrlGamePath!, mtrlOutPath, emissiveColor, out var emOffset))
+                // iris CT preview unification: same gate as export (animation or per-eye
+                // split configured) -- the preview temp mod then serves the exact shader +
+                // mtrl the exported pmp would, and per-eye colors/anim render live.
+                bool irisCtPreview = false;
+                if (hasEmissive && IsIrisMaterial(group))
+                {
+                    var (irisMode, _, _, _) = GetDominantEmissiveAnim(group.Layers);
+                    bool anySplit = group.Layers.Any(l => l.IsVisible && l.AffectsEmissive
+                        && l.EyeSplitEnabled && !string.IsNullOrEmpty(l.ImagePath));
+                    if ((irisMode != EmissiveAnimMode.None || anySplit) && EnsurePatchedIrisShpkPath())
+                    {
+                        var irisCt = BuildIrisCtFromLayers(group.Layers, emissiveColor);
+                        if (TryBuildIrisEmissiveMtrlWithColorTable(
+                                mtrlDisk ?? group.MtrlGamePath!, mtrlOutPath, emissiveColor, irisCt,
+                                out var emOffIris))
+                        {
+                            redirects[group.MtrlGamePath!] = mtrlOutPath;
+                            redirects[IrisShpkGamePath] = patchedIrisShpkPath!;
+                            previewMtrlDiskPaths[group.MtrlGamePath!] = mtrlOutPath;
+                            var irisSession = GetOrCreateSession(group);
+                            irisSession.MtrlGamePath = group.MtrlGamePath;
+                            irisSession.MtrlDiskPath = mtrlOutPath;
+                            if (emOffIris >= 0)
+                            {
+                                emissiveOffsets[group.MtrlGamePath!] = emOffIris;
+                                irisSession.EmissiveCBufferOffset = emOffIris;
+                            }
+                            irisCtMaterials[group.MtrlGamePath!] = 1;
+                            irisCtPreview = true;
+                            DebugServer.AppendLog($"[IrisCT] Preview CT path for {group.Name} (eyeSplit={anySplit})");
+                        }
+                    }
+                }
+                if (!irisCtPreview && !string.IsNullOrEmpty(group.MtrlGamePath))
+                    irisCtMaterials.TryRemove(group.MtrlGamePath!, out _);
+
+                if (!irisCtPreview
+                    && TryBuildEmissiveMtrl(mtrlDisk ?? group.MtrlGamePath!, mtrlOutPath, emissiveColor, out var emOffset))
                 {
                     redirects[group.MtrlGamePath!] = mtrlOutPath;
                     previewMtrlDiskPaths[group.MtrlGamePath!] = mtrlOutPath;
@@ -3616,6 +3771,49 @@ public class PreviewService : IDisposable
         }
     }
 
+    private bool TryBuildIrisEmissiveMtrlWithColorTable(string mtrlPath, string outputPath,
+        Vector3 emissiveColor, byte[] colorTableBytes, out int emissiveByteOffset)
+    {
+        emissiveByteOffset = -1;
+        try
+        {
+            byte[] mtrlBytes;
+            if (File.Exists(mtrlPath))
+                mtrlBytes = File.ReadAllBytes(mtrlPath);
+            else
+            {
+                var pack = meshExtractor.GetSqPackInstance();
+                if (pack == null) return false;
+                var sqResult = pack.GetFile(mtrlPath);
+                if (sqResult == null) return false;
+                mtrlBytes = sqResult.Value.file.RawData.ToArray();
+            }
+
+            // Lumina mis-parses mtrls that already carry a Dawntrail ColorTable; iris
+            // mtrls normally have none, but bail to the static path if one does.
+            int existingDataSet = mtrlBytes.Length > 7 ? mtrlBytes[6] | (mtrlBytes[7] << 8) : 0;
+            if (existingDataSet != 0)
+            {
+                DebugServer.AppendLog($"[Export] iris mtrl already has a ColorTable ({existingDataSet}B), skipping CT anim path");
+                return false;
+            }
+
+            var tempPath = Path.Combine(outputDir, $"temp_{Guid.NewGuid():N}.mtrl");
+            File.WriteAllBytes(tempPath, mtrlBytes);
+            var lumina = meshExtractor.GetLuminaForDisk();
+            var mtrl = lumina!.GetFileFromDisk<MtrlFile>(tempPath);
+            try { File.Delete(tempPath); } catch { }
+
+            return MtrlFileWriter.WriteIrisEmissiveMtrlWithColorTable(
+                mtrl, mtrlBytes, outputPath, emissiveColor, colorTableBytes, out emissiveByteOffset);
+        }
+        catch (Exception ex)
+        {
+            DebugServer.AppendLog($"[PreviewService] Iris EmissiveMtrl+CT error: {ex.Message}");
+            return false;
+        }
+    }
+
     private bool TryBuildEmissiveMtrl(string mtrlPath, string outputPath, Vector3 emissiveColor, out int emissiveByteOffset)
     {
         emissiveByteOffset = -1;
@@ -3698,6 +3896,13 @@ public class PreviewService : IDisposable
     private string? patchedSkinShpkPath;
     private bool skinShpkConflictChecked;
     private bool shpkNodeDumped;
+
+    // iris_ct.shpk: same rename-deploy mechanism, export-only for now. Preview keeps
+    // driving eye-glow animation through EmissiveCBufferHook (the temp mod's plain-iris
+    // mtrl outranks the exported mod, so the two mechanisms never run simultaneously).
+    private const string IrisShpkGamePath = "shader/sm5/shpk/iris_ct.shpk";
+    private const string VanillaIrisShpkGamePath = "shader/sm5/shpk/iris.shpk";
+    private string? patchedIrisShpkPath;
 
     /// <summary>
     /// Non-null when another Penumbra mod redirects skin.shpk before our temp mod.
@@ -3882,15 +4087,82 @@ public class PreviewService : IDisposable
         }
     }
 
+    // Idempotent iris counterpart of EnsurePatchedSkinShpkPath; used by the export path.
+    private bool EnsurePatchedIrisShpkPath()
+    {
+        if (patchedIrisShpkPath != null && File.Exists(patchedIrisShpkPath))
+            return true;
+
+        try
+        {
+            var pack = meshExtractor.GetSqPackInstance();
+            var sqResult = pack?.GetFile(VanillaIrisShpkGamePath);
+            if (sqResult == null)
+            {
+                DebugServer.AppendLog("[IrisShpk] Cannot read vanilla iris.shpk from SqPack");
+                return false;
+            }
+            var vanillaBytes = sqResult.Value.file.RawData.ToArray();
+            var vanillaHash8 = Sha256Hex(vanillaBytes).Substring(0, 8);
+
+            var baseName = $"iris_ct_{IrisShpkPatcher.SchemaVersion}_{vanillaHash8}";
+            var candidate = Path.Combine(outputDir, baseName + ".shpk");
+            var sidecar = candidate + ".sha256";
+
+            CleanupOrphanShpkCache(baseName, "iris_ct_*");
+
+            if (File.Exists(candidate) && File.Exists(sidecar))
+            {
+                try
+                {
+                    var cachedBytes = File.ReadAllBytes(candidate);
+                    var actual = Sha256Hex(cachedBytes);
+                    var expected = File.ReadAllText(sidecar).Trim();
+                    if (string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+                    {
+                        patchedIrisShpkPath = candidate;
+                        DebugServer.AppendLog($"[IrisShpk] Cache hit {baseName}.shpk (hash verified)");
+                        return true;
+                    }
+                    DebugServer.AppendLog($"[IrisShpk] Cache hash mismatch on {baseName}.shpk; rebuilding");
+                }
+                catch (Exception ex)
+                {
+                    DebugServer.AppendLog($"[IrisShpk] Cache verify failed: {ex.Message}; rebuilding");
+                }
+                TryDelete(candidate);
+                TryDelete(sidecar);
+            }
+
+            var patched = IrisShpkPatcher.Patch(vanillaBytes);
+            if (patched == null)
+            {
+                DebugServer.AppendLog("[IrisShpk] Runtime patching failed");
+                return false;
+            }
+            var patchedHash = Sha256Hex(patched);
+            File.WriteAllBytes(candidate, patched);
+            File.WriteAllText(sidecar, patchedHash);
+            DebugServer.AppendLog($"[IrisShpk] Runtime-patched iris.shpk ({vanillaBytes.Length} -> {patched.Length} bytes) -> {baseName}.shpk");
+            patchedIrisShpkPath = candidate;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DebugServer.AppendLog($"[IrisShpk] Ensure failed: {ex.Message}");
+            return false;
+        }
+    }
+
     // Remove cache files from previous schema versions / vanilla hashes so outputDir
     // doesn't accumulate orphaned 10MB blobs across plugin upgrades.
-    private void CleanupOrphanShpkCache(string keepBaseName)
+    private void CleanupOrphanShpkCache(string keepBaseName, string pattern = "skin_ct_*")
     {
         var keepShpk = keepBaseName + ".shpk";
         var keepSidecar = keepBaseName + ".shpk.sha256";
         try
         {
-            foreach (var path in Directory.EnumerateFiles(outputDir, "skin_ct_*"))
+            foreach (var path in Directory.EnumerateFiles(outputDir, pattern))
             {
                 var name = Path.GetFileName(path);
                 if (name.Equals(keepShpk, StringComparison.OrdinalIgnoreCase)

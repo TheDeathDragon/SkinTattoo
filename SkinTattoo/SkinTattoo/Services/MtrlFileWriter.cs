@@ -554,6 +554,142 @@ public static class MtrlFileWriter
         }
     }
 
+    private const string IrisCtShaderPackageName = "iris_ct.shpk";
+
+    /// <summary>
+    /// Build the ColorTable consumed by the IrisShpkPatcher iris2 payload. Two row pairs
+    /// selected in-shader by vertex color v1.y: rows 2/3 = LEFT eye, rows 4/5 = RIGHT
+    /// eye. Per row: col2 = glow color PRE-SQUARED (the shader replaces the native
+    /// g_EmissiveColor^2 * mask term, so CT colors must carry the squared scale),
+    /// col3 = speed/amp/mode, col4 = colorB^2, col6.z = dualActive.
+    /// </summary>
+    public static byte[] BuildIrisColorTable(
+        Core.EmissiveAnimMode mode, float speed, float amp, Vector3 colorB,
+        Vector3 leftColor, Vector3 rightColor)
+    {
+        var bytes = new byte[2048];
+
+        void WriteHalf(int row, int idx, float value)
+        {
+            int off = (row * 32 + idx) * 2;
+            BitConverter.TryWriteBytes(bytes.AsSpan(off, 2), (Half)value);
+        }
+
+        // speed=1 default on every row mirrors the skin CT convention (see
+        // BuildSkinColorTablePerLayer default-fill note).
+        for (int row = 0; row < 32; row++)
+            WriteHalf(row, 12, 1f);
+
+        bool hasAnim = mode != Core.EmissiveAnimMode.None;
+        float animSpeed = hasAnim ? speed : 1f;
+        float animAmp = hasAnim ? amp : 0f;
+        float animMode = mode switch
+        {
+            Core.EmissiveAnimMode.Flicker => 1f,
+            Core.EmissiveAnimMode.Gradient => 2f,
+            Core.EmissiveAnimMode.Ripple => 3f,
+            _ => 0f,
+        };
+        bool dualActive = mode == Core.EmissiveAnimMode.Gradient;
+        var colorBSq = colorB * colorB;
+
+        void WriteEye(int rowLower, Vector3 colorA)
+        {
+            var colorASq = colorA * colorA;
+            for (int r = rowLower; r <= rowLower + 1; r++)
+            {
+                WriteHalf(r, 8, colorASq.X);
+                WriteHalf(r, 9, colorASq.Y);
+                WriteHalf(r, 10, colorASq.Z);
+                WriteHalf(r, 12, animSpeed);
+                WriteHalf(r, 13, animAmp);
+                WriteHalf(r, 14, animMode);
+                WriteHalf(r, 17, colorBSq.X);
+                WriteHalf(r, 18, colorBSq.Y);
+                WriteHalf(r, 19, colorBSq.Z);
+                WriteHalf(r, 26, dualActive ? 1f : 0f);
+            }
+        }
+
+        WriteEye(2, leftColor);
+        WriteEye(4, rightColor);
+
+        return bytes;
+    }
+
+    /// <summary>
+    /// Iris variant of the CT mtrl build: keeps the mtrl's native shader keys (iris family
+    /// routing untouched), writes g_EmissiveColor + g_IrisRingEmissiveIntensity=1, embeds
+    /// the anim ColorTable and points ShaderPackageName at iris_ct.shpk.
+    /// </summary>
+    public static bool WriteIrisEmissiveMtrlWithColorTable(MtrlFile mtrl, byte[] originalBytes,
+        string outputPath, Vector3 emissiveColor, byte[] colorTableBytes, out int emissiveByteOffset)
+    {
+        emissiveByteOffset = -1;
+        try
+        {
+            int addlDataOffset = 16
+                + mtrl.FileHeader.TextureCount * 4
+                + mtrl.FileHeader.UvSetCount * 4
+                + mtrl.FileHeader.ColorSetCount * 4
+                + mtrl.FileHeader.StringTableSize;
+            int addlDataSize = mtrl.FileHeader.AdditionalDataSize;
+            byte[] additionalData = new byte[Math.Max(addlDataSize, 4)];
+            if (addlDataSize > 0 && addlDataOffset + addlDataSize <= originalBytes.Length)
+                Array.Copy(originalBytes, addlDataOffset, additionalData, 0, addlDataSize);
+
+            uint flags = additionalData.Length >= 4 ? BitConverter.ToUInt32(additionalData, 0) : 0;
+            flags |= 0x4;
+            flags |= (3u << 4);
+            flags |= (5u << 8);
+            BitConverter.TryWriteBytes(additionalData.AsSpan(0, 4), flags);
+
+            var shaderKeys = (Lumina.Data.Parsing.ShaderKey[])mtrl.ShaderKeys.Clone();
+            var constants = new List<Constant>(mtrl.Constants);
+            var shaderValues = new List<float>(mtrl.ShaderValues);
+            int emissiveOffsetLocal = -1;
+
+            void SetConstant(uint id, int floatCount, params float[] values)
+            {
+                for (int i = 0; i < constants.Count; i++)
+                {
+                    if (constants[i].ConstantId != id) continue;
+                    int fi = constants[i].ValueOffset / 4;
+                    for (int k = 0; k < floatCount && fi + k < shaderValues.Count; k++)
+                        shaderValues[fi + k] = values[k];
+                    if (id == ConstantEmissiveColor) emissiveOffsetLocal = constants[i].ValueOffset;
+                    return;
+                }
+                int off = shaderValues.Count * 4;
+                constants.Add(new Constant
+                {
+                    ConstantId = id,
+                    ValueOffset = (ushort)off,
+                    ValueSize = (ushort)(floatCount * 4),
+                });
+                for (int k = 0; k < floatCount; k++)
+                    shaderValues.Add(values[k]);
+                if (id == ConstantEmissiveColor) emissiveOffsetLocal = off;
+            }
+
+            SetConstant(ConstantEmissiveColor, 3, emissiveColor.X, emissiveColor.Y, emissiveColor.Z);
+            SetConstant(ConstantIrisRingEmissiveIntensity, 1, 1.0f);
+            emissiveByteOffset = emissiveOffsetLocal;
+
+            var (newStrings, newShpkOff, newStrSize) = RewriteShaderPackageName(mtrl, IrisCtShaderPackageName);
+
+            RebuildMtrl(mtrl, shaderKeys, constants.ToArray(), mtrl.Samplers,
+                shaderValues.ToArray(), additionalData, colorTableBytes, outputPath,
+                newStrings, newShpkOff, newStrSize);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Http.DebugServer.AppendLog($"[MtrlWriter] Iris CT error: {ex.Message}");
+            return false;
+        }
+    }
+
     /// <summary>Return (strings blob, new ShaderPackageName offset, new StringTableSize) with
     /// newName appended to the strings table. Idempotent: if the current name already equals
     /// newName, returns the original unchanged. Result size is 4-byte aligned for safety.</summary>

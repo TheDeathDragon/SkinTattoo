@@ -16,7 +16,7 @@ namespace SkinTattoo.Services;
 /// </summary>
 public static class SkinShpkPatcher
 {
-    private const uint CrcSamplerTable = 0x2005679F;
+    internal const uint CrcSamplerTable = 0x2005679F;
 
     // Material key CRCs. When `Mode == ValEmissive_v11b`, MtrlFileWriter forces the mtrl
     // onto (ValEmissive, ValDecalEmissive, ValVertexColorEmissive) so node selector picks
@@ -444,10 +444,10 @@ public static class SkinShpkPatcher
 
     // -- DXBC Container --------------------------------------------------
 
-    private static bool IsDxbc(byte[] data) => data.Length >= 32
+    internal static bool IsDxbc(byte[] data) => data.Length >= 32
         && data[0] == (byte)'D' && data[1] == (byte)'X' && data[2] == (byte)'B' && data[3] == (byte)'C';
 
-    private static byte[]? ExtractShexData(byte[] dxbc)
+    internal static byte[]? ExtractShexData(byte[] dxbc)
     {
         int chunkCount = BinaryPrimitives.ReadInt32LittleEndian(dxbc.AsSpan(28));
         for (int i = 0; i < chunkCount; i++)
@@ -462,7 +462,7 @@ public static class SkinShpkPatcher
         return null;
     }
 
-    private static byte[] RebuildDxbc(byte[] original, byte[] newShexData)
+    internal static byte[] RebuildDxbc(byte[] original, byte[] newShexData)
     {
         int chunkCount = BinaryPrimitives.ReadInt32LittleEndian(original.AsSpan(28));
         var chunks = new List<(uint Magic, byte[] Data)>();
@@ -514,7 +514,7 @@ public static class SkinShpkPatcher
 
     // -- SHEX Patching ---------------------------------------------------
 
-    private static byte[]? PatchShexAddDeclarations(byte[] shexData, int samplerReg, int textureReg)
+    internal static byte[]? PatchShexAddDeclarations(byte[] shexData, int samplerReg, int textureReg)
     {
         // Find end of declaration region (opcodes 0x58-0x6A)
         int pos = 8; // skip version + token count
@@ -662,7 +662,7 @@ public static class SkinShpkPatcher
     /// <summary>Scan the SHEX declaration region for the highest declared sampler slot,
     /// highest texture-ish slot (typed + raw + structured -- pass-bound g-buffer inputs
     /// live here without appearing in the shpk resource table), and dcl_temps count.</summary>
-    private static (int MaxSampler, int MaxTexture, int Temps) ScanShexDecls(byte[] shexData)
+    internal static (int MaxSampler, int MaxTexture, int Temps) ScanShexDecls(byte[] shexData)
     {
         int maxS = -1, maxT = -1, temps = 0;
         int pos = 8;
@@ -1362,7 +1362,7 @@ public static class SkinShpkPatcher
 
     // -- SHPK Parse/Rebuild ----------------------------------------------
 
-    private class ShpkResource
+    internal class ShpkResource
     {
         public uint Id;
         public int StrOff;
@@ -1372,7 +1372,7 @@ public static class SkinShpkPatcher
         public ushort Size;
     }
 
-    private class ShpkShader
+    internal class ShpkShader
     {
         public int BlobOff;
         public int BlobSz;
@@ -1381,7 +1381,7 @@ public static class SkinShpkPatcher
         public List<ShpkResource> Resources = new();
     }
 
-    private class ShpkNode
+    internal class ShpkNode
     {
         public uint Selector;
         public int PassCount;
@@ -1394,7 +1394,7 @@ public static class SkinShpkPatcher
         public List<(uint Id, uint Vs, uint Ps, uint A, uint B, uint C)> Passes = new();
     }
 
-    private class ShpkFile
+    internal class ShpkFile
     {
         public uint Version, Dx;
         public int VsCount, PsCount;
@@ -1424,7 +1424,7 @@ public static class SkinShpkPatcher
         public List<byte> StringSection = new();
     }
 
-    private static ShpkFile ParseShpk(byte[] data)
+    internal static ShpkFile ParseShpk(byte[] data)
     {
         using var ms = new MemoryStream(data);
         using var r = new BinaryReader(ms);
@@ -1737,7 +1737,7 @@ public static class SkinShpkPatcher
         catch (Exception ex) { Log($"NodeDump failed: {ex.Message}"); }
     }
 
-    private static int AddString(ShpkFile shpk, string s)
+    internal static int AddString(ShpkFile shpk, string s)
     {
         int offset = shpk.StringSection.Count;
         shpk.StringSection.AddRange(Encoding.ASCII.GetBytes(s));
@@ -1745,7 +1745,7 @@ public static class SkinShpkPatcher
         return offset;
     }
 
-    private static byte[] RebuildShpk(ShpkFile shpk)
+    internal static byte[] RebuildShpk(ShpkFile shpk)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
@@ -1847,7 +1847,7 @@ public static class SkinShpkPatcher
 
     // -- Helpers ----------------------------------------------------------
 
-    private static byte[] ToLeBytes(params uint[] values)
+    internal static byte[] ToLeBytes(params uint[] values)
     {
         var result = new byte[values.Length * 4];
         for (int i = 0; i < values.Length; i++)
@@ -1855,7 +1855,7 @@ public static class SkinShpkPatcher
         return result;
     }
 
-    private static int FindPattern(byte[] haystack, byte[] needle)
+    internal static int FindPattern(byte[] haystack, byte[] needle)
     {
         int limit = haystack.Length - needle.Length;
         for (int i = 0; i <= limit; i++)
@@ -1870,7 +1870,7 @@ public static class SkinShpkPatcher
         return -1;
     }
 
-    private static bool MatchesAt(byte[] data, int offset, byte[] pattern)
+    internal static bool MatchesAt(byte[] data, int offset, byte[] pattern)
     {
         if (offset + pattern.Length > data.Length) return false;
         for (int i = 0; i < pattern.Length; i++)

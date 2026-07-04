@@ -583,6 +583,37 @@ public partial class MainWindow
                 if (ImGui.DragFloat("##emI", ref emI, 0.05f, 0.1f, 10f, "%.2f"))
                 { layer.EmissiveIntensity = emI; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
 
+                // Iris-only per-eye split: primary color = left eye, extra picker = right.
+                if (group.MtrlGamePath?.Contains("_iri_", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    var eyeSplit = layer.EyeSplitEnabled;
+                    if (ImGui.Checkbox(Strings.T("label.eye_split"), ref eyeSplit))
+                    {
+                        // Toggling split switches the preview mtrl between the legacy and
+                        // iris_ct packages -- structural change, needs a full redraw.
+                        layer.EyeSplitEnabled = eyeSplit;
+                        previewService.InvalidateEmissiveForGroup(group);
+                        MarkPreviewDirty(immediate: true);
+                    }
+                    ImGui.SameLine();
+                    DrawInfoIcon(Strings.T("eye_split.tip"));
+                    if (layer.EyeSplitEnabled)
+                    {
+                        var emRight = layer.EmissiveColorRight;
+                        if (ImGui.ColorEdit3("##emColorRight", ref emRight,
+                            ImGuiColorEditFlags.NoLabel | ImGuiColorEditFlags.NoInputs))
+                        { layer.EmissiveColorRight = emRight; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
+                        ImGui.SameLine();
+                        ImGui.AlignTextToFramePadding();
+                        ImGui.TextDisabled(Strings.T("label.right_intensity"));
+                        ImGui.SameLine();
+                        ImGui.SetNextItemWidth(-1);
+                        var emIRight = layer.EmissiveIntensityRight;
+                        if (ImGui.DragFloat("##emIRight", ref emIRight, 0.05f, 0.1f, 10f, "%.2f"))
+                        { layer.EmissiveIntensityRight = emIRight; MarkPreviewDirty(); TryDirectEmissiveUpdate(group); }
+                    }
+                }
+
                 const float animLabelW = 80f;
                 ImGui.AlignTextToFramePadding(); ImGui.TextDisabled(Strings.T("label.anim_mode")); ImGui.SameLine(animLabelW);
                 ImGui.SetNextItemWidth(-1);

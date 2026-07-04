@@ -38,6 +38,12 @@ public class SavedLayer
     public int AnimDirMode { get; set; } = 0;
     public float AnimDirAngle { get; set; } = 0f;
     public bool AnimDualColor { get; set; } = false;
+    // Iris per-eye split: right-eye emissive (left eye = primary EmissiveColor fields).
+    public bool EyeSplitEnabled { get; set; } = false;
+    public float EmissiveColorRight_R { get; set; } = 1f;
+    public float EmissiveColorRight_G { get; set; } = 1f;
+    public float EmissiveColorRight_B { get; set; } = 1f;
+    public float EmissiveIntensityRight { get; set; } = 1f;
     public int EmissiveMask { get; set; }
     public float EmissiveMaskFalloff { get; set; } = 0.5f;
     public float GradientAngleDeg { get; set; }

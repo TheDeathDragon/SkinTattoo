@@ -1263,6 +1263,10 @@ public partial class MainWindow : Window, IDisposable
         if (previewService.TryWriteSkinCtDirect(charBase, group))
             return;
 
+        // iris CT path (preview unification): per-eye colors + anim live in the CT.
+        if (previewService.TryWriteIrisCtDirect(charBase, group))
+            return;
+
         var color = previewService.GetCombinedEmissiveColorForGroup(group);
         previewService.WriteEmissiveColorDirect(charBase, group, color);
     }

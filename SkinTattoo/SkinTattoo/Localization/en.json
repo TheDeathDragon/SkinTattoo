@@ -296,6 +296,8 @@
     "range": "Range",
     "offset": "Offset",
     "intensity": "Intensity",
+    "eye_split": "Per-Eye Split",
+    "right_intensity": "R Intensity",
     "anim_mode": "Anim",
     "speed": "Speed",
     "amplitude": "Amp",
@@ -479,6 +481,9 @@
     "normal": "Normal",
     "tooltip": "Which game texture the layer paints into.\nDiffuse — color, default\nMask — material mask, spec/roughness\nNormal — normal map, bump detail",
     "auto_normal_detected": "PNG looks like a normal map — target set to Normal."
+  },
+  "eye_split": {
+    "tip": "The color above drives the left eye, this one drives the right eye - both preview and exported mods render true per-eye colors live"
   },
   "emissive_normal": {
     "detected": "Detected emissive mask in Normal alpha — glow controlled by this layer",

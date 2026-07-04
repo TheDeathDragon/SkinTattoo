@@ -229,6 +229,11 @@ public class DecalProject
         AnimDirMode = (int)l.AnimDirMode,
         AnimDirAngle = l.AnimDirAngle,
         AnimDualColor = l.AnimDualColor,
+        EyeSplitEnabled = l.EyeSplitEnabled,
+        EmissiveColorRight_R = l.EmissiveColorRight.X,
+        EmissiveColorRight_G = l.EmissiveColorRight.Y,
+        EmissiveColorRight_B = l.EmissiveColorRight.Z,
+        EmissiveIntensityRight = l.EmissiveIntensityRight,
         EmissiveMask = (int)l.FadeMask,
         EmissiveMaskFalloff = l.FadeMaskFalloff,
         GradientAngleDeg = l.GradientAngleDeg,
@@ -312,6 +317,9 @@ public class DecalProject
         l.AnimDirMode = (RippleDirMode)s.AnimDirMode;
         l.AnimDirAngle = s.AnimDirAngle;
         l.AnimDualColor = s.AnimDualColor;
+        l.EyeSplitEnabled = s.EyeSplitEnabled;
+        l.EmissiveColorRight = new Vector3(s.EmissiveColorRight_R, s.EmissiveColorRight_G, s.EmissiveColorRight_B);
+        l.EmissiveIntensityRight = legacyFallback && s.EmissiveIntensityRight <= 0 ? 1f : s.EmissiveIntensityRight;
         l.FadeMask = (LayerFadeMask)s.EmissiveMask;
         l.FadeMaskFalloff = s.EmissiveMaskFalloff;
         l.GradientAngleDeg = s.GradientAngleDeg;

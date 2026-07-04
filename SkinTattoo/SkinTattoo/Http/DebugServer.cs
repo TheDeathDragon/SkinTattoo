@@ -198,7 +198,11 @@ internal sealed class ApiController : WebApiController
     [Route(HttpVerbs.Put, "/layer/{id}")]
     public async Task<object> PutLayer(int id)
     {
+        // Optional ?group=<idx> targets a specific group; default = selected group.
         var group = _project.SelectedGroup;
+        var q = HttpContext.GetRequestQueryData();
+        if (int.TryParse(q["group"], out var gi) && gi >= 0 && gi < _project.Groups.Count)
+            group = _project.Groups[gi];
         if (group == null || id < 0 || id >= group.Layers.Count)
         {
             HttpContext.Response.StatusCode = 404;
@@ -1596,6 +1600,17 @@ internal sealed class ApiController : WebApiController
         specularColor = new { r = l.SpecularColor.X, g = l.SpecularColor.Y, b = l.SpecularColor.Z },
         emissiveColor = new { r = l.EmissiveColor.X, g = l.EmissiveColor.Y, b = l.EmissiveColor.Z },
         emissiveIntensity = l.EmissiveIntensity,
+        animMode = l.AnimMode.ToString(),
+        animSpeed = l.AnimSpeed,
+        animAmplitude = l.AnimAmplitude,
+        emissiveColorB = new { r = l.EmissiveColorB.X, g = l.EmissiveColorB.Y, b = l.EmissiveColorB.Z },
+        animFreq = l.AnimFreq,
+        animDirMode = l.AnimDirMode.ToString(),
+        animDirAngle = l.AnimDirAngle,
+        animDualColor = l.AnimDualColor,
+        eyeSplitEnabled = l.EyeSplitEnabled,
+        emissiveColorRight = new { r = l.EmissiveColorRight.X, g = l.EmissiveColorRight.Y, b = l.EmissiveColorRight.Z },
+        emissiveIntensityRight = l.EmissiveIntensityRight,
         roughness = l.Roughness,
         metalness = l.Metalness,
         sheenRate = l.SheenRate,
@@ -1660,6 +1675,55 @@ internal sealed class ApiController : WebApiController
 
             if (root.TryGetProperty("emissiveIntensity", out v) && v.ValueKind == JsonValueKind.Number)
                 layer.EmissiveIntensity = v.GetSingle();
+
+            if (root.TryGetProperty("animMode", out v) && v.ValueKind == JsonValueKind.String)
+            {
+                if (Enum.TryParse<EmissiveAnimMode>(v.GetString(), ignoreCase: true, out var am))
+                    layer.AnimMode = am;
+            }
+
+            if (root.TryGetProperty("animSpeed", out v) && v.ValueKind == JsonValueKind.Number)
+                layer.AnimSpeed = v.GetSingle();
+
+            if (root.TryGetProperty("animAmplitude", out v) && v.ValueKind == JsonValueKind.Number)
+                layer.AnimAmplitude = v.GetSingle();
+
+            if (root.TryGetProperty("emissiveColorB", out v) && v.ValueKind == JsonValueKind.Object)
+            {
+                float r = v.TryGetProperty("r", out var cr) ? cr.GetSingle() : layer.EmissiveColorB.X;
+                float g = v.TryGetProperty("g", out var cg) ? cg.GetSingle() : layer.EmissiveColorB.Y;
+                float b = v.TryGetProperty("b", out var cb) ? cb.GetSingle() : layer.EmissiveColorB.Z;
+                layer.EmissiveColorB = new System.Numerics.Vector3(r, g, b);
+            }
+
+            if (root.TryGetProperty("animFreq", out v) && v.ValueKind == JsonValueKind.Number)
+                layer.AnimFreq = v.GetSingle();
+
+            if (root.TryGetProperty("animDirMode", out v) && v.ValueKind == JsonValueKind.String)
+            {
+                if (Enum.TryParse<RippleDirMode>(v.GetString(), ignoreCase: true, out var dm))
+                    layer.AnimDirMode = dm;
+            }
+
+            if (root.TryGetProperty("animDirAngle", out v) && v.ValueKind == JsonValueKind.Number)
+                layer.AnimDirAngle = v.GetSingle();
+
+            if (root.TryGetProperty("animDualColor", out v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                layer.AnimDualColor = v.GetBoolean();
+
+            if (root.TryGetProperty("eyeSplitEnabled", out v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                layer.EyeSplitEnabled = v.GetBoolean();
+
+            if (root.TryGetProperty("emissiveColorRight", out v) && v.ValueKind == JsonValueKind.Object)
+            {
+                float r = v.TryGetProperty("r", out var cr) ? cr.GetSingle() : layer.EmissiveColorRight.X;
+                float g = v.TryGetProperty("g", out var cg) ? cg.GetSingle() : layer.EmissiveColorRight.Y;
+                float b = v.TryGetProperty("b", out var cb) ? cb.GetSingle() : layer.EmissiveColorRight.Z;
+                layer.EmissiveColorRight = new System.Numerics.Vector3(r, g, b);
+            }
+
+            if (root.TryGetProperty("emissiveIntensityRight", out v) && v.ValueKind == JsonValueKind.Number)
+                layer.EmissiveIntensityRight = v.GetSingle();
 
             if (root.TryGetProperty("emissiveColor", out v))
             {

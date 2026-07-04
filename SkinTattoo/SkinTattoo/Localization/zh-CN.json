@@ -296,6 +296,8 @@
     "range": "范围",
     "offset": "偏移",
     "intensity": "强度",
+    "eye_split": "双眼独立",
+    "right_intensity": "右眼强度",
     "anim_mode": "动画",
     "speed": "速度",
     "amplitude": "幅度",
@@ -479,6 +481,9 @@
     "normal": "法线",
     "tooltip": "图层画到哪张游戏贴图上。\n漫反射 — 颜色，默认\n遮罩 — 材质遮罩，高光/粗糙度\n法线 — 法线贴图，凹凸细节",
     "auto_normal_detected": "检测到这像法线贴图，目标已自动设为法线。"
+  },
+  "eye_split": {
+    "tip": "上方颜色作用于左眼，此处颜色作用于右眼 - 预览与导出 mod 均双眼独立实时生效"
   },
   "emissive_normal": {
     "detected": "已检测到 Normal alpha 发光遮罩，发光由该层控制",

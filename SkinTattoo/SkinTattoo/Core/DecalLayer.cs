@@ -124,6 +124,12 @@ public class DecalLayer
     public float AnimDirAngle { get; set; } = 0f;
     // When true, Ripple peaks/valleys interpolate between colorA and colorB (like Gradient in space).
     public bool AnimDualColor { get; set; } = false;
+    // Per-eye split for iris materials: primary EmissiveColor drives the LEFT eye,
+    // these drive the RIGHT eye. Effective on export via iris_ct v2 (CT rows 4/5);
+    // preview approximates both eyes with the left color.
+    public bool EyeSplitEnabled { get; set; } = false;
+    public Vector3 EmissiveColorRight { get; set; } = new(1f, 1f, 1f);
+    public float EmissiveIntensityRight { get; set; } = 1.0f;
     public float Roughness { get; set; } = 0.5f;
     public float Metalness { get; set; } = 0f;
     public float SheenRate { get; set; } = 0.1f;
@@ -185,6 +191,9 @@ public class DecalLayer
             AnimDirMode = AnimDirMode,
             AnimDirAngle = AnimDirAngle,
             AnimDualColor = AnimDualColor,
+            EyeSplitEnabled = EyeSplitEnabled,
+            EmissiveColorRight = EmissiveColorRight,
+            EmissiveIntensityRight = EmissiveIntensityRight,
             Roughness = Roughness,
             Metalness = Metalness,
             SheenRate = SheenRate,
