@@ -16,7 +16,7 @@ namespace SkinTattoo.Services;
 ///
 /// Unlike the skin patch (output-anchor injection where r2..r10 are dead), the iris
 /// injection point sits mid-shader, so the payload's temporaries are allocated ABOVE the
-/// PS's existing dcl_temps count (temp-base shift) and dcl_temps is bumped by 4.
+/// PS's existing dcl_temps count (temp-base shift, dcl_temps +5).
 /// </summary>
 public static class IrisShpkPatcher
 {

@@ -1,6 +1,28 @@
 {
   "versions": [
     {
+      "version": "0.3.2.0",
+      "date": "2026-07-04",
+      "en": [
+        { "text": "New: per-eye glow. Iris layers gain a Per-Eye Split toggle - give each eye its own glow color and intensity, live in preview and in exported mods (uses the game's own heterochromia mechanism)." },
+        { "text": "Fixed: exported mods now keep eye glow animation. Pulse / flicker / gradient effects run inside the shader, no plugin needed after export." },
+        { "text": "Fixed: the glowing rim around the lips when face glow is enabled (known issue since 0.3.0.2) is fully resolved. Any leftover sparkle at very high intensities is normal bloom, not a leak." },
+        { "text": "Fixed: glow processing no longer alters body mod skin detail (gloss / pore variations stored in the normal map)." },
+        { "text": "Fixed: switching between layer groups no longer makes the other group's projected decals disappear." },
+        { "text": "Improved: face and body glow now use the game's native shading path - lip glow bleed and the neck seam introduced by earlier versions are gone." },
+        { "text": "Note: previously exported mods should be re-exported to pick up all fixes." }
+      ],
+      "zh": [
+        { "text": "新功能：双眼独立发光。眼睛图层新增双眼独立开关 - 左右眼可以设置不同的发光颜色和强度，预览和导出的 Mod 都实时生效，复用了游戏自己的异色瞳机制。" },
+        { "text": "修复：导出的 Mod 现在保留眼睛发光动画 - 呼吸、闪烁、渐变等效果在 Mod 内部运行，导出后不再依赖插件。" },
+        { "text": "修复：脸部开启发光后嘴唇一圈描边发光的问题（0.3.0.2 起的已知问题）已彻底解决。极高强度下的少量星点是正常的泛光效果，不是泄漏。" },
+        { "text": "修复：发光处理不再改变身体 Mod 的皮肤细节 - 法线贴图里存储的光泽、毛孔等质感不再被破坏。" },
+        { "text": "修复：切换图层组时另一组的投影贴花不再消失。" },
+        { "text": "改进：脸部和身体发光改走游戏原生着色路径 - 旧版本引入的唇部发光溢出和脖子接缝问题已消除。" },
+        { "text": "提示：之前导出过的 Mod 建议重新导出一次以获得全部修复。" }
+      ]
+    },
+    {
       "version": "0.3.1.0",
       "date": "2026-05-22",
       "en": [

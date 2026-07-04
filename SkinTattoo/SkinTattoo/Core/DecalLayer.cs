@@ -125,8 +125,7 @@ public class DecalLayer
     // When true, Ripple peaks/valleys interpolate between colorA and colorB (like Gradient in space).
     public bool AnimDualColor { get; set; } = false;
     // Per-eye split for iris materials: primary EmissiveColor drives the LEFT eye,
-    // these drive the RIGHT eye. Effective on export via iris_ct v2 (CT rows 4/5);
-    // preview approximates both eyes with the left color.
+    // these drive the RIGHT eye (iris_ct CT rows 4/5, live in preview and export).
     public bool EyeSplitEnabled { get; set; } = false;
     public Vector3 EmissiveColorRight { get; set; } = new(1f, 1f, 1f);
     public float EmissiveIntensityRight { get; set; } = 1.0f;
