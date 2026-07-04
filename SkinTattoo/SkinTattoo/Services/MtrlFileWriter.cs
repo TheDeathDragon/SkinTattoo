@@ -458,7 +458,34 @@ public static class MtrlFileWriter
             // ValEmissive_v11b forces (ValEmissive, ValDecalEmissive, ValVertexColorEmissive)
             // so the node selector lands on PS[19]-family for both the g-buffer prepass and
             // the lighting PS.
-            if (SkinShpkPatcher.Mode == SkinShpkPatcher.PatchMode.ValEmissive_v11b)
+            // Native-family mtrls are exempt since v11d/v11e: Face, Body and BodyJJM
+            // lighting PSes all carry the CT injection natively, and keeping native routing
+            // removes the lip-rim glow and every cross-family boundary seam (the face/body
+            // neck seam was face-native vs body-forced-Emissive). CategorySkinType resolves
+            // to the shpk header default -- which for skin.shpk IS Face (0xF5673524) -- when
+            // the mtrl carries no explicit key; vanilla and most face mods author face mtrls
+            // with zero shader keys, while body mods write ValBody/ValBodyJJM explicitly.
+            // Only mtrls explicitly keyed to some other family still get the forced keys.
+            uint skinTypeValue = SkinShpkPatcher.ValueFace;
+            foreach (var k in shaderKeys)
+            {
+                if (k.Category == SkinShpkPatcher.CategorySkinType)
+                {
+                    skinTypeValue = k.Value;
+                    break;
+                }
+            }
+            bool isNativeFamily = skinTypeValue is SkinShpkPatcher.ValueFace
+                or SkinShpkPatcher.ValueBody or SkinShpkPatcher.ValueBodyJJM;
+
+            // Native-family emissive comes exclusively from the injected CT sampling.
+            // The g_EmissiveColor constant must stay black: the shared pass[4] PSes read
+            // cb0[3].x natively, so a non-zero combined color leaks into vanilla shading
+            // paths (visible as lip-region glow tinted by the combined layer color).
+            if (isNativeFamily)
+                emissiveColor = Vector3.Zero;
+
+            if (SkinShpkPatcher.Mode == SkinShpkPatcher.PatchMode.ValEmissive_v11b && !isNativeFamily)
             {
                 var requiredKeys = new (uint Cat, uint Val)[]
                 {

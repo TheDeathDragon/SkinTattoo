@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Plugin.Services;
@@ -545,6 +546,64 @@ public class PreviewService : IDisposable
         return false;
     }
 
+    // Ambient projection mesh for the composite pipeline. currentMesh follows the
+    // UI-selected group and is mutated by async UI loads at any moment, so composites
+    // for OTHER groups (full preview walks every group; inplace jobs carry their own
+    // group) must not read it -- a projector layer rasterized against a foreign mesh
+    // paints at foreign UVs, typically outside the texture entirely (0 px painted,
+    // "decal disappears when switching groups"). Compose scopes set this per group;
+    // it flows into every nested composite call on the same logical thread.
+    private readonly AsyncLocal<MeshData?> compositionMesh = new();
+
+    // Extracted-mesh cache so compose passes that walk multiple projector groups
+    // don't re-extract mdls each cycle. Keyed by the group's mesh source paths.
+    private readonly ConcurrentDictionary<TargetGroup, (string Key, MeshData Mesh)> projectionMeshCache = new();
+
+    private static string BuildMeshCacheKey(TargetGroup group)
+    {
+        var sb = new StringBuilder();
+        foreach (var s in group.MeshSlots)
+        {
+            sb.Append(s.GamePath).Append('|').Append(s.DiskPath).Append('|');
+            foreach (var mi in s.MatIdx) sb.Append(mi).Append(',');
+            sb.Append(';');
+        }
+        sb.Append('#').Append(group.MeshGamePath).Append('#').Append(group.MeshDiskPath);
+        foreach (var p in group.AllMeshPaths) sb.Append('#').Append(p);
+        return sb.ToString();
+    }
+
+    /// <summary>Resolve this group's mesh for projector rasterization without touching
+    /// currentMesh. Cached per group; returns null when the group has no mesh sources
+    /// or extraction fails.</summary>
+    private MeshData? GetProjectionMeshForGroup(TargetGroup group)
+    {
+        var key = BuildMeshCacheKey(group);
+        if (projectionMeshCache.TryGetValue(group, out var cached) && cached.Key == key)
+            return cached.Mesh;
+
+        MeshData? mesh = null;
+        try
+        {
+            if (group.MeshSlots.Count > 0)
+                mesh = meshExtractor.ExtractAndMergeSlots(group.MeshSlots);
+            else if (!string.IsNullOrEmpty(group.MeshGamePath))
+                mesh = meshExtractor.ExtractMesh(group.MeshGamePath!,
+                    group.TargetMatIdx.Length > 0 ? group.TargetMatIdx : null,
+                    group.MeshDiskPath);
+            else if (group.AllMeshPaths.Count > 0)
+                mesh = meshExtractor.ExtractAndMerge(group.AllMeshPaths);
+        }
+        catch (Exception ex)
+        {
+            DebugServer.AppendLog($"[ProjectionMesh] extract failed for {group.Name}: {ex.Message}");
+        }
+
+        if (mesh != null)
+            projectionMeshCache[group] = (key, mesh);
+        return mesh;
+    }
+
     /// <summary>
     /// Load a list of mdl + matIdx slots and merge them into a single mesh.
     /// This is what SkinMeshResolver-driven flows use  -- body skin with a
@@ -904,6 +963,8 @@ public class PreviewService : IDisposable
             $"skipNoDiffuse={skippedNoDiffuse} skipNoLayers={skippedNoLayers} " +
             $"redirects={redirects.Count}");
 
+        compositionMesh.Value = null;
+
         return redirects;
     }
 
@@ -1077,6 +1138,12 @@ public class PreviewService : IDisposable
 
                     // Convert snapshots to DecalLayers for compositing
                     var layers = job.Layers.ConvertAll(s => s.ToDecalLayer());
+
+                    // Scope the ambient projection mesh to this job's group (see ProcessGroup).
+                    bool jobNeedsMesh = false;
+                    foreach (var l in layers)
+                        if (l.UseProjector) { jobNeedsMesh = true; break; }
+                    compositionMesh.Value = jobNeedsMesh ? GetProjectionMeshForGroup(job.Group) : null;
 
                     // Diffuse composite
                     var baseTex = LoadBaseTexture(job.Group);
@@ -1979,6 +2046,12 @@ public class PreviewService : IDisposable
         if (visibleLayers.Count == 0)
             return redirects;
 
+        // Scope the ambient projection mesh to this group (see ProcessGroup).
+        bool exportNeedsMesh = visibleLayers.Any(l => l.UseProjector);
+        compositionMesh.Value = exportNeedsMesh ? GetProjectionMeshForGroup(group) : null;
+        if (exportNeedsMesh && compositionMesh.Value == null)
+            DebugServer.AppendLog($"[Export] {group.Name}: projection mesh unavailable, projector layers will be skipped");
+
         var baseTex = LoadBaseTexture(group);
         int w = baseTex.Width, h = baseTex.Height;
 
@@ -2355,19 +2428,13 @@ public class PreviewService : IDisposable
         if (sess.State != GroupSession.SessionState.Initializing)
             sess.TransitionTo(GroupSession.SessionState.Initializing, "ProcessGroup-enter");
 
-        // Auto-load mesh when projector layers exist and currentMesh is missing
-        // (e.g., after plugin hot-reload). Without this the projector branch in
-        // CpuUvComposite silently skips the layer because meshSnapshot is null
-        // and the layer's paint never reaches the in-game texture.
+        // Scope the ambient projection mesh to THIS group for every composite below.
         bool needsMesh = false;
         foreach (var l in group.Layers)
             if (l.UseProjector) { needsMesh = true; break; }
-        if (needsMesh && currentMesh == null)
-        {
-            DebugServer.AppendLog($"[ProcessGroup] {group.Name}: projector layer present but mesh null, auto-loading");
-            try { LoadMeshForGroup(group); }
-            catch (Exception ex) { DebugServer.AppendLog($"[ProcessGroup] auto-load mesh failed: {ex.Message}"); }
-        }
+        compositionMesh.Value = needsMesh ? GetProjectionMeshForGroup(group) : null;
+        if (needsMesh && compositionMesh.Value == null)
+            DebugServer.AppendLog($"[ProcessGroup] {group.Name}: projection mesh unavailable, projector layers will be skipped");
 
         var baseTex = LoadBaseTexture(group);
         int w = baseTex.Width, h = baseTex.Height;
@@ -2775,7 +2842,7 @@ public class PreviewService : IDisposable
         // (where the ramp is authored to emissive=0). Decal-covered pixels get alpha reduced
         // toward 0 so UV.y lands near row 0.5 (where the ramp peaks at full emissive).
         // Multiple overlapping decals take min alpha so they accumulate emissive strength.
-        var meshSnapshotAlpha = currentMesh;
+        var meshSnapshotAlpha = compositionMesh.Value ?? currentMesh;
         // Pre-scan: allocate paintMask up front if any qualifying projector layer
         // requests padding. Lazy in-loop allocation would skip UV-quad layers that
         // run before the first projector layer, leaving their painted texels at
@@ -3009,9 +3076,22 @@ public class PreviewService : IDisposable
             for (int i = 3; i < needLen; i += 4)
                 output[i] = 0;
         }
+        else if (alphaMode == NormAlphaMode.RowIndex)
+        {
+            // Vanilla skin-type alpha is flat 0/255 plateaus, but the anti-aliased
+            // border between them sweeps every intermediate value -- the CT row
+            // lookup reads that sweep as row indices, so any allocated emissive row
+            // it crosses draws a glowing contour (the face lip-rim glow: lips are a
+            // 255 island in a 0 field). Snap to the nearest plateau: both 0 and 255
+            // land on reserved no-emissive rows, and cb7 skin-tone slot lookups
+            // still see valid plateau values (see the preserve rationale above).
+            for (int i = 3; i < needLen; i += 4)
+                output[i] = output[i] >= 128 ? (byte)255 : (byte)0;
+        }
 
         bool anyPainted = false;
-        var meshSnapshotNorm = currentMesh;
+        long rowIndexWrites = 0;
+        var meshSnapshotNorm = compositionMesh.Value ?? currentMesh;
         // Projector seam dilation: collect painted alpha into a paintMask so we
         // can extend the painted edge into mask=0 (UV-seam side) and avoid GPU
         // bilinear-sampling-induced fringes at UV island boundaries.
@@ -3108,6 +3188,7 @@ public class PreviewService : IDisposable
                     // Write row-index into alpha only; leave G untouched so the base
                     // normal map's gloss/tangent data survives for the lighting pass.
                     output[oIdx + 3] = rowByteLocal;
+                    System.Threading.Interlocked.Increment(ref rowIndexWrites);
                     if (paintMaskNorm != null) paintMaskNorm[py * w + px] = 2;
                 }
                 else if (paintMaskNorm != null)
@@ -3162,6 +3243,9 @@ public class PreviewService : IDisposable
                 dilateRadiusNorm, DilateChannels.A);
         }
 
+        if (alphaMode == NormAlphaMode.RowIndex)
+            DebugServer.AppendLog($"[CompositeNorm] RowIndex {w}x{h}: {rowIndexWrites} px painted");
+
         return anyPainted ? output : null;
     }
 
@@ -3174,7 +3258,7 @@ public class PreviewService : IDisposable
             output[i] = 0;
 
         bool any = false;
-        var meshSnapshotIris = currentMesh;
+        var meshSnapshotIris = compositionMesh.Value ?? currentMesh;
         // Pre-scan: see CompositeNorm for rationale on up-front allocation.
         int dilateRadiusIris = 0;
         foreach (var probeLayer in layers)
@@ -3338,7 +3422,7 @@ public class PreviewService : IDisposable
             Buffer.BlockCopy(cachedBytes, 0, output, 0, needLen);
         }
         bool anyWritten = false;
-        var meshSnapshotIdx = currentMesh;
+        var meshSnapshotIdx = compositionMesh.Value ?? currentMesh;
         // Pre-scan: see CompositeNorm for rationale on up-front allocation.
         int dilateRadiusIdx = 0;
         foreach (var probeLayer in allocatedLayers)
@@ -3944,7 +4028,7 @@ public class PreviewService : IDisposable
 
         // Collect applicable layers + precompute their bboxes once.
         var applicable = new List<(DecalLayer Layer, DirtyRect Rect)>();
-        var meshSnapshot = currentMesh;
+        var meshSnapshot = compositionMesh.Value ?? currentMesh;
         foreach (var layer in layers)
         {
             if (!layer.IsVisible || string.IsNullOrEmpty(layer.ImagePath)) continue;

@@ -24,10 +24,20 @@ public static class SkinShpkPatcher
     // set them (typically ValBody), which routes through PS[8]-family.
     public const uint CategorySkinType = 0x380CAED0;
     public const uint ValueEmissive = 0x72E697CD;
+    public const uint ValueFace = 0xF5673524;
+    public const uint ValueBody = 0x2BDB45F1;
+    public const uint ValueBodyJJM = 0x57FF3B64;
     public const uint CategoryDecalMode = 0xD2777173;
     public const uint ValueDecalEmissive = 0x584265DD;
     public const uint CategoryVertexColorMode = 0xF52CCF05;
     public const uint ValueVertexColorEmissive = 0xA7D2FF60;
+
+    // Pass id of the deferred lighting pass shared by every CategorySkinType family
+    // (slot varies per node, id doesn't). Used to derive per-family PS index sets
+    // from the node table instead of hardcoding them.
+    private const uint LightingPassId = 0x955C0B73;
+
+    private const uint CrcSamplerNormal = 0x0C5EC1F1;
 
     /// <summary>
     /// Which PS family to inject ColorTable emissive into. v11b / v13 expose a visible
@@ -58,7 +68,7 @@ public static class SkinShpkPatcher
     // automatically and the next preview re-patches from vanilla.
     public static string SchemaVersion => Mode switch
     {
-        PatchMode.ValEmissive_v11b => "v11c",
+        PatchMode.ValEmissive_v11b => "v11e",
         PatchMode.ValBody_v13      => "v13",
         _ => "unknown",
     };
@@ -136,6 +146,33 @@ public static class SkinShpkPatcher
                     else gbSkipped++;
                 }
                 Log($"Gbuffer PS UV-rewrite: {gbSuccess}/{EmissiveGbufferPsIndices.Length} (skipped {gbSkipped})");
+
+                // Sanity: the hardcoded Emissive index list must match what the node table
+                // says. A future game patch that reorders shaders shows up here instead of
+                // silently mispatching.
+                var derivedEmissive = DeriveLightingPsIndices(shpk, ValueEmissive);
+                if (!derivedEmissive.SetEquals(EmissivePsIndices))
+                    Log($"WARNING: node-derived Emissive lighting PS set ({derivedEmissive.Count}) " +
+                        $"differs from hardcoded list -- shpk layout changed, patch may be wrong");
+
+                // v11d/v11e: inject CT emissive into every Face/Body/BodyJJM lighting PS so
+                // skin mtrls keep their native CategorySkinType routing. Native routing
+                // removes the lip-rim glow and every cross-family boundary seam (face/body
+                // neck seam included) that forced-Emissive routing produced.
+                foreach (var (value, label) in new[]
+                         {
+                             (ValueFace, "Face"), (ValueBody, "Body"), (ValueBodyJJM, "BodyJJM"),
+                         })
+                {
+                    var familyPs = DeriveLightingPsIndices(shpk, value);
+                    int famSuccess = 0, famSkipped = 0;
+                    foreach (int psIdx in familyPs)
+                    {
+                        if (PatchSingleNativePs(shpk, psIdx, strOff, strSz)) famSuccess++;
+                        else famSkipped++;
+                    }
+                    Log($"{label}-family CT injection: {famSuccess}/{familyPs.Count} (skipped {famSkipped})");
+                }
             }
 
             var result = RebuildShpk(shpk);
@@ -603,6 +640,300 @@ public static class SkinShpkPatcher
         BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(4),
             oldCount + (uint)(ValBodyEmissiveInjection.Length / 4));
         return result;
+    }
+
+    /// <summary>Collect the deferred-lighting PS indices of one CategorySkinType family
+    /// from the node table. Pass matching is by pass id (slot varies per node).</summary>
+    private static SortedSet<int> DeriveLightingPsIndices(ShpkFile shpk, uint skinTypeValue)
+    {
+        var result = new SortedSet<int>();
+        int keyIdx = shpk.MatKeys.FindIndex(k => k.Kid == CategorySkinType);
+        if (keyIdx < 0) return result;
+        foreach (var n in shpk.Nodes)
+        {
+            if (keyIdx >= n.MatKeys.Length || n.MatKeys[keyIdx] != skinTypeValue) continue;
+            foreach (var p in n.Passes)
+                if (p.Id == LightingPassId)
+                    result.Add((int)p.Ps);
+        }
+        return result;
+    }
+
+    /// <summary>Scan the SHEX declaration region for the highest declared sampler slot,
+    /// highest texture-ish slot (typed + raw + structured -- pass-bound g-buffer inputs
+    /// live here without appearing in the shpk resource table), and dcl_temps count.</summary>
+    private static (int MaxSampler, int MaxTexture, int Temps) ScanShexDecls(byte[] shexData)
+    {
+        int maxS = -1, maxT = -1, temps = 0;
+        int pos = 8;
+        while (pos + 4 <= shexData.Length)
+        {
+            uint tok = BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(pos));
+            int opcode = (int)(tok & 0x7FF);
+            if (opcode == 0x23)
+            {
+                // customdata (e.g. immediate constant buffer): length is token[1]
+                int cdLen = (int)BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(pos + 4));
+                if (cdLen <= 0) break;
+                pos += cdLen * 4;
+                continue;
+            }
+            int length = (int)((tok >> 24) & 0x7F);
+            if (length == 0) length = 1;
+            if (pos + length * 4 > shexData.Length) break;
+
+            if (opcode == 0x68)
+            {
+                temps = (int)BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(pos + 4));
+            }
+            else if (opcode == 0x5A)
+            {
+                maxS = Math.Max(maxS, (int)BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(pos + 8)));
+            }
+            else if (opcode == 0x58 || opcode == 0xA1 || opcode == 0xA2)
+            {
+                maxT = Math.Max(maxT, (int)BinaryPrimitives.ReadUInt32LittleEndian(shexData.AsSpan(pos + 8)));
+            }
+            else if (!(opcode >= 0x58 && opcode <= 0x6A) && !(opcode >= 0x9C && opcode <= 0xA5))
+            {
+                break;
+            }
+            pos += length * 4;
+        }
+        return (maxS, maxT, temps);
+    }
+
+    /// <summary>PulsePayload variant for the native-family injection site: the mask scalar
+    /// lives in r0.w (stashed by the injection prologue; r0.z holds final lit color there),
+    /// and the CT texture/sampler slots are per-PS instead of the fixed t10/s5.</summary>
+    private static byte[] BuildNativePulsePayload(uint ctTex, uint ctSamp)
+    {
+        var payload = (byte[])PulsePayload.Clone();
+
+        // Instruction 2 (mad r9.y, r0.z, ...) starts at byte 20; src0 operand tokens at +12.
+        uint src0 = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(32));
+        uint src0Reg = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(36));
+        if (src0 != 0x0010002A || src0Reg != 0)
+        {
+            Log("NativePulsePayload: unexpected mask operand layout");
+            return payload;
+        }
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(32), 0x0010003A); // r0.z -> r0.w
+
+        // Rewrite every CT sample operand pair (texture t10 / sampler s5) to the chosen slots.
+        for (int off = 0; off + 8 <= payload.Length; off += 4)
+        {
+            uint a = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(off));
+            uint b = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(off + 4));
+            if (a == 0x00107E46 && b == 10)
+                BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(off + 4), ctTex);
+            else if (a == 0x00106000 && b == 5)
+                BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(off + 4), ctSamp);
+        }
+        return payload;
+    }
+
+    /// <summary>Build the native-family (Face/Body/BodyJJM) injection block placed before
+    /// the output anchor. The normal fetch is snapped to the texel center so bilinear
+    /// filtering never blends across the 0/255 skin-type plateaus -- unsnapped sampling
+    /// interpolates the boundary and sweeps every CT row, drawing a 1-sample-wide glow
+    /// contour along mask edges (the residual thin lip outline).
+    ///   resinfo r9, l(0), t[norm]              ; r9.xy = texture dims
+    ///   mul    r8.xy, v2.xyxx, r9.xyxx         ; texel coords
+    ///   round_ni r8.xy                         ; floor
+    ///   add    r8.xy, r8.xyxx, l(0.5, 0.5)     ; texel center
+    ///   div    r8.xy, r8.xyxx, r9.xyxx         ; back to UV
+    ///   sample r1, r8.xyxx, t[norm], s[norm]   ; normal map, alpha = CT row key
+    ///   mov    r0.w, r1.w                      ; stash mask for the anim payload (r0.w is
+    ///                                          ; dead in the tail: o0.w was written earlier)
+    ///   mad    r1.y, r1.w, 0.9375, 0.015625    ; CT row V
+    ///   mov    r1.x, 0.3125                    ; CT col 2 = emissive RGB
+    ///   sample r1, r1.xyxx, t[ct], s[ct]       ; per-layer emissive color
+    ///   [anim payload]                         ; time/CT-driven modulation of r1
+    ///   add    r0.xyz, r0.xyzx, r1.xyzx        ; accumulate atop tone-mapped output
+    /// </summary>
+    private static byte[] BuildNativeEmissiveInjection(
+        uint normTex, uint normSamp, uint ctTex, uint ctSamp, bool withAnim)
+    {
+        var head = ToLeBytes(
+            // resinfo r9.xyzw, l(0), t[normTex]
+            0x0700003D,
+            0x001000F2, 0x00000009,
+            0x00004001, 0x00000000,
+            0x00107E46, normTex,
+            // mul r8.xy, v2.xyxx, r9.xyxx
+            0x07000038, 0x00100032, 0x00000008, 0x00101046, 0x00000002, 0x00100046, 0x00000009,
+            // round_ni r8.xy, r8.xyxx
+            0x05000041, 0x00100032, 0x00000008, 0x00100046, 0x00000008,
+            // add r8.xy, r8.xyxx, l(0.5, 0.5, 0, 0)
+            0x0A000000, 0x00100032, 0x00000008, 0x00100046, 0x00000008,
+            0x00004002, 0x3F000000, 0x3F000000, 0x00000000, 0x00000000,
+            // div r8.xy, r8.xyxx, r9.xyxx
+            0x0700000E, 0x00100032, 0x00000008, 0x00100046, 0x00000008, 0x00100046, 0x00000009,
+            // sample r1.xyzw, r8.xyxx, t[normTex], s[normSamp]
+            0x8B000045, 0x800000C2, 0x00155543,
+            0x001000F2, 0x00000001,
+            0x00100046, 0x00000008,
+            0x00107E46, normTex,
+            0x00106000, normSamp,
+            // mov r0.w, r1.w
+            0x05000036, 0x00100082, 0x00000000, 0x0010003A, 0x00000001,
+            // mad r1.y, r1.w, l(0.9375), l(0.015625)
+            0x09000032,
+            0x00100022, 0x00000001,
+            0x0010003A, 0x00000001,
+            0x00004001, 0x3F700000,
+            0x00004001, 0x3C800000,
+            // mov r1.x, l(0.3125)
+            0x05000036, 0x00100012, 0x00000001, 0x00004001, 0x3EA00000,
+            // sample r1.xyzw, r1.xyxx, t[ctTex], s[ctSamp]
+            0x8B000045, 0x800000C2, 0x00155543,
+            0x001000F2, 0x00000001,
+            0x00100046, 0x00000001,
+            0x00107E46, ctTex,
+            0x00106000, ctSamp);
+
+        var tail = ToLeBytes(
+            // add r0.xyz, r0.xyzx, r1.xyzx
+            0x07000000,
+            0x00100072, 0x00000000,
+            0x00100246, 0x00000000,
+            0x00100246, 0x00000001);
+
+        var payload = withAnim ? BuildNativePulsePayload(ctTex, ctSamp) : Array.Empty<byte>();
+
+        var block = new byte[head.Length + payload.Length + tail.Length];
+        head.CopyTo(block, 0);
+        payload.CopyTo(block, head.Length);
+        tail.CopyTo(block, head.Length + payload.Length);
+        return block;
+    }
+
+    /// <summary>Inject CT emissive into one native-family (Face/Body/BodyJJM) lighting PS.
+    /// Unlike the fixed v13 block, everything is parameterized per PS: the normal-map slots
+    /// come from the PS's resource table (they vary across shadow/dissolve/aura variants)
+    /// and the CT slots are the first genuinely free ones -- these lighting PSes already
+    /// use t10 and often s5 for engine-bound pass inputs that never appear in the shpk
+    /// resource table.</summary>
+    private static bool PatchSingleNativePs(ShpkFile shpk, int psIndex, int strOff, int strSz)
+    {
+        int targetIdx = shpk.VsCount + psIndex;
+        if (targetIdx < 0 || targetIdx >= shpk.Shaders.Count)
+        {
+            Log($"Native PS[{psIndex}] out of range");
+            return false;
+        }
+
+        var ps = shpk.Shaders[targetIdx];
+        int blobStart = ps.BlobOff;
+        if (blobStart + ps.BlobSz > shpk.BlobSection.Count)
+        {
+            Log($"Native PS[{psIndex}] blob exceeds blob section");
+            return false;
+        }
+
+        var originalDxbc = shpk.BlobSection.GetRange(blobStart, ps.BlobSz).ToArray();
+        if (!IsDxbc(originalDxbc))
+        {
+            Log($"Native PS[{psIndex}] blob is not DXBC");
+            return false;
+        }
+
+        var shexData = ExtractShexData(originalDxbc);
+        if (shexData == null)
+        {
+            Log($"Native PS[{psIndex}] no SHEX/SHDR chunk");
+            return false;
+        }
+
+        int normSamp = -1, normTex = -1;
+        for (int i = 0; i < ps.Resources.Count; i++)
+        {
+            var r = ps.Resources[i];
+            if (r.Id != CrcSamplerNormal) continue;
+            if (i >= ps.CCnt && i < ps.CCnt + ps.SCnt) normSamp = r.Slot;
+            else if (i >= ps.CCnt + ps.SCnt + ps.UavCnt) normTex = r.Slot;
+        }
+        if (normSamp < 0 || normTex < 0)
+        {
+            Log($"Native PS[{psIndex}]: g_SamplerNormal not found in resource table");
+            return false;
+        }
+
+        var (maxS, maxT, temps) = ScanShexDecls(shexData);
+        for (int i = 0; i < ps.Resources.Count; i++)
+        {
+            var r = ps.Resources[i];
+            if (i >= ps.CCnt && i < ps.CCnt + ps.SCnt) maxS = Math.Max(maxS, r.Slot);
+            else if (i >= ps.CCnt + ps.SCnt + ps.UavCnt) maxT = Math.Max(maxT, r.Slot);
+        }
+        int ctSamp = maxS + 1;
+        int ctTex = maxT + 1;
+        if (ctSamp > 15 || ctTex > 127)
+        {
+            Log($"Native PS[{psIndex}]: no free slot (s{ctSamp}/t{ctTex})");
+            return false;
+        }
+
+        // Texel-snap prologue uses r8/r9 (10 temps); the anim payload also uses r2..r10 (11).
+        if (temps < 10)
+        {
+            Log($"Native PS[{psIndex}]: dcl_temps={temps} < 10, skipping");
+            return false;
+        }
+        bool withAnim = temps >= 11;
+        if (!withAnim)
+            Log($"Native PS[{psIndex}]: dcl_temps={temps} < 11, static emissive only");
+
+        var withDecls = PatchShexAddDeclarations(shexData, ctSamp, ctTex);
+        if (withDecls == null) return false;
+
+        int anchor = FindPattern(withDecls, ValBodyOutputAnchor);
+        if (anchor < 0)
+        {
+            Log($"Native PS[{psIndex}]: output anchor (mul o0+ret) not found");
+            return false;
+        }
+
+        var injection = BuildNativeEmissiveInjection(
+            (uint)normTex, (uint)normSamp, (uint)ctTex, (uint)ctSamp, withAnim);
+
+        var finalShex = new byte[withDecls.Length + injection.Length];
+        withDecls.AsSpan(0, anchor).CopyTo(finalShex);
+        injection.CopyTo(finalShex.AsSpan(anchor));
+        withDecls.AsSpan(anchor).CopyTo(finalShex.AsSpan(anchor + injection.Length));
+
+        uint oldCount = BinaryPrimitives.ReadUInt32LittleEndian(finalShex.AsSpan(4));
+        BinaryPrimitives.WriteUInt32LittleEndian(finalShex.AsSpan(4),
+            oldCount + (uint)(injection.Length / 4));
+
+        var patchedDxbc = RebuildDxbc(originalDxbc, finalShex);
+
+        int oldSize = ps.BlobSz;
+        int delta = patchedDxbc.Length - oldSize;
+        shpk.BlobSection.RemoveRange(blobStart, oldSize);
+        shpk.BlobSection.InsertRange(blobStart, patchedDxbc);
+        ps.BlobSz = patchedDxbc.Length;
+        foreach (var s in shpk.Shaders)
+            if (s.BlobOff > blobStart)
+                s.BlobOff += delta;
+
+        var samplerRes = new ShpkResource
+        {
+            Id = CrcSamplerTable, StrOff = strOff, StrSz = (ushort)strSz,
+            IsTex = 0, Slot = (ushort)ctSamp, Size = 5,
+        };
+        var textureRes = new ShpkResource
+        {
+            Id = CrcSamplerTable, StrOff = strOff, StrSz = (ushort)strSz,
+            IsTex = 1, Slot = (ushort)ctTex, Size = 6,
+        };
+        ps.Resources.Insert(ps.CCnt + ps.SCnt, samplerRes);
+        ps.Resources.Add(textureRes);
+        ps.SCnt++;
+        ps.TCnt++;
+
+        return true;
     }
 
     // Invariant tail of `mul rX.xyz, cb0[3].xyzx, cb0[3].xyzx` (last 6 of 9 tokens).
