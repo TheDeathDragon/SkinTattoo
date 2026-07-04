@@ -153,7 +153,6 @@ public sealed class Plugin : IDalamudPlugin
         {
             lastAutoSave = now;
             project.SaveToConfig(config);
-            SaveWindowStates();
         }
     }
 
@@ -271,8 +270,6 @@ public sealed class Plugin : IDalamudPlugin
         });
     }
 
-    private void SaveWindowStates() => config.Save();
-
     private void OpenConfigUi() => mainWindow.OpenSettings();
 
     private void OpenMainUi() => mainWindow.IsOpen = true;
@@ -295,7 +292,6 @@ public sealed class Plugin : IDalamudPlugin
     public void Dispose()
     {
         project.SaveToConfig(config);
-        SaveWindowStates();
 
         CommandManager.RemoveHandler(CommandName);
 

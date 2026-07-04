@@ -529,6 +529,10 @@
       "success_penumbra": "Installed to Penumbra",
       "failed": "Export Failed"
     },
+    "config_save": {
+      "title": "Settings Save Failed",
+      "content": "The write was denied, please check folder permissions. The plugin will retry automatically"
+    },
     "base_tex_exported": "Base texture saved to {0}",
     "wireframe_exported": "UV wireframe saved to {0}",
     "export_success": "Export Successful",

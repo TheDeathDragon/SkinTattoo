@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using Dalamud.Configuration;
+using Dalamud.Interface.ImGuiNotification;
 using Dalamud.Plugin;
+using SkinTattoo.Services.Localization;
 
 namespace SkinTattoo;
 
@@ -178,6 +180,15 @@ public class Configuration : IPluginConfiguration
     [NonSerialized]
     private IDalamudPluginInterface? pluginInterface;
 
+    [NonSerialized]
+    private int saveFailureStreak;
+
+    [NonSerialized]
+    private bool saveFailureNotified;
+
+    [NonSerialized]
+    private DateTime lastSaveFailureLog;
+
     public void Initialize(IDalamudPluginInterface pi)
     {
         pluginInterface = pi;
@@ -185,7 +196,45 @@ public class Configuration : IPluginConfiguration
         if (GameSwapIntervalMs < 33) GameSwapIntervalMs = 33;
         if (GameSwapIntervalMs > 500) GameSwapIntervalMs = 500;
     }
-    public void Save() => pluginInterface?.SavePluginConfig(this);
+
+    public void Save()
+    {
+        try
+        {
+            pluginInterface?.SavePluginConfig(this);
+            if (saveFailureStreak > 0)
+                Plugin.Log?.Information("Config save recovered after {Count} failure(s)", saveFailureStreak);
+            saveFailureStreak = 0;
+            saveFailureNotified = false;
+        }
+        catch (Exception ex)
+        {
+            saveFailureStreak++;
+            var now = DateTime.UtcNow;
+            if (saveFailureStreak == 1 || (now - lastSaveFailureLog).TotalSeconds >= 60)
+            {
+                lastSaveFailureLog = now;
+                Plugin.Log?.Warning(ex, "Config save failed, streak={Streak}", saveFailureStreak);
+            }
+
+            if (saveFailureStreak >= 3 && !saveFailureNotified)
+            {
+                saveFailureNotified = true;
+                try
+                {
+                    Plugin.NotificationManager?.AddNotification(new Notification
+                    {
+                        Title = Strings.T("notify.config_save.title"),
+                        Content = Strings.T("notify.config_save.content"),
+                        Type = NotificationType.Warning,
+                    });
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
 
     public string GetAsmDir() => pluginInterface?.AssemblyLocation?.DirectoryName ?? string.Empty;
 }
